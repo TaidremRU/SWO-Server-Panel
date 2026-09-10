@@ -803,7 +803,7 @@ def world_map(cfg):
     terr_by_map = collections.Counter(t["map"] for t in terr)
     maps = sorted(set(list(gs) + list(avatars_by_map) + list(terr_by_map)), key=lambda x: (x is None, x))
     rows = [{"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
-             "territories": terr_by_map.get(mp, 0)} for mp in maps]
+             "territories": terr_by_map.get(mp, 0), "space": mp == 0} for mp in maps]
     rows.sort(key=lambda r: -(r["online"] * 100 + r["territories"]))
     terr.sort(key=lambda t: ((t["map"] if t["map"] is not None else 0), (t["owner"] or "").lower()))
     try:
@@ -814,6 +814,7 @@ def world_map(cfg):
     avatars = sum(1 for f in uf if re.match(r"unit\d+\.json$", f))
     return {"ok": True, "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "maps": rows, "territories": terr[:3000],
+            "space_note": "карта 0 = космос: игра считает таких игроков онлайн, фактически могут быть оффлайн",
             "totals": {"avatars": avatars, "bots": bots, "territories": len(terr),
                        "maps": len(rows)}}
 
@@ -1802,6 +1803,7 @@ def snapshot(cfg, recent_limit=40):
             "with_profile": len(details),
             "online_analytics": len(online_ids),
             "online_game_state": sum(x["count"] for x in by_map),
+            "online_space": next((x["count"] for x in by_map if x["map"] == 0), 0),
         },
         "by_map": by_map,
         "users": users,

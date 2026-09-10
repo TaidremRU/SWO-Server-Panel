@@ -1249,6 +1249,7 @@ var T = {
   err_auth:"Сессия истекла — войдите заново", err_net:"Нет связи с сервером",
   pl_head:"Игроки локального сервера", pl_world:"Мир", pl_registered:"зарегистрировано",
   pl_online:"онлайн (по аналитике)", pl_online_gs:"онлайн (game_state)", pl_bymap:"По картам",
+  pl_space_note:"карта 0 = космос: игра считает игроков онлайн, фактически могут быть оффлайн",
   pl_only_online:"Только онлайн", pl_search:"поиск по имени",
   pl_col_status:"Статус", pl_col_map:"Карта", pl_col_pos:"Коорд.",
   pl_col_enter:"Вход", pl_col_exit:"Выход", pl_col_sess:"Сессия",
@@ -1338,6 +1339,7 @@ var T = {
   err_auth:"Session expired — log in again", err_net:"No connection to server",
   pl_head:"Local server players", pl_world:"World", pl_registered:"registered",
   pl_online:"online (analytics)", pl_online_gs:"online (game_state)", pl_bymap:"By map",
+  pl_space_note:"map 0 = space: the game counts these players online, they may actually be offline",
   pl_only_online:"Online only", pl_search:"search by name",
   pl_col_status:"Status", pl_col_map:"Map", pl_col_pos:"Coords",
   pl_col_enter:"Enter", pl_col_exit:"Exit", pl_col_sess:"Session",
@@ -1718,7 +1720,7 @@ function renderPlayers(){
     ["", j.world||"?"],
     [t("pl_registered"), String(tt.registered||0)],
     [t("pl_online"), pill(true,String(tt.online_analytics||0))],
-    [t("pl_online_gs"), String(tt.online_game_state||0)]
+    [t("pl_online_gs"), el("span",{title:tt.online_space? t("pl_space_note"):null},[String(tt.online_game_state||0)+(tt.online_space? "  (космос "+tt.online_space+" ⚠)":"")])]
   ]));
   var bm=(j.by_map||[]);
   sum.appendChild(card(t("pl_bymap"), bm.length? bm.map(function(m){ return [t("pl_map")+" "+m.map, String(m.count)]; })
@@ -2231,7 +2233,8 @@ function drawStats(j){
     wg.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
       el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
       ltable([t("pl_map"),t("pl_online"),t("st_avatars"),t("st_terr")], (w.maps||[]).slice(0,40),
-        function(r){ return [String(r.map), String(r.online), String(r.avatars), String(r.territories)]; })]));
+        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), String(r.online), String(r.avatars), String(r.territories)]; })]));
+    if(w.space_note) wg.lastChild.appendChild(el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]));
     var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
     var tt=el("div",{id:"terrtab"},[]);
     function drawTerr(){

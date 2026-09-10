@@ -143,7 +143,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Онлайн (7 дней)** — реконструкция числа онлайн по времени из `enter`/`exit`, пик за 7 д, сейчас.
 - **Рост** — регистрации и DAU по дням, retention D1 / D7.
 - **Топы** — по уровню, по часам; **кланы** (`clans.json` по рейтингу); **бан-лист**; **стафф** + история ролей; **помесячный топ** (`reward_order.txt`); распределения по уровням и странам.
-- **Мир · карты** — онлайн / аватары / территории по картам; **территории** — все `userTerritories` 286 игроков с владельцами (фильтр по карте). Существа/животные — в бинарных `map*.dt`, в JSON недоступны.
+- **Мир · карты** — онлайн / аватары / территории по картам (**карта 0 = космос**: игра считает таких игроков онлайн, фактически могут быть оффлайн); **территории** — все `userTerritories` 286 игроков с владельцами (фильтр по карте). Существа/животные — в бинарных `map*.dt`, в JSON недоступны.
 - **Здоровье сервера** — последний `Server ready` (`world_performance.txt`: `startupMs`, кластеры, `managedMb`) + медленные фазы старта; **лаг-события** (медленные тики из `time_shedule*.txt` — всего, по дням, топ функций); ошибки коннекта (`error_game*.txt`). `memory_log.txt` игрой не заполняется.
 
 ### Твинки
@@ -366,7 +366,7 @@ The **"Stats"** tab — server-wide analytics:
 - **Online (7 days)** — online count reconstructed over time from `enter`/`exit`, 7-day peak, now.
 - **Growth** — registrations and DAU per day, retention D1 / D7.
 - **Tops** — by level, by hours; **clans** (`clans.json` by rating); **ban list**; **staff** + role history; **monthly top** (`reward_order.txt`); level and country distributions.
-- **World · maps** — online / avatars / territories per map; **territories** — every `userTerritories` of the 286 players with owners (map filter). Wildlife lives in the binary `map*.dt` and isn't available as JSON.
+- **World · maps** — online / avatars / territories per map (**map 0 = space**: the game counts these players as online though they may be offline); **territories** — every `userTerritories` of the 286 players with owners (map filter). Wildlife lives in the binary `map*.dt` and isn't available as JSON.
 - **Server health** — last `Server ready` (`world_performance.txt`: `startupMs`, clusters, `managedMb`) + slow startup phases; **lag events** (slow ticks from `time_shedule*.txt` — total, per day, top functions); connection errors (`error_game*.txt`). `memory_log.txt` isn't populated by the game.
 
 ### Twinks
