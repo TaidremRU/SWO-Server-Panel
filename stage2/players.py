@@ -2604,32 +2604,47 @@ def space_units(cfg):
     except OSError:
         pass
 
-    ships, debris = [], 0
+    blocks = _load_blocks(world_dir)
+    ships, meteorites, pods = [], [], []
+    other = 0
     stars = set()
+    xs, ys = [], []
     for u in d["units"]:
         stars.add(u.get("star_id"))
-        if u.get("dead_time"):
-            debris += 1
-            continue
-        uid = u["user_id"] or su_owner.get(u["id"]) or 0
-        ships.append({
-            "id": u["id"], "user_id": uid,
-            "name": names.get(uid) or ("id %s" % uid if uid else "—"),
-            "x": round(u["x"], 1), "y": round(u["y"], 1),
-            "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
-            "speed": u["speed"], "rotate": u["rotate"],
-            "health": u["box_health"], "box_type": u["box_type"],
-            "aboard": len(u["aboard"]), "cargo_items": u.get("inv_items", 0),
-            "moving": (abs(u["vx"]) + abs(u["vy"])) > 0.01,
-            "star_id": u.get("star_id"),
-        })
+        xs.append(u["x"]); ys.append(u["y"])
+        bn = blocks.get(u["box_type"]) or ("#%s" % u["box_type"])
+        base = {"id": u["id"], "x": round(u["x"], 1), "y": round(u["y"], 1),
+                "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
+                "box_type": u["box_type"], "box_name": bn,
+                "cargo_items": u.get("inv_items", 0),
+                "moving": (abs(u["vx"]) + abs(u["vy"])) > 0.01,
+                "star_id": u.get("star_id")}
+        if bn.startswith("rocket"):
+            uid = u["user_id"] or su_owner.get(u["id"]) or 0
+            base.update(user_id=uid, name=names.get(uid) or ("id %s" % uid if uid else "—"),
+                        speed=u["speed"], rotate=u["rotate"], health=u["box_health"],
+                        aboard=len(u["aboard"]))
+            ships.append(base)
+        elif bn == "meteorite":
+            meteorites.append(base)
+        elif bn == "space_item":
+            pods.append(base)
+        else:
+            other += 1
     ships.sort(key=lambda s: (s["name"] == "—", s["name"].lower()))
+    meteorites.sort(key=lambda m: -m["cargo_items"])
     res = {
         "ok": True, "total": d["count"], "star_count": len(stars),
-        "ships": ships, "debris_count": debris,
-        "note": ("снимок из space\\units.dt на момент последнего автосохранения "
-                 "сервера (раз в ~12 ч); координаты космоса ±100k, планеты в файле "
-                 "не хранятся — только по живому протоколу"),
+        "ships": ships,
+        "meteorite_count": len(meteorites), "meteorites": meteorites[:800],
+        "pod_count": len(pods), "pods": pods[:400],
+        "other_count": other,
+        "bounds": {"minx": round(min(xs, default=0)), "maxx": round(max(xs, default=0)),
+                   "miny": round(min(ys, default=0)), "maxy": round(max(ys, default=0))},
+        "note": ("снимок из space\\units.dt на момент автосохранения сервера "
+                 "(≈раз в 12 ч). Это содержимое звёздной системы: корабли-ракеты, "
+                 "метеориты (руда) и космо-предметы с координатами и скоростью. "
+                 "Планеты (SpaceObject) в файле НЕ хранятся — только по протоколу :45879."),
     }
     _SPACEUNITS_CACHE[path] = (mt, res)
     return res

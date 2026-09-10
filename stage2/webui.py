@@ -1365,7 +1365,7 @@ var T = {
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
-  su_title:"Корабли в космосе", su_debris:"обломков", su_vel:"скорость (vx,vy)", su_hp:"HP",
+  su_title:"Звёздная система (снимок)", su_ships:"корабли", su_meteorites:"метеориты", su_pods:"космо-предметы", su_vel:"скорость (vx,vy)", su_hp:"HP",
   su_cargo:"груз", su_moving:"в движении",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
   st_branch:"открывает", st_technote:"названия — что тех открывает в крафте (из craft.json + локализации клиента); ветка/тир — из дерева tech.json",
@@ -1477,7 +1477,7 @@ var T = {
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
-  su_title:"Ships in space", su_debris:"debris", su_vel:"velocity (vx,vy)", su_hp:"HP",
+  su_title:"Star system (snapshot)", su_ships:"ships", su_meteorites:"meteorites", su_pods:"space items", su_vel:"velocity (vx,vy)", su_hp:"HP",
   su_cargo:"cargo", su_moving:"moving",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
   st_branch:"unlocks", st_technote:"names = what the tech unlocks in crafting (from craft.json + client localization); branch/tier from the tech.json tree",
@@ -2673,8 +2673,14 @@ function drawMap(w, sj){
   api("/api/space-units").then(function(su){
     subox.innerHTML="";
     if(!su.ok){ subox.appendChild(el("div",{class:"muted small"},[su.error||"space/units.dt —"])); return; }
+    var bd=su.bounds||{};
     subox.appendChild(el("div",{class:"card wide"},[
-      el("h3",{},["🚀 "+t("su_title")+" · "+su.ships.length+(su.debris_count? " (+"+su.debris_count+" "+t("su_debris")+")":"")]),
+      el("h3",{},["🚀 "+t("su_title")]),
+      el("div",{class:"chart-legend"},[
+        el("span",{},[t("su_ships")+": "+su.ships.length]),
+        el("span",{},["☄ "+t("su_meteorites")+": "+su.meteorite_count]),
+        el("span",{},["📦 "+t("su_pods")+": "+su.pod_count]),
+        el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),
@@ -2683,8 +2689,13 @@ function drawMap(w, sj){
           String(s.health), String(s.cargo_items),
           s.moving? el("span",{class:"pill"},[t("su_moving")]) : el("span",{class:"muted small"},["·"]) ]; }))
         : el("div",{class:"muted small"},["—"]),
+      (su.meteorites||[]).length? el("details",{style:"margin-top:8px"},[
+        el("summary",{class:"small"},["☄ "+t("su_meteorites")+" ("+su.meteorite_count+(su.meteorite_count>su.meteorites.length? ", показаны "+su.meteorites.length:"")+")"]),
+        scT(ltable(["#",t("pd_coords"),t("su_vel"),t("su_cargo")], su.meteorites, function(m){
+          return [ el("span",{class:"mono"},[String(m.id)]), el("span",{class:"mono"},[Math.round(m.x)+", "+Math.round(m.y)]),
+            el("span",{class:"mono small"},[m.moving? (m.vx+", "+m.vy):"—"]), String(m.cargo_items) ]; })) ]) : null,
       el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+su.note])
-    ]));
+    ].filter(Boolean)));
   }).catch(function(){ subox.innerHTML=""; });
 }
 
