@@ -127,6 +127,25 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 Интерфейс двуязычный (ru/en, тумблер в шапке, выбор в `localStorage` браузера), тёмная/светлая тема. Отключить панель целиком — `webui.enabled = false` в `config.json`.
 
+### Чат сервера и события
+
+Вкладка **«Чат»** (суб-вкладки):
+
+- **Чат сервера** — публичный чат `chat_0..3.txt` (все каналы; фильтр по каналу и поиск; автообновление 5 c), ники — ссылки на карточки.
+- **События** — сводная лента `join`/`leave`/`register` (`analytics.txt`), `death` (`dead_user.txt`), `land` (`delete_land*.txt`) + история выдач ролей (`user_role.txt`).
+- **Приваты** — все приватные сообщения сервера (`chat_privat.txt`) под паролем панели + аудит.
+
+### Статы
+
+Вкладка **«Статы»** — сводная аналитика:
+
+- **Экспорт / бэкап** — список игроков в **CSV** (без паролей); **бэкап каталога мира** в zip под паролем панели: `state` (`analytics` + `Data\{users,units,game}` + `Logs`, без бинарных `map*.dt`, ~2 МБ) или `full` (всё). Последние 5 хранятся в `logs\backups\`.
+- **Онлайн (7 дней)** — реконструкция числа онлайн по времени из `enter`/`exit`, пик за 7 д, сейчас.
+- **Рост** — регистрации и DAU по дням, retention D1 / D7.
+- **Топы** — по уровню, по часам; **кланы** (`clans.json` по рейтингу); **бан-лист**; **стафф** + история ролей; **помесячный топ** (`reward_order.txt`); распределения по уровням и странам.
+- **Мир · карты** — онлайн / аватары / территории по картам; **территории** — все `userTerritories` 286 игроков с владельцами (фильтр по карте). Существа/животные — в бинарных `map*.dt`, в JSON недоступны.
+- **Здоровье сервера** — последний `Server ready` (`world_performance.txt`: `startupMs`, кластеры, `managedMb`) + медленные фазы старта; **лаг-события** (медленные тики из `time_shedule*.txt` — всего, по дням, топ функций); ошибки коннекта (`error_game*.txt`). `memory_log.txt` игрой не заполняется.
+
 ### Твинки
 
 Вкладка **«Твинки»** — детект аккаунтов, заходивших с одного IP, из `Logs\log_net_ip.txt` (`ник = IP = InterNetwork = порт`). Открывается после ввода **своего пароля от панели** (IP + связывание аккаунтов — чувствительно; попытка пишется в аудит). Показывает группы: IP → список аккаунтов (ID, ник со ссылкой на карточку, число подключений, первый/последний вход, другие IP этого аккаунта), отсортировано по размеру группы. Порог «мин. аккаунтов на IP» настраивается (по умолчанию 2). `config.json → players.twink_ignore_ips` — какие IP не учитывать (напр. локальный релей `127.0.0.2`, через который на текущей VM идут все клиенты — там реальных IP в логе нет).
@@ -320,6 +339,25 @@ An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webu
 - **Players** — local-server player list and online status (see below).
 
 The interface is bilingual (ru/en, header toggle, choice in the browser `localStorage`), with a dark/light theme. Disable the panel entirely with `webui.enabled = false` in `config.json`.
+
+### Server chat & events
+
+The **"Chat"** tab (sub-tabs):
+
+- **Server chat** — public chat `chat_0..3.txt` (all channels; channel filter + search; auto-refresh 5 s), nicknames link to cards.
+- **Events** — a merged feed of `join`/`leave`/`register` (`analytics.txt`), `death` (`dead_user.txt`), `land` (`delete_land*.txt`) + role-grant history (`user_role.txt`).
+- **DMs** — all server private messages (`chat_privat.txt`) behind the panel password + audit.
+
+### Stats
+
+The **"Stats"** tab — server-wide analytics:
+
+- **Export / backup** — the player list as **CSV** (no passwords); a **world-folder backup** zip behind the panel password: `state` (`analytics` + `Data\{users,units,game}` + `Logs`, without the binary `map*.dt`, ~2 MB) or `full` (everything). The last 5 are kept in `logs\backups\`.
+- **Online (7 days)** — online count reconstructed over time from `enter`/`exit`, 7-day peak, now.
+- **Growth** — registrations and DAU per day, retention D1 / D7.
+- **Tops** — by level, by hours; **clans** (`clans.json` by rating); **ban list**; **staff** + role history; **monthly top** (`reward_order.txt`); level and country distributions.
+- **World · maps** — online / avatars / territories per map; **territories** — every `userTerritories` of the 286 players with owners (map filter). Wildlife lives in the binary `map*.dt` and isn't available as JSON.
+- **Server health** — last `Server ready` (`world_performance.txt`: `startupMs`, clusters, `managedMb`) + slow startup phases; **lag events** (slow ticks from `time_shedule*.txt` — total, per day, top functions); connection errors (`error_game*.txt`). `memory_log.txt` isn't populated by the game.
 
 ### Twinks
 

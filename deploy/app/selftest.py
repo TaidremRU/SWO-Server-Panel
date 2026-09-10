@@ -70,10 +70,29 @@ try:
             assert '"code"' not in json.dumps(_det, ensure_ascii=False), "player_detail: пароль в выдаче!"
             for _fn in ("player_chat", "player_sensitive", "player_code", "load_items",
                         "load_abilities", "load_clans", "load_friends", "server_time",
-                        "item_catalog", "give_stash_items", "take_items", "_is_offline"):
+                        "item_catalog", "give_stash_items", "take_items", "_is_offline",
+                        "player_set_ban", "player_set_role", "player_set_position",
+                        "player_add_tech", "player_set_stat", "player_reset_code",
+                        "server_chat", "server_events", "server_private_chat",
+                        "stats_bundle", "world_map", "server_health", "twink_report",
+                        "players_csv", "make_world_backup"):
                 assert hasattr(players, _fn), "players: нет %s" % _fn
             _cat = players.item_catalog(cfg)
             assert _cat.get("ok") and _cat["items"], "item_catalog пуст"
+            for _bf, _lbl in ((players.server_chat(cfg, 20), "server_chat"),
+                              (players.server_events(cfg, 20), "server_events"),
+                              (players.stats_bundle(cfg), "stats_bundle"),
+                              (players.world_map(cfg), "world_map"),
+                              (players.server_health(cfg), "server_health")):
+                assert _bf.get("ok"), "%s: %s" % (_lbl, _bf.get("error"))
+            _csv, _ = players.players_csv(cfg)
+            assert _csv and b'"Code"' not in _csv and b"code" not in _csv.split(b"\n", 1)[0], \
+                "players_csv: пароль в выдаче"
+            print("server-wide OK: chat=%d events=%d online_now=%s clans=%d health_lag=%d csv=%dB"
+                  % (players.server_chat(cfg)["total"], players.server_events(cfg)["total"],
+                     players.stats_bundle(cfg)["online"]["now"],
+                     players.stats_bundle(cfg)["totals"]["clans"],
+                     players.server_health(cfg)["lag"]["total"], len(_csv)))
             _ch = players.player_chat(cfg, _uid, 5)
             print("player_detail OK: #%s %r sessions=%s techs=%s friends=%s chat=%s items(ref)=%d"
                   % (_uid, _det["name"], _det["sessions"]["total"],
