@@ -548,6 +548,12 @@ def stats_bundle(cfg):
         if ad & wk:
             d7_hit += 1
 
+    # стоимость техов (research-очки; по механике игры 1 очко ≈ 1 час на базовой ставке)
+    tech_cost = {}
+    for it in _read_json(os.path.join(world_dir, "Data", "tech.json")).get("items", []):
+        if "id" in it:
+            tech_cost[it["id"]] = it.get("cost")
+
     # лидерборды / распределения из профилей
     us = []
     for uid, dd in details.items():
@@ -556,28 +562,32 @@ def stats_bundle(cfg):
                    "role": dd.get("role", 0), "banned": bool(dd.get("banned")),
                    "clan": dd.get("clan", 0), "country": dd.get("country") or "?",
                    "tech_count": len(dd.get("techs") or []),
+                   "research_h": round(sum(tech_cost.get(t) or 0 for t in (dd.get("techs") or [])) / 60.0, 1),
                    "research": dd.get("research") or ""})
     top_level = sorted(us, key=lambda x: -x["level"])[:20]
     top_time = sorted(us, key=lambda x: -x["playtime_h"])[:20]
     top_tech_players = sorted(us, key=lambda x: -x["tech_count"])[:20]
+    total_research_h = round(sum(u["research_h"] for u in us), 1)
     banned = [u for u in us if u["banned"]]
     staff = sorted((u for u in us if u["role"] > 0), key=lambda x: -x["role"])
     lvl_hist = collections.Counter(min(x["level"] // 5 * 5, 60) for x in us)
     country_hist = collections.Counter(x["country"] for x in us).most_common(12)
 
-    # топ техов: сколько игроков изучили каждый тех + кто что изучает сейчас
-    tech_cost = {}
-    for it in _read_json(os.path.join(world_dir, "Data", "tech.json")).get("items", []):
-        if "id" in it:
-            tech_cost[it["id"]] = it.get("cost")
+    # популярность техов: сколько игроков изучили каждый + кто что изучает сейчас
     tcnt, rcnt = collections.Counter(), collections.Counter()
     for dd in details.values():
         for tch in dd.get("techs", []):
             tcnt[tch] += 1
         if dd.get("research"):
             rcnt[dd["research"]] += 1
-    top_tech = [{"tech": tch, "n": n, "cost": tech_cost.get(tch)} for tch, n in tcnt.most_common(30)]
-    researching = [{"tech": tch, "n": n, "cost": tech_cost.get(tch)} for tch, n in rcnt.most_common(20)]
+    def _ch(tch):
+        c = tech_cost.get(tch)
+        return round(c / 60.0, 1) if c else None
+
+    top_tech = [{"tech": tch, "n": n, "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
+                for tch, n in tcnt.most_common(30)]
+    researching = [{"tech": tch, "n": n, "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
+                   for tch, n in rcnt.most_common(20)]
 
     # стафф-история
     role_hist = []
@@ -627,6 +637,7 @@ def stats_bundle(cfg):
         "country_hist": [{"country": c, "n": n} for c, n in country_hist],
         "top_tech": top_tech,
         "researching": researching,
+        "total_research_h": total_research_h,
         "clan_board": clan_board[:50],
         "months": months[-6:][::-1],
         "totals": {"registered": len(names), "with_profile": len(details),
@@ -1082,6 +1093,8 @@ def player_detail(cfg, uid):
             "remaining_min": _rem_min(raw.get("timeResearchTech")),
             "done_count": len(raw.get("techList") or []),
             "tech_list": raw.get("techList") or [],
+            "invested_h": round(sum(_load_ref(world_dir, "tech.json", "id", "cost").get(t) or 0
+                                    for t in (raw.get("techList") or [])) / 60.0, 1),
             "booster": raw.get("techBooster"),
         },
         "missions": {"current": raw.get("currentMission"), "month": raw.get("missionMonth")},

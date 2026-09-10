@@ -1286,7 +1286,8 @@ var T = {
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
-  st_toptechp:"Топ по числу техов", st_techs:"техов",
+  st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
+  st_resh_note:"= сумма стоимости изученных техов (tech.json cost в минутах, 1440 = сутки); исследование идёт и оффлайн, бустеры/мозги ускоряют",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
   hh_slowphase:"медленные фазы старта", hh_lag:"Лаг-события (медленные тики)", hh_lagday:"в день",
   hh_byfunc:"по функциям", hh_connerr:"Ошибки коннекта",
@@ -1380,7 +1381,8 @@ var T = {
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
-  st_toptechp:"Top by tech count", st_techs:"techs",
+  st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
+  st_resh_note:"= sum of researched techs' cost (tech.json cost is minutes, 1440 = a day); research runs offline too, boosters/brains speed it up",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
   hh_slowphase:"slow startup phases", hh_lag:"Lag events (slow ticks)", hh_lagday:"per day",
   hh_byfunc:"by function", hh_connerr:"Connection errors",
@@ -1879,6 +1881,7 @@ function renderPlayerModal(d){
     [t("pd_res_cur"), r.current||"—"],
     r.remaining_min!=null? [t("pd_res_left"), r.remaining_min+" "+t("pd_min")] : null,
     [t("pd_res_done"), r.done_count],
+    r.invested_h!=null? [t("st_resh"), "~"+r.invested_h+" "+(S.lang==="ru"?"ч":"h")] : null,
     r.booster!=null? [t("pd_booster"), r.booster] : null
   ].concat([ [t("pd_missions"), (mi.current!=null? mi.current : "—")+(mi.month!=null? " ("+t("pd_mission_month")+" "+mi.month+")":"")] ])));
 
@@ -2217,8 +2220,9 @@ function drawStats(j){
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptime")]),
     ltable(["#",t("col_name"),"h"], (j.top_time||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.playtime_h)]; })]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptechp")]),
-    ltable(["#",t("col_name"),t("st_techs"),t("st_researching")], (j.top_tech_players||[]).slice(0,15), function(r){
-      return [String(r.id), plLink(r.id,r.name), String(r.tech_count), r.research||"—"]; })]));
+    ltable(["#",t("col_name"),t("st_techs"),t("st_resh"),t("st_researching")], (j.top_tech_players||[]).slice(0,15), function(r){
+      return [String(r.id), plLink(r.id,r.name), String(r.tech_count), "~"+(r.research_h||0)+"ч", r.research||"—"]; }),
+    el("div",{class:"muted small",style:"margin-top:4px"},[t("st_resh_note")])]));
 
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_clans")+" · "+(j.clan_board||[]).length]),
     ltable([t("col_name"),"rating","size"], (j.clan_board||[]).slice(0,15), function(c){
@@ -2247,9 +2251,9 @@ function drawStats(j){
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_countries")]),
     ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+(j.top_tech||[]).length]),
-    ltable([t("st_tech"),"игроков","cost"], (j.top_tech||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
+    ltable([t("st_tech"),"игроков",t("st_resh")], (j.top_tech||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; })]));
   if((j.researching||[]).length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+t("st_researching")]),
-    ltable([t("st_tech"),"игроков","cost"], (j.researching||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
+    ltable([t("st_tech"),"игроков",t("st_resh")], (j.researching||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; })]));
 
   var ttc=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
   g.appendChild(ttc);
@@ -2263,7 +2267,8 @@ function drawStats(j){
 
   b.appendChild(g);
   b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[
-    "рег "+j.totals.registered+" • профилей "+j.totals.with_profile+" • кланов "+j.totals.clans+" • "+(j.cached_age||0)+"s • "+j.generated]));
+    "рег "+j.totals.registered+" • профилей "+j.totals.with_profile+" • кланов "+j.totals.clans+
+    " • "+t("st_resh")+" суммарно ~"+(j.total_research_h||0)+"ч • "+(j.cached_age||0)+"s • "+j.generated]));
 
   var wbox=el("div",{style:"margin-top:14px"},[el("p",{class:"muted"},["…"])]);
   b.appendChild(wbox);
