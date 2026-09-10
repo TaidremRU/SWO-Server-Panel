@@ -966,10 +966,11 @@ label.fld span{display:block;color:var(--mut);font-size:12.5px;margin-bottom:4px
 a.pl-link{color:var(--acc);cursor:pointer;text-decoration:none}
 a.pl-link:hover{text-decoration:underline}
 .ovl{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto;z-index:20}
-.dlg{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);width:760px;max-width:100%;padding:0}
+.dlg{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);width:1120px;max-width:100%;padding:0}
 .dlg header{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line);border-radius:var(--radius) var(--radius) 0 0}
 .dlg .bd{padding:14px}
-.dlg .grid{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.dlg .grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(max-width:760px){.dlg .grid{grid-template-columns:1fr}}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
 .chip{font-size:11.5px;padding:1px 7px;border:1px solid var(--line);border-radius:20px;color:var(--mut)}
 .bar{position:relative;height:14px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden;min-width:90px}
