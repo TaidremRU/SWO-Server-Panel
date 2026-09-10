@@ -21,6 +21,7 @@
 ``snapshot(cfg)`` -> dict (см. конец файла). Пароли (``code`` / ``Code``) в выдачу
 не попадают ни в каком виде.
 """
+import collections
 import glob
 import io
 import json
@@ -28,6 +29,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from datetime import datetime
 
 _LINE_RX = re.compile(
@@ -464,6 +466,149 @@ def _activity(world_dir, uid, nick):
         "role_grants": roles,
         "land_deletions": lands[-20:][::-1],
         "rewards": rewards[::-1],
+    }
+
+
+def _online_series(events, bucket_sec=1800, buckets=336):
+    """Реконструкция числа онлайн по времени из enter/exit. -> [{t, n}] + peak."""
+    now = int(time.time())
+    end = now - now % bucket_sec
+    start = end - buckets * bucket_sec
+    ev = sorted((e for e in events if e.get("epoch")), key=lambda e: e["epoch"])
+    online, idx, out, peak = set(), 0, [], 0
+    for bi in range(buckets + 1):
+        bt = start + bi * bucket_sec
+        while idx < len(ev) and ev[idx]["epoch"] <= bt:
+            e = ev[idx]
+            if e["kind"] == "enter":
+                online.add(e["id"])
+            elif e["kind"] == "exit":
+                online.discard(e["id"])
+            idx += 1
+        out.append({"t": bt, "n": len(online)})
+        peak = max(peak, len(online))
+    return out, peak, (out[-1]["n"] if out else 0)
+
+
+def _day(ts):
+    return ts.split(" ", 1)[0] if ts else ""
+
+
+def stats_bundle(cfg):
+    """Сводная аналитика сервера: онлайн-график, регистрации/DAU, retention,
+    лидерборды, клан-борд, топ месяца, бан-лист, стафф."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+
+    per, events = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+    names = load_user_list(world_dir)
+    details = load_user_details(world_dir)
+    clans = load_clans(world_dir)
+
+    series, peak7, now_online = _online_series(events)
+
+    # регистрации и DAU по дням (последние ~21 день из событий)
+    reg_by_day = collections.Counter()
+    dau = collections.defaultdict(set)
+    reg_day = {}
+    active_days = collections.defaultdict(set)  # uid -> {дни}
+    for e in events:
+        d = _day(e["ts"])
+        if not d:
+            continue
+        if e["kind"] == "register":
+            reg_by_day[d] += 1
+            reg_day.setdefault(e["id"], d)
+        elif e["kind"] == "enter":
+            dau[d].add(e["id"])
+            active_days[e["id"]].add(d)
+    days_sorted = sorted(set(list(reg_by_day) + list(dau)))[-21:]
+    reg_series = [{"d": d, "reg": reg_by_day.get(d, 0), "dau": len(dau.get(d, ()))} for d in days_sorted]
+
+    # retention D1 / D7 (когорты последних 30 дней с регистрацией)
+    from datetime import timedelta
+    d1_hit = d1_tot = d7_hit = d7_tot = 0
+    for uid, rd in reg_day.items():
+        try:
+            base = datetime.strptime(rd, "%d.%m.%Y")
+        except ValueError:
+            continue
+        if (datetime.now() - base).days > 33:
+            continue
+        ad = active_days.get(uid, set())
+        d1 = (base + timedelta(days=1)).strftime("%d.%m.%Y")
+        d1_tot += 1
+        if d1 in ad:
+            d1_hit += 1
+        wk = {(base + timedelta(days=k)).strftime("%d.%m.%Y") for k in range(1, 8)}
+        d7_tot += 1
+        if ad & wk:
+            d7_hit += 1
+
+    # лидерборды / распределения из профилей
+    us = []
+    for uid, dd in details.items():
+        us.append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
+                   "level": dd.get("level") or 0, "playtime_h": dd.get("playtime_h") or 0,
+                   "role": dd.get("role", 0), "banned": bool(dd.get("banned")),
+                   "clan": dd.get("clan", 0), "country": dd.get("country") or "?"})
+    top_level = sorted(us, key=lambda x: -x["level"])[:20]
+    top_time = sorted(us, key=lambda x: -x["playtime_h"])[:20]
+    banned = [u for u in us if u["banned"]]
+    staff = sorted((u for u in us if u["role"] > 0), key=lambda x: -x["role"])
+    lvl_hist = collections.Counter(min(x["level"] // 5 * 5, 60) for x in us)
+    country_hist = collections.Counter(x["country"] for x in us).most_common(12)
+
+    # стафф-история
+    role_hist = []
+    for ln in _read_text(os.path.join(world_dir, "Logs", "user_role.txt")).splitlines():
+        m = _ROLE_RX.search(ln)
+        if m:
+            role_hist.append({"target_id": int(m.group(1)), "target": m.group(2),
+                              "by": m.group(4), "role": m.group(5)})
+
+    # клан-борд
+    clan_board = sorted(
+        [{"id": cid, "name": c["name"], "rating": c["rating"] or 0,
+          "clan_point": c["clan_point"], "size": len(c["members"]), "max": c["max_users"],
+          "members": [{"id": m["id"], "name": names.get(m["id"]) or ("id %s" % m["id"]),
+                       "role": m["role"], "rating": m["rating"]} for m in c["members"]]}
+         for cid, c in clans.items()],
+        key=lambda x: -(x["rating"] or 0))
+
+    # топ месяца (reward_order.txt + new_month.txt)
+    months = []
+    cur = None
+    for ln in _read_text(os.path.join(world_dir, "Logs", "reward_order.txt")).splitlines():
+        if "---" in ln:
+            m = re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})", ln)
+            cur = {"date": m.group(1) if m else "?", "rewards": []}
+            months.append(cur)
+            continue
+        m = _REWARD_RX.match(ln)
+        if m and cur is not None:
+            uid = int(m.group(2))
+            cur["rewards"].append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
+                                   "reward": int(m.group(3))})
+
+    return {
+        "ok": True,
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "online": {"series": series, "peak7": peak7, "now": now_online},
+        "growth": {"days": reg_series,
+                   "retention": {"d1": [d1_hit, d1_tot], "d7": [d7_hit, d7_tot]}},
+        "top_level": top_level,
+        "top_time": top_time,
+        "banned": banned,
+        "staff": staff,
+        "role_history": role_hist[::-1],
+        "level_hist": [{"bucket": b, "n": n} for b, n in sorted(lvl_hist.items())],
+        "country_hist": [{"country": c, "n": n} for c, n in country_hist],
+        "clan_board": clan_board[:50],
+        "months": months[-6:][::-1],
+        "totals": {"registered": len(names), "with_profile": len(details),
+                   "clans": len(clans), "staff": len(staff), "banned": len(banned)},
     }
 
 

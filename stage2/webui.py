@@ -261,6 +261,7 @@ class WebUI:
         self._thread = None
         self._srv_cache = None  # (ts, payload)
         self._players_cache = None  # (ts, payload)
+        self._stats_cache = None  # (ts, payload)
         self._shot_lock = threading.Lock()
         self._shot_ts = 0.0
         self._shot_meta = ("", (0, 0))
@@ -630,6 +631,20 @@ class WebUI:
             logging.exception("webui: server_chat")
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_stats(self, h, method, q, sess):
+        now = time.time()
+        if not self._stats_cache or now - self._stats_cache[0] > 30:
+            try:
+                payload = players.stats_bundle(self.cfg)
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: stats_bundle")
+                payload = {"ok": False, "error": str(e)}
+            self._stats_cache = (now, payload)
+        ts, payload = self._stats_cache
+        out = dict(payload)
+        out["cached_age"] = int(now - ts)
+        return self._json(h, out, 200 if out.get("ok") else 500)
 
     def _api_server_events(self, h, method, q, sess):
         kinds = (q.get("kinds") or [""])[0]
@@ -1088,7 +1103,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
   sc_server:"Чат сервера", sc_events:"События", sc_private:"Приваты", sc_all:"все каналы",
   sc_search:"поиск", ev_join:"вошёл", ev_leave:"вышел", ev_register:"регистрация",
   ev_death:"смерть", ev_land:"снос земли", ev_kind:"тип", sc_priv_note:"Все приватные сообщения сервера — под паролем панели.",
@@ -1135,6 +1150,10 @@ var T = {
   tw_prompt:"Подтвердите своим паролем от панели:", tw_min:"мин. аккаунтов на IP",
   tw_show:"Показать", tw_none:"Совпадений нет", tw_summary:"IP всего",
   tw_flagged:"помечено IP", tw_connects:"подкл.", tw_other_ips:"ещё IP", tw_ignored:"игнор",
+  st_online:"Онлайн (7 дней)", st_now:"сейчас", st_peak:"пик 7д", st_growth:"Рост",
+  st_reg:"рег.", st_dau:"актив/день", st_ret:"retention", st_toplvl:"Топ по уровню",
+  st_toptime:"Топ по часам", st_clans:"Кланы", st_month:"Топ месяца", st_bans:"Бан-лист",
+  st_staff:"Стафф", st_lvldist:"Уровни", st_countries:"Страны", st_hist:"история ролей",
   pd_profile:"Профиль", pd_research:"Исследования", pd_missions:"Миссии", pd_position:"Позиция",
   pd_avatar:"Аватар", pd_sessions:"Сессии", pd_clan:"Клан", pd_close:"Закрыть",
   pd_level:"Уровень", pd_country:"Страна", pd_video:"Видеокарта", pd_screen:"Экран",
@@ -1164,7 +1183,7 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
   sc_server:"Server chat", sc_events:"Events", sc_private:"DMs", sc_all:"all channels",
   sc_search:"search", ev_join:"joined", ev_leave:"left", ev_register:"registered",
   ev_death:"death", ev_land:"land removed", ev_kind:"type", sc_priv_note:"All server private messages — behind the panel password.",
@@ -1211,6 +1230,10 @@ var T = {
   tw_prompt:"Confirm with your panel password:", tw_min:"min accounts per IP",
   tw_show:"Show", tw_none:"No matches", tw_summary:"IPs total",
   tw_flagged:"flagged IPs", tw_connects:"conn.", tw_other_ips:"more IPs", tw_ignored:"ignored",
+  st_online:"Online (7 days)", st_now:"now", st_peak:"7d peak", st_growth:"Growth",
+  st_reg:"reg.", st_dau:"active/day", st_ret:"retention", st_toplvl:"Top by level",
+  st_toptime:"Top by hours", st_clans:"Clans", st_month:"Month top", st_bans:"Ban list",
+  st_staff:"Staff", st_lvldist:"Levels", st_countries:"Countries", st_hist:"role history",
   pd_profile:"Profile", pd_research:"Research", pd_missions:"Missions", pd_position:"Position",
   pd_avatar:"Avatar", pd_sessions:"Sessions", pd_clan:"Clan", pd_close:"Close",
   pd_level:"Level", pd_country:"Country", pd_video:"GPU", pd_screen:"Screen",
@@ -1293,14 +1316,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","players","twinks","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","players","twinks","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -1891,6 +1914,87 @@ function renderPlayerModal(d){
   ]);
   secBox.appendChild(btnRow);
   b.appendChild(secBox);
+}
+
+// ---- stats (server dashboards) ----
+function svgLine(pts, w, hh){
+  if(!pts.length) return el("div",{class:"muted small"},["—"]);
+  var mx=Math.max.apply(null,pts.concat([1])), n=pts.length;
+  var d=pts.map(function(y,i){ return (i? "L":"M")+(i/(n-1)*w).toFixed(1)+" "+(hh-y/mx*hh).toFixed(1); }).join(" ");
+  return el("div",{html:'<svg viewBox="0 0 '+w+' '+hh+'" preserveAspectRatio="none" style="width:100%;height:'+hh+'px;display:block">'
+    +'<polyline points="0,'+hh+' '+pts.map(function(y,i){return (i/(n-1)*w).toFixed(1)+","+(hh-y/mx*hh).toFixed(1);}).join(" ")+' '+w+','+hh+'" fill="rgba(76,141,255,.15)" stroke="none"/>'
+    +'<path d="'+d+'" fill="none" stroke="var(--acc)" stroke-width="1.5"/></svg>'});
+}
+function tabStats(v){
+  var wrap=el("div",{},[el("div",{class:"row",style:"margin-bottom:10px"},[el("button",{class:"small",onclick:function(){loadStats(true);}},[t("refresh")])]), el("div",{id:"stbody"},[el("p",{class:"muted"},["…"])])]);
+  v.appendChild(wrap); loadStats(false);
+}
+function loadStats(force){
+  api("/api/stats"+(force?"?_="+Date.now():"")).then(drawStats).catch(function(e){
+    var b=$("#stbody"); if(b){b.innerHTML="";b.appendChild(el("div",{class:"msg err"},[errText(e)]));}
+  });
+}
+function ltable(head, rows, mk){
+  var tb=el("table",{},[el("tr",{},head.map(function(x){return el("th",{},[x]);}))]);
+  rows.forEach(function(r){ tb.appendChild(el("tr",{},mk(r).map(function(c){return el("td",{},[c]);}))); });
+  return tb;
+}
+function drawStats(j){
+  var b=$("#stbody"); if(!b) return; b.innerHTML="";
+  if(!j.ok){ b.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
+  var g=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
+  var on=j.online||{};
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_online")]),
+    el("div",{class:"row",style:"margin-bottom:6px"},[pill(true,t("st_now")+" "+on.now), el("span",{class:"pill"},[t("st_peak")+" "+on.peak7])]),
+    svgLine((on.series||[]).map(function(p){return p.n;}), 300, 70)]));
+
+  var gr=j.growth||{}, days=(gr.days||[]);
+  var rt=gr.retention||{d1:[0,0],d7:[0,0]};
+  var maxd=Math.max.apply(null,days.map(function(x){return Math.max(x.reg,x.dau);}).concat([1]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_growth")]),
+    el("div",{class:"spark",style:"height:60px"}, days.map(function(x){
+      return el("i",{style:"height:"+Math.round(100*x.dau/maxd)+"%",title:x.d+": "+t("st_dau")+" "+x.dau+", "+t("st_reg")+" "+x.reg},[]); })),
+    el("div",{class:"kv"},[el("span",{},[t("st_reg")+" ("+days.length+"д)"]),el("b",{},[String(days.reduce(function(a,x){return a+x.reg;},0))])]),
+    el("div",{class:"kv"},[el("span",{},[t("st_ret")+" D1 / D7"]),el("b",{},[
+      (rt.d1[1]? Math.round(100*rt.d1[0]/rt.d1[1]):0)+"% / "+(rt.d7[1]? Math.round(100*rt.d7[0]/rt.d7[1]):0)+"%  ("+rt.d1[1]+")"])])]));
+
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toplvl")]),
+    ltable(["#",t("col_name"),t("pd_level")], (j.top_level||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.level)]; })]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptime")]),
+    ltable(["#",t("col_name"),"h"], (j.top_time||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.playtime_h)]; })]));
+
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_clans")+" · "+(j.clan_board||[]).length]),
+    ltable([t("col_name"),"rating","size"], (j.clan_board||[]).slice(0,15), function(c){
+      return [c.name+"", String(c.rating), c.size+"/"+(c.max||"?")]; })]));
+
+  var bans=j.banned||[];
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_bans")+" · "+bans.length]),
+    bans.length? ltable(["#",t("col_name")], bans.slice(0,30), function(r){ return [String(r.id), plLink(r.id,r.name)]; }) : el("div",{class:"muted small"},["—"])]));
+
+  var staff=j.staff||[];
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_staff")+" · "+staff.length]),
+    ltable(["#",t("col_name"),t("pl_col_role")], staff, function(r){
+      return [String(r.id), plLink(r.id,r.name), t({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[r.role]||"pl_role_staff")]; }),
+    (j.role_history&&j.role_history.length)? el("div",{class:"muted small",style:"margin-top:8px"},[t("st_hist")+": "+j.role_history.map(function(x){return x.target+"→"+x.role;}).join(", ")]) : null
+  ].filter(Boolean)));
+
+  var months=j.months||[];
+  if(months.length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_month")]),
+    el("div",{}, months.map(function(mo){ return el("div",{style:"margin-bottom:6px"},[
+      el("b",{},[mo.date]), " — ",
+      el("span",{class:"small"},[(mo.rewards||[]).map(function(r){return r.name+"("+r.reward+")";}).join(", ")])]); }))]));
+
+  var lh=j.level_hist||[];
+  var lmax=Math.max.apply(null,lh.map(function(x){return x.n;}).concat([1]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_lvldist")]),
+    el("div",{class:"spark",style:"height:56px"}, lh.map(function(x){ return el("i",{style:"height:"+Math.round(100*x.n/lmax)+"%",title:x.bucket+"+: "+x.n},[]); })),
+    el("div",{class:"muted small"},[lh.map(function(x){return x.bucket;}).join("  ")])]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_countries")]),
+    ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
+
+  b.appendChild(g);
+  b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[
+    "рег "+j.totals.registered+" • профилей "+j.totals.with_profile+" • кланов "+j.totals.clans+" • "+(j.cached_age||0)+"s • "+j.generated]));
 }
 
 // ---- server chat / events ----
