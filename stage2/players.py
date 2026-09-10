@@ -562,6 +562,20 @@ def stats_bundle(cfg):
     lvl_hist = collections.Counter(min(x["level"] // 5 * 5, 60) for x in us)
     country_hist = collections.Counter(x["country"] for x in us).most_common(12)
 
+    # топ техов: сколько игроков изучили каждый тех + кто что изучает сейчас
+    tech_cost = {}
+    for it in _read_json(os.path.join(world_dir, "Data", "tech.json")).get("items", []):
+        if "id" in it:
+            tech_cost[it["id"]] = it.get("cost")
+    tcnt, rcnt = collections.Counter(), collections.Counter()
+    for dd in details.values():
+        for tch in dd.get("techs", []):
+            tcnt[tch] += 1
+        if dd.get("research"):
+            rcnt[dd["research"]] += 1
+    top_tech = [{"tech": tch, "n": n, "cost": tech_cost.get(tch)} for tch, n in tcnt.most_common(30)]
+    researching = [{"tech": tch, "n": n, "cost": tech_cost.get(tch)} for tch, n in rcnt.most_common(20)]
+
     # стафф-история
     role_hist = []
     for ln in _read_text(os.path.join(world_dir, "Logs", "user_role.txt")).splitlines():
@@ -607,6 +621,8 @@ def stats_bundle(cfg):
         "role_history": role_hist[::-1],
         "level_hist": [{"bucket": b, "n": n} for b, n in sorted(lvl_hist.items())],
         "country_hist": [{"country": c, "n": n} for c, n in country_hist],
+        "top_tech": top_tech,
+        "researching": researching,
         "clan_board": clan_board[:50],
         "months": months[-6:][::-1],
         "totals": {"registered": len(names), "with_profile": len(details),
@@ -770,6 +786,35 @@ def make_world_backup(cfg, scope="state"):
     return zpath, None
 
 
+_MAPDIM_CACHE = {}
+
+
+def map_dim(world_dir, map_id):
+    """Размер карты (w, h) из 16-байтного заголовка Data\\maps\\map<N>.dt.
+
+    Формат .dt (несжатый): int32 версия(=7) | float ~9.x | int16 width | int16 height |
+    далее сетка тайлов + списки координат сущностей (полная расшифровка — отдельный
+    reverse-engineering; заголовок читается тривиально).
+    """
+    key = (world_dir, map_id)
+    if key in _MAPDIM_CACHE:
+        return _MAPDIM_CACHE[key]
+    res = None
+    try:
+        with open(os.path.join(world_dir, "Data", "maps", "map%d.dt" % int(map_id)), "rb") as f:
+            hdr = f.read(16)
+        if len(hdr) == 16:
+            import struct
+            ver = struct.unpack("<i", hdr[0:4])[0]
+            w, h = struct.unpack("<hh", hdr[12:16])
+            if ver == 7 and 0 < w <= 4096 and 0 < h <= 4096:
+                res = {"w": w, "h": h}
+    except (OSError, ValueError):
+        pass
+    _MAPDIM_CACHE[key] = res
+    return res
+
+
 def world_map(cfg):
     """Карты и территории: онлайн по картам (game_state), число аватаров по
     `user.mapId`, все `userTerritories` с владельцами. Существа/животные хранятся
@@ -802,8 +847,12 @@ def world_map(cfg):
                          "owner_id": uid, "owner": names.get(uid) or ("id %d" % uid)})
     terr_by_map = collections.Counter(t["map"] for t in terr)
     maps = sorted(set(list(gs) + list(avatars_by_map) + list(terr_by_map)), key=lambda x: (x is None, x))
-    rows = [{"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
-             "territories": terr_by_map.get(mp, 0), "space": mp == 0} for mp in maps]
+    rows = []
+    for mp in maps:
+        dim = map_dim(world_dir, mp) if mp not in (None, 0) else None
+        rows.append({"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
+                     "territories": terr_by_map.get(mp, 0), "space": mp == 0,
+                     "size": ("%dx%d" % (dim["w"], dim["h"])) if dim else None})
     rows.sort(key=lambda r: -(r["online"] * 100 + r["territories"]))
     terr.sort(key=lambda t: ((t["map"] if t["map"] is not None else 0), (t["owner"] or "").lower()))
     try:
@@ -1201,7 +1250,7 @@ def tech_track_scan(cfg, state_path, log_path):
             continue
         techs = list(raw.get("techList") or [])
         cur = {"n": len(techs), "boost": int(raw.get("techBooster") or 0),
-               "research": raw.get("researchTech") or ""}
+               "research": raw.get("researchTech") or "", "map": raw.get("mapId")}
         new_state[str(uid)] = cur
         p = prev_u.get(str(uid))
         if p is None:
@@ -1221,6 +1270,10 @@ def tech_track_scan(cfg, state_path, log_path):
         if cur["research"] and cur["research"] != p.get("research"):
             events.append({"ts": ts, "uid": uid, "name": who, "kind": "research_changed",
                            "to": cur["research"], "from": p.get("research") or ""})
+        if cur["map"] is not None and p.get("map") is not None and cur["map"] != p["map"]:
+            events.append({"ts": ts, "uid": uid, "name": who, "kind": "map_changed",
+                           "to": cur["map"], "from": p["map"],
+                           "space": cur["map"] == 0 or p["map"] == 0})
 
     try:
         tmp = state_path + ".swtmp"
@@ -1707,6 +1760,8 @@ def load_user_details(world_dir):
             "clan": raw.get("clanId") or 0,
             "country": raw.get("country") or "",
             "unit_id": raw.get("unitId"),
+            "techs": raw.get("techList") or [],
+            "research": raw.get("researchTech") or "",
         }
     return out
 

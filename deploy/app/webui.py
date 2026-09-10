@@ -1285,6 +1285,7 @@ var T = {
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
+  st_toptech:"Топ изученных техов", st_researching:"Сейчас изучают", st_tech:"тех", st_size:"размер",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
   hh_slowphase:"медленные фазы старта", hh_lag:"Лаг-события (медленные тики)", hh_lagday:"в день",
   hh_byfunc:"по функциям", hh_connerr:"Ошибки коннекта",
@@ -1311,7 +1312,7 @@ var T = {
   pd_dev_kill:"смерть", pd_dev_reset_position:"сброс позиции", pd_role_to:"→ роль", pd_role_by:"выдал",
   pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
   tt_title:"Трекинг техов / бустеров", tt_none:"пока пусто (панель ведёт лог с момента включения)",
-  tt_gained:"изучил", tt_spent:"потратил бустер", tt_bgain:"получил бустер", tt_reschg:"новое исследование",
+  tt_gained:"изучил", tt_spent:"потратил бустер", tt_bgain:"получил бустер", tt_reschg:"новое исследование", tt_map:"сменил карту",
   pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
   pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
   pd_inv_count:"кол-во", pd_inv_from:"откуда", pd_inv_carry:"при себе",
@@ -1377,6 +1378,7 @@ var T = {
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
+  st_toptech:"Top researched techs", st_researching:"Now researching", st_tech:"tech", st_size:"size",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
   hh_slowphase:"slow startup phases", hh_lag:"Lag events (slow ticks)", hh_lagday:"per day",
   hh_byfunc:"by function", hh_connerr:"Connection errors",
@@ -1403,7 +1405,7 @@ var T = {
   pd_dev_kill:"death", pd_dev_reset_position:"position reset", pd_role_to:"→ role", pd_role_by:"granted by",
   pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
   tt_title:"Tech / booster tracking", tt_none:"empty so far (the panel logs from when it was enabled)",
-  tt_gained:"researched", tt_spent:"spent booster", tt_bgain:"gained booster", tt_reschg:"new research",
+  tt_gained:"researched", tt_spent:"spent booster", tt_bgain:"gained booster", tt_reschg:"new research", tt_map:"changed map",
   pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
   pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
   pd_inv_count:"qty", pd_inv_from:"from", pd_inv_carry:"carried",
@@ -1814,6 +1816,7 @@ function ttLine(e, noname){
   if(e.kind==="tech_gained") body=[el("span",{class:"chip"},[t("tt_gained")]), " "+(e.techs||[]).join(", ")+" (Σ"+(e.total||"?")+")"];
   else if(e.kind==="booster_spent") body=[el("span",{class:"chip warn"},[t("tt_spent")]), " ×"+e.delta+" → "+e.left];
   else if(e.kind==="booster_gained") body=[el("span",{class:"chip"},[t("tt_bgain")]), " +"+e.delta+" = "+e.total];
+  else if(e.kind==="map_changed") body=[el("span",{class:e.space?"chip warn":"chip"},[t("tt_map")]), " "+(e.from===0?"космос":e.from)+" → "+(e.to===0?"космос":e.to)];
   else body=[el("span",{class:"chip"},[t("tt_reschg")]), " "+(e.from||"—")+" → "+e.to];
   var pre=[el("span",{class:"lg-t"},[fshort(e.ts)+" "])];
   if(!noname) pre.push(plLink(e.uid, e.name), " ");
@@ -2238,6 +2241,10 @@ function drawStats(j){
     [{name:t("st_lvldist"), unit:"игроков", data:lh.map(function(x){return x.n;}), color:CHART_COL[1]}]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_countries")]),
     ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+(j.top_tech||[]).length]),
+    ltable([t("st_tech"),"игроков","cost"], (j.top_tech||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
+  if((j.researching||[]).length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_researching")]),
+    ltable([t("st_tech"),"игроков","cost"], (j.researching||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
 
   var ttc=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
   g.appendChild(ttc);
@@ -2261,8 +2268,8 @@ function drawStats(j){
     var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
     wg.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
       el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
-      ltable([t("pl_map"),t("pl_online"),t("st_avatars"),t("st_terr")], (w.maps||[]).slice(0,40),
-        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), String(r.online), String(r.avatars), String(r.territories)]; })]));
+      ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr")], (w.maps||[]).slice(0,50),
+        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories)]; })]));
     if(w.space_note) wg.lastChild.appendChild(el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]));
     var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
     var tt=el("div",{id:"terrtab"},[]);
