@@ -75,7 +75,7 @@ try:
                         "player_add_tech", "player_set_stat", "player_reset_code",
                         "server_chat", "server_events", "server_private_chat",
                         "stats_bundle", "world_map", "server_health", "twink_report",
-                        "players_csv", "make_world_backup"):
+                        "players_csv", "make_world_backup", "tech_track_scan", "tech_track_read"):
                 assert hasattr(players, _fn), "players: нет %s" % _fn
             _cat = players.item_catalog(cfg)
             assert _cat.get("ok") and _cat["items"], "item_catalog пуст"
@@ -88,6 +88,9 @@ try:
             _csv, _ = players.players_csv(cfg)
             assert _csv and b'"Code"' not in _csv and b"code" not in _csv.split(b"\n", 1)[0], \
                 "players_csv: пароль в выдаче"
+            _tw = players.twink_report(cfg, 2)
+            assert _tw.get("ok") and "code_groups" in _tw, "twink_report: нет code_groups"
+            assert '"code"' not in json.dumps(_tw, ensure_ascii=False), "twink_report: код в выдаче"
             print("server-wide OK: chat=%d events=%d online_now=%s clans=%d health_lag=%d csv=%dB"
                   % (players.server_chat(cfg)["total"], players.server_events(cfg)["total"],
                      players.stats_bundle(cfg)["online"]["now"],

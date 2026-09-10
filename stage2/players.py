@@ -850,7 +850,7 @@ def twink_report(cfg, min_accounts=2):
         e["last"] = ts
         by_nick_ips.setdefault(nick, set()).add(ip)
 
-    groups = []
+    ip_groups = []
     for ip, nicks in by_ip.items():
         if len(nicks) < min_accounts:
             continue
@@ -860,8 +860,45 @@ def twink_report(cfg, min_accounts=2):
             "other_ips": sorted(by_nick_ips.get(nk, set()) - {ip}),
         } for nk, v in nicks.items()]
         accs.sort(key=lambda a: -a["connects"])
-        groups.append({"ip": ip, "count": len(nicks), "accounts": accs})
-    groups.sort(key=lambda g: -g["count"])
+        ip_groups.append({"ip": ip, "count": len(nicks), "accounts": accs})
+    ip_groups.sort(key=lambda g: -g["count"])
+
+    # --- по паролю (code) и по «отпечатку» железа из user<N>.json ---
+    by_code, by_fp = {}, {}
+    d = os.path.join(world_dir, "Data", "users")
+    try:
+        listing = os.listdir(d)
+    except OSError:
+        listing = []
+    for nm in listing:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        try:
+            uid = int(raw.get("id") if raw.get("id") is not None else m.group(1))
+        except (TypeError, ValueError):
+            continue
+        code = raw.get("code")
+        if code:
+            by_code.setdefault(code, []).append(uid)
+        gpu = (raw.get("videoCard") or "").strip()
+        ss = raw.get("screenSize") or {}
+        scr = ("%sx%s" % (ss.get("x"), ss.get("y"))) if ss else ""
+        if gpu or scr:
+            by_fp.setdefault((gpu, scr), []).append(uid)
+
+    def _accs(uids):
+        return sorted(({"id": u, "name": names.get(u) or ("id %d" % u)} for u in uids),
+                      key=lambda a: a["id"])
+
+    code_groups = [{"count": len(v), "hint": "%d симв." % len(c), "accounts": _accs(v)}
+                   for c, v in by_code.items() if len(v) >= min_accounts]
+    code_groups.sort(key=lambda g: -g["count"])
+    fp_groups = [{"count": len(v), "gpu": k[0] or "?", "screen": k[1] or "?", "accounts": _accs(v)}
+                 for k, v in by_fp.items() if len(v) >= max(3, min_accounts)]
+    fp_groups.sort(key=lambda g: -g["count"])
+
     return {
         "ok": True,
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -869,8 +906,12 @@ def twink_report(cfg, min_accounts=2):
         "ignored": sorted(ignore),
         "records": total,
         "ip_count": len(by_ip),
-        "flagged_ips": len(groups),
-        "groups": groups[:300],
+        "flagged_ips": len(ip_groups),
+        "groups": ip_groups[:300],
+        "code_groups": code_groups[:300],
+        "code_flagged": len(code_groups),
+        "code_accounts": sum(g["count"] for g in code_groups),
+        "fp_groups": fp_groups[:200],
     }
 
 
@@ -1115,6 +1156,102 @@ def _write_json_compact(path, data, expect_mtime):
 
 def _user_file(world_dir, uid):
     return os.path.join(world_dir, "Data", "users", "user%d.json" % uid)
+
+
+# ------------------------------------------- трекинг техов/бустеров (панель сама)
+def _rotate(path, max_bytes):
+    try:
+        if os.path.getsize(path) > max_bytes:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
+def tech_track_scan(cfg, state_path, log_path):
+    """Один проход: сравнить текущие techList/techBooster/researchTech всех игроков
+    с прошлым снапшотом, дописать изменения в ``log_path`` (jsonl). -> список новых
+    событий. У игры своего лога исследований/бустеров нет — панель ведёт его сама.
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return []
+    names = load_user_list(world_dir)
+    prev_u = (_read_json(state_path) or {}).get("users", {})
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    d = os.path.join(world_dir, "Data", "users")
+    try:
+        listing = os.listdir(d)
+    except OSError:
+        return []
+    new_state, events = {}, []
+    for nm in listing:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        try:
+            uid = int(raw.get("id") if raw.get("id") is not None else m.group(1))
+        except (TypeError, ValueError):
+            continue
+        techs = list(raw.get("techList") or [])
+        cur = {"n": len(techs), "boost": int(raw.get("techBooster") or 0),
+               "research": raw.get("researchTech") or ""}
+        new_state[str(uid)] = cur
+        p = prev_u.get(str(uid))
+        if p is None:
+            continue  # первое наблюдение — не событие
+        who = names.get(uid) or ("id %d" % uid)
+        if cur["n"] > p.get("n", 0):
+            events.append({"ts": ts, "uid": uid, "name": who, "kind": "tech_gained",
+                           "techs": techs[p.get("n", 0):], "count": cur["n"] - p.get("n", 0),
+                           "total": cur["n"]})
+        db = cur["boost"] - p.get("boost", 0)
+        if db < 0:
+            events.append({"ts": ts, "uid": uid, "name": who, "kind": "booster_spent",
+                           "delta": -db, "left": cur["boost"]})
+        elif db > 0:
+            events.append({"ts": ts, "uid": uid, "name": who, "kind": "booster_gained",
+                           "delta": db, "total": cur["boost"]})
+        if cur["research"] and cur["research"] != p.get("research"):
+            events.append({"ts": ts, "uid": uid, "name": who, "kind": "research_changed",
+                           "to": cur["research"], "from": p.get("research") or ""})
+
+    try:
+        tmp = state_path + ".swtmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"updated": ts, "users": new_state}, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, state_path)
+    except OSError:
+        logging.exception("tech_track: не удалось записать %s", state_path)
+    if events:
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with io.open(log_path, "a", encoding="utf-8") as f:
+                for e in events:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            _rotate(log_path, 3_000_000)
+        except OSError:
+            logging.exception("tech_track: не удалось дописать %s", log_path)
+    return events
+
+
+def tech_track_read(cfg, log_path, uid=None, kind=None, limit=400):
+    rows = []
+    for ln in _read_text(log_path, tail_bytes=1_500_000).splitlines():
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if uid is not None and e.get("uid") != int(uid):
+            continue
+        if kind and e.get("kind") != kind:
+            continue
+        rows.append(e)
+    try:
+        limit = max(1, min(3000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 400
+    return {"ok": True, "total": len(rows), "events": rows[-limit:][::-1]}
 
 
 def _inv_container(world_dir, uid, where):

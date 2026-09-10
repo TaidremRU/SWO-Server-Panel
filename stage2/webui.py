@@ -257,6 +257,9 @@ class WebUI:
         self.throttle = Throttle()
         self._audit_path = os.path.join(base, "webui_audit.log")
         self._audit_lock = threading.Lock()
+        self._tt_state = os.path.join(base, "tech_track_state.json")
+        self._tt_log = os.path.join(base, "logs", "tech_track.jsonl")
+        self._stop = threading.Event()
         self._srv = None
         self._thread = None
         self._srv_cache = None  # (ts, payload)
@@ -280,10 +283,14 @@ class WebUI:
         self._srv.webui = self
         self._thread = threading.Thread(target=self._srv.serve_forever, name="webui", daemon=True)
         self._thread.start()
+        tt = (self.cfg.get("players", {}) or {}).get("tech_track", {}) or {}
+        if tt.get("enabled", True):
+            threading.Thread(target=self._tech_track_loop, name="techtrack", daemon=True).start()
         logging.info("webui: слушаю http://%s:%d/ — вход %s%s", host, port, self.auth.username,
                      "  (СМЕНИТЕ ПАРОЛЬ)" if self.auth.must_change else "")
 
     def stop(self):
+        self._stop.set()
         try:
             if self._srv:
                 self._srv.shutdown()
@@ -291,6 +298,23 @@ class WebUI:
                 logging.info("webui: остановлена")
         except Exception:  # noqa: BLE001
             logging.exception("webui: ошибка остановки")
+
+    def _tech_track_loop(self):
+        """Раз в N минут снимает techList/techBooster/researchTech всех игроков и
+        дописывает изменения в logs\\tech_track.jsonl (у игры такого лога нет)."""
+        tt = (self.cfg.get("players", {}) or {}).get("tech_track", {}) or {}
+        iv = max(120, int(tt.get("interval_seconds", 600)))
+        if self._stop.wait(min(iv, 120)):
+            return
+        while not self._stop.is_set():
+            try:
+                ev = players.tech_track_scan(self.cfg, self._tt_state, self._tt_log)
+                if ev:
+                    logging.info("techtrack: %d изменений", len(ev))
+            except Exception:  # noqa: BLE001
+                logging.exception("techtrack: ошибка прохода")
+            if self._stop.wait(iv):
+                return
 
     # ------------------------------------------------------------------- audit
     def audit(self, ip, user, msg):
@@ -713,6 +737,17 @@ class WebUI:
         out["cached_age"] = int(now - ts)
         return self._json(h, out, 200 if out.get("ok") else 500)
 
+    def _api_tech_track(self, h, method, q, sess):
+        try:
+            d = players.tech_track_read(self.cfg, self._tt_log,
+                                        uid=(q.get("uid") or [None])[0],
+                                        kind=(q.get("kind") or [None])[0],
+                                        limit=(q.get("limit") or ["400"])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: tech_track_read")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_server_events(self, h, method, q, sess):
         kinds = (q.get("kinds") or [""])[0]
         kinds = [k for k in kinds.split(",") if k] or None
@@ -739,8 +774,8 @@ class WebUI:
             logging.exception("webui: twink_report")
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
         self.audit(h.client_address[0], sess["user"],
-                   "ТВИНК-ДЕТЕКТ: %d IP с >=%d аккаунтами (из %d IP)"
-                   % (d.get("flagged_ips", 0), mn, d.get("ip_count", 0)))
+                   "ТВИНК-ДЕТЕКТ: пароль %d групп / IP %d / >=%d акк."
+                   % (d.get("code_flagged", 0), d.get("flagged_ips", 0), mn))
         return self._json(h, d)
 
     def _api_player_inventory(self, h, pid, sess):
@@ -1213,10 +1248,11 @@ var T = {
   pl_recent:"Последние события",
   pl_ev_register:"зарегистрировался", pl_ev_enter:"вошёл", pl_ev_exit:"вышел",
   pl_none:"Данных о игроках нет", pl_map:"карта",
-  tw_intro:"Аккаунты, заходившие с одного IP (Logs\\log_net_ip.txt). Чувствительно — под паролем панели.",
+  tw_intro:"Твинки: по общему паролю (code), по IP и по железу. Чувствительно — под паролем панели.",
   tw_prompt:"Подтвердите своим паролем от панели:", tw_min:"мин. аккаунтов на IP",
   tw_show:"Показать", tw_none:"Совпадений нет", tw_summary:"IP всего",
   tw_flagged:"помечено IP", tw_connects:"подкл.", tw_other_ips:"ещё IP", tw_ignored:"игнор",
+  tw_bycode:"по паролю", tw_byip:"по IP", tw_byfp:"по железу (много ложных)", tw_samepw:"общий пароль",
   st_online:"Онлайн (7 дней)", st_now:"сейчас", st_peak:"пик 7д", st_growth:"Рост",
   st_reg:"рег.", st_dau:"актив/день", st_ret:"retention", st_toplvl:"Топ по уровню",
   st_toptime:"Топ по часам", st_clans:"Кланы", st_month:"Топ месяца", st_bans:"Бан-лист",
@@ -1247,6 +1283,8 @@ var T = {
   pd_priv:"Приватные сообщения", pd_ips:"История IP", pd_priv_none:"нет приватных сообщений",
   pd_dev_kill:"смерть", pd_dev_reset_position:"сброс позиции", pd_role_to:"→ роль", pd_role_by:"выдал",
   pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
+  tt_title:"Трекинг техов / бустеров", tt_none:"пока пусто (панель ведёт лог с момента включения)",
+  tt_gained:"изучил", tt_spent:"потратил бустер", tt_bgain:"получил бустер", tt_reschg:"новое исследование",
   pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
   pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
   pd_inv_count:"кол-во", pd_inv_from:"откуда", pd_inv_carry:"при себе",
@@ -1299,10 +1337,11 @@ var T = {
   pl_recent:"Recent events",
   pl_ev_register:"registered", pl_ev_enter:"entered", pl_ev_exit:"left",
   pl_none:"No player data", pl_map:"map",
-  tw_intro:"Accounts that connected from the same IP (Logs\\log_net_ip.txt). Sensitive — behind the panel password.",
+  tw_intro:"Twinks: by shared password (code), by IP and by hardware. Sensitive — behind the panel password.",
   tw_prompt:"Confirm with your panel password:", tw_min:"min accounts per IP",
   tw_show:"Show", tw_none:"No matches", tw_summary:"IPs total",
   tw_flagged:"flagged IPs", tw_connects:"conn.", tw_other_ips:"more IPs", tw_ignored:"ignored",
+  tw_bycode:"by password", tw_byip:"by IP", tw_byfp:"by hardware (noisy)", tw_samepw:"shared password",
   st_online:"Online (7 days)", st_now:"now", st_peak:"7d peak", st_growth:"Growth",
   st_reg:"reg.", st_dau:"active/day", st_ret:"retention", st_toplvl:"Top by level",
   st_toptime:"Top by hours", st_clans:"Clans", st_month:"Month top", st_bans:"Ban list",
@@ -1333,6 +1372,8 @@ var T = {
   pd_priv:"Private messages", pd_ips:"IP history", pd_priv_none:"no private messages",
   pd_dev_kill:"death", pd_dev_reset_position:"position reset", pd_role_to:"→ role", pd_role_by:"granted by",
   pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
+  tt_title:"Tech / booster tracking", tt_none:"empty so far (the panel logs from when it was enabled)",
+  tt_gained:"researched", tt_spent:"spent booster", tt_bgain:"gained booster", tt_reschg:"new research",
   pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
   pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
   pd_inv_count:"qty", pd_inv_from:"from", pd_inv_carry:"carried",
@@ -1737,6 +1778,17 @@ function renderPlayers(){
 function fshort(ts){ if(!ts) return "—"; var m=ts.match(/^(\d\d?)\.(\d\d?)\.\d{4} (\d\d?:\d\d)/);
   return m? (m[1].padStart(2,"0")+"."+m[2].padStart(2,"0")+" "+m[3]) : ts; }
 function plLink(id,name){ return el("a",{class:"pl-link",onclick:function(){ openPlayer(id); }},[name||("id "+id)]); }
+function ttLine(e, noname){
+  var who = noname? "" : ""; // имя добавляется вызывающим для server-wide
+  var body;
+  if(e.kind==="tech_gained") body=[el("span",{class:"chip"},[t("tt_gained")]), " "+(e.techs||[]).join(", ")+" (Σ"+(e.total||"?")+")"];
+  else if(e.kind==="booster_spent") body=[el("span",{class:"chip warn"},[t("tt_spent")]), " ×"+e.delta+" → "+e.left];
+  else if(e.kind==="booster_gained") body=[el("span",{class:"chip"},[t("tt_bgain")]), " +"+e.delta+" = "+e.total];
+  else body=[el("span",{class:"chip"},[t("tt_reschg")]), " "+(e.from||"—")+" → "+e.to];
+  var pre=[el("span",{class:"lg-t"},[fshort(e.ts)+" "])];
+  if(!noname) pre.push(plLink(e.uid, e.name), " ");
+  return el("span",{},pre.concat(body));
+}
 
 // ---- player detail modal ----
 function openPlayer(id){
@@ -1940,6 +1992,16 @@ function renderPlayerModal(d){
   if((ac.rewards||[]).length) acRows.push([t("pd_rewards"), ac.rewards.map(function(x){return fshort(x.ts).slice(0,5)+":"+x.reward;}).join("  ")]);
   if(acRows.length) g.appendChild(kvcard(t("pd_activity"), acRows));
 
+  var ttCard=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
+  g.appendChild(ttCard);
+  api("/api/tech-track?limit=80&uid="+d.id).then(function(tj){
+    ttCard.innerHTML=""; ttCard.appendChild(el("h3",{},[t("tt_title")+(tj.total!=null?" · "+tj.total:"")]));
+    if(!tj.ok || !tj.events || !tj.events.length){ ttCard.appendChild(el("div",{class:"muted small"},[t("tt_none")])); return; }
+    var box=el("div",{class:"mono small",style:"max-height:200px;overflow:auto"},[]);
+    tj.events.forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,true)])); });
+    ttCard.appendChild(box);
+  }).catch(function(){ ttCard.querySelector(".muted").textContent=t("err_net"); });
+
   var chatCard=el("div",{class:"card"},[el("h3",{},[t("pd_chat")]), el("div",{class:"muted small"},["…"])]);
   g.appendChild(chatCard);
   api("/api/players/"+d.id+"/chat?limit=80").then(function(cj){
@@ -2091,6 +2153,16 @@ function drawStats(j){
     el("div",{class:"muted small"},[lh.map(function(x){return x.bucket;}).join("  ")])]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_countries")]),
     ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
+
+  var ttc=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
+  g.appendChild(ttc);
+  api("/api/tech-track?limit=120").then(function(tj){
+    ttc.innerHTML=""; ttc.appendChild(el("h3",{},[t("tt_title")+(tj.total!=null?" · "+tj.total:"")]));
+    if(!tj.ok || !tj.events || !tj.events.length){ ttc.appendChild(el("div",{class:"muted small"},[t("tt_none")])); return; }
+    var box=el("div",{class:"mono small",style:"max-height:280px;overflow:auto"},[]);
+    tj.events.forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,false)])); });
+    ttc.appendChild(box);
+  }).catch(function(){ ttc.querySelector(".muted").textContent=t("err_net"); });
 
   b.appendChild(g);
   b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[
@@ -2261,23 +2333,40 @@ function tabTwinks(v){
     api("/api/twinks",{body:{password:pw.value, min_accounts:parseInt(mn.value,10)||2}}).then(function(j){
       out.innerHTML="";
       out.appendChild(el("p",{class:"muted small"},[
-        t("tw_summary")+": "+j.ip_count+" • "+t("tw_flagged")+": "+j.flagged_ips+
-        (j.ignored&&j.ignored.length? " • "+t("tw_ignored")+": "+j.ignored.join(", "):"")+" • "+j.generated]));
-      if(!j.groups.length){ out.appendChild(el("p",{class:"muted"},[t("tw_none")])); return; }
-      j.groups.forEach(function(gr){
-        var tb=el("table",{},[el("tr",{},["ID",t("col_name"),t("tw_connects"),t("pl_col_enter"),t("pl_col_exit"),t("tw_other_ips")].map(function(x){return el("th",{},[x]);}))]);
-        gr.accounts.forEach(function(a){
-          tb.appendChild(el("tr",{},[
-            el("td",{class:"mono"},[a.id!=null? String(a.id):"—"]),
-            el("td",{},[a.id!=null? plLink(a.id, a.name) : a.name]),
-            el("td",{class:"mono"},[String(a.connects)]),
-            el("td",{class:"mono muted"},[fshort(a.first_seen)]),
-            el("td",{class:"mono muted"},[fshort(a.last_seen)]),
-            el("td",{class:"mono muted"},[a.other_ips&&a.other_ips.length? a.other_ips.join(" "):"—"])
-          ]));
+        t("tw_bycode")+": "+j.code_flagged+" ("+j.code_accounts+" акк.) • "+t("tw_byip")+": "+j.flagged_ips+"/"+j.ip_count+
+        (j.ignored&&j.ignored.length? " (игнор "+j.ignored.join(", ")+")":"")+" • "+j.generated]));
+      function acctable(accs, extra){
+        var head=["ID",t("col_name")].concat(extra||[]);
+        var tb=el("table",{},[el("tr",{},head.map(function(x){return el("th",{},[x]);}))]);
+        accs.forEach(function(a){
+          var tds=[el("td",{class:"mono"},[a.id!=null?String(a.id):"—"]),
+                   el("td",{},[a.id!=null? plLink(a.id,a.name) : a.name])];
+          if(a.connects!=null) tds.push(el("td",{class:"mono"},[String(a.connects)]),
+            el("td",{class:"mono muted"},[fshort(a.first_seen)]), el("td",{class:"mono muted"},[fshort(a.last_seen)]),
+            el("td",{class:"mono muted"},[a.other_ips&&a.other_ips.length?a.other_ips.join(" "):"—"]));
+          tb.appendChild(el("tr",{},tds));
         });
-        out.appendChild(el("div",{class:"card",style:"margin-bottom:10px"},[
-          el("h3",{},["🌐 "+gr.ip+" · "+gr.count]), tb ]));
+        return tb;
+      }
+      out.appendChild(el("h3",{},["🔑 "+t("tw_bycode")]));
+      if(!(j.code_groups||[]).length) out.appendChild(el("p",{class:"muted small"},[t("tw_none")]));
+      (j.code_groups||[]).forEach(function(gr){
+        out.appendChild(el("div",{class:"card",style:"margin-bottom:8px"},[
+          el("h3",{},["🔑 "+t("tw_samepw")+" · "+gr.count+" ("+gr.hint+")"]), acctable(gr.accounts)]));
+      });
+      if((j.fp_groups||[]).length){
+        out.appendChild(el("h3",{style:"margin-top:12px"},["🖥 "+t("tw_byfp")]));
+        (j.fp_groups||[]).forEach(function(gr){
+          out.appendChild(el("div",{class:"card",style:"margin-bottom:8px"},[
+            el("h3",{},["🖥 "+gr.gpu+" / "+gr.screen+" · "+gr.count]), acctable(gr.accounts)]));
+        });
+      }
+      out.appendChild(el("h3",{style:"margin-top:12px"},["🌐 "+t("tw_byip")]));
+      if(!(j.groups||[]).length) out.appendChild(el("p",{class:"muted small"},[t("tw_none")]));
+      (j.groups||[]).forEach(function(gr){
+        out.appendChild(el("div",{class:"card",style:"margin-bottom:8px"},[
+          el("h3",{},["🌐 "+gr.ip+" · "+gr.count]),
+          acctable(gr.accounts,[t("tw_connects"),t("pl_col_enter"),t("pl_col_exit"),t("tw_other_ips")])]));
       });
     }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e)])); });
   }

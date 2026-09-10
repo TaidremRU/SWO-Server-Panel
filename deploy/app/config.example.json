@@ -30,7 +30,12 @@
     "localserver_root": "",
     "world_dir": "",
     "world": "",
-    "twink_ignore_ips": []
+    "twink_ignore_ips": [],
+    "_tech_track_comment": "У игры нет лога исследований/бустеров — панель сама раз в interval_seconds снимает techList/techBooster/researchTech всех игроков и пишет изменения в logs\\tech_track.jsonl.",
+    "tech_track": {
+      "enabled": true,
+      "interval_seconds": 600
+    }
   },
 
   "_monitor_comment": "Фоновая проверка: есть ли server_name в списке публичных Steam-лобби. Нет N проверок подряд -> уведомление всем админам И модераторам; повтор каждые repeat_alert_seconds (0 = один раз); возврат -> сообщение «снова в списке».",
