@@ -84,6 +84,7 @@ try:
             assert '"code"' not in json.dumps(_pf, ensure_ascii=False), "player_item_search: пароль в выдаче"
             _tm = players.tech_meta(players.find_world_dir(cfg))
             assert _tm and all("label" in v for v in _tm.values()), "tech_meta пуст/без label"
+            assert _tm.get("e6", {}).get("name"), "tech_meta: нет имён из craft.json (e6)"
             _cat = players.item_catalog(cfg)
             assert _cat.get("ok") and _cat["items"], "item_catalog пуст"
             for _bf, _lbl in ((players.server_chat(cfg, 20), "server_chat"),

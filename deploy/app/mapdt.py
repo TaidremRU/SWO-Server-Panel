@@ -370,10 +370,21 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
 
         owner = Counter()
         um_w, um_h = w // 8, h // 8
+        um_flat = [] if want else None
+        # userMap[x, y] = ReadUInt32(), x внешний цикл (0..w/8), y внутренний (0..h/8)
         for _ in range(um_w * um_h):
             uid = r.u32()
+            if um_flat is not None:
+                um_flat.append(uid)
             if uid:
                 owner[uid] += 1
+
+        # проставить владельца земли (блок 8×8) каждому найденному предмету
+        if um_flat is not None:
+            for hh in ctx["hits"]:
+                bx, by = hh["x"] // 8, hh["y"] // 8
+                oi = bx * um_h + by
+                hh["owner"] = um_flat[oi] if (bx < um_w and by < um_h and 0 <= oi < len(um_flat)) else 0
 
         oxygen_map = None
         remain = r.rest()
@@ -435,19 +446,24 @@ def summary(path, world_dir=None, item_names=None):
     return d
 
 
-def find_item(path, want, world_dir=None, item_names=None, cap=20000):
+def find_item(path, want, world_dir=None, item_names=None, cap=20000, user_names=None):
     """Найти все предметы с id из ``want`` на карте ``path``.
 
     -> ``{ok, w, h, want, total_count, spots, by_where[{where,spots,count}],
-    hits[{x,y,where,type,name,count,durability}], capped}``.
+    by_owner[{owner,owner_name,spots,count}],
+    hits[{x,y,where,type,name,count,durability,owner,owner_name}], capped}``.
+    ``owner`` = id владельца земли (блок 8×8) в точке предмета, 0 = ничья.
     """
     want = set(want) if not isinstance(want, set) else want
+    user_names = user_names or {}
     d = parse(path, world_dir=world_dir, keep_grid=False, want=want, cap=cap)
     if not d.get("ok"):
         return d
     hits = d.get("hits") or []
     by_where = Counter()
     cnt_where = Counter()
+    by_owner = Counter()
+    cnt_owner = Counter()
     total = 0
     for hh in hits:
         total += hh["count"]
@@ -455,6 +471,11 @@ def find_item(path, want, world_dir=None, item_names=None, cap=20000):
         cnt_where[hh["where"]] += 1
         if item_names:
             hh["name"] = item_names.get(hh["type"]) or ("#%s" % hh["type"])
+        o = hh.get("owner") or 0
+        hh["owner"] = o
+        hh["owner_name"] = (user_names.get(o) or ("id %s" % o)) if o else ""
+        by_owner[o] += hh["count"]
+        cnt_owner[o] += 1
     return {
         "ok": True,
         "w": d["w"], "h": d["h"],
@@ -463,6 +484,9 @@ def find_item(path, want, world_dir=None, item_names=None, cap=20000):
         "spots": len(hits),
         "by_where": [{"where": k, "spots": cnt_where[k], "count": v}
                      for k, v in by_where.most_common()],
+        "by_owner": [{"owner": o, "owner_name": (user_names.get(o) or ("id %s" % o)) if o else "",
+                      "spots": cnt_owner[o], "count": v}
+                     for o, v in by_owner.most_common()],
         "hits": hits,
         "capped": d.get("hits_capped", False),
     }

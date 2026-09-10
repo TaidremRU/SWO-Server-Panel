@@ -1329,7 +1329,7 @@ var T = {
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
-  st_branch:"ветка", st_technote:"названия техов приблизительные (по id — игра не отдаёт их серверу): ветка + тир",
+  st_branch:"открывает", st_technote:"названия — что тех открывает в крафте (из craft.json + локализации клиента); ветка/тир — из дерева tech.json",
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
@@ -1337,6 +1337,7 @@ var T = {
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
   mf_nomatch:"ничего не найдено", mf_matched:"совпадения по имени",
+  mf_owner:"на чьей земле", mf_byowner:"по владельцам земли", mf_nobody:"— ничья —",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
   st_resh_note:"= сумма стоимости изученных техов (tech.json cost в минутах, 1440 = сутки); исследование идёт и оффлайн, бустеры/мозги ускоряют",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
@@ -1435,7 +1436,7 @@ var T = {
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
-  st_branch:"branch", st_technote:"tech names are approximate (derived from id — the game doesn't expose them to the server): branch + tier",
+  st_branch:"unlocks", st_technote:"names = what the tech unlocks in crafting (from craft.json + client localization); branch/tier from the tech.json tree",
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
@@ -1443,6 +1444,7 @@ var T = {
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
   mf_nomatch:"nothing found", mf_matched:"name matches",
+  mf_owner:"on whose land", mf_byowner:"by land owner", mf_nobody:"— unclaimed —",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
   st_resh_note:"= sum of researched techs' cost (tech.json cost is minutes, 1440 = a day); research runs offline too, boosters/brains speed it up",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
@@ -1953,7 +1955,7 @@ function renderPlayerModal(d){
   ]));
 
   g.appendChild(kvcard(t("pd_research"),[
-    [t("pd_res_cur"), r.current||"—"],
+    [t("pd_res_cur"), r.current_name||r.current||"—"],
     r.remaining_min!=null? [t("pd_res_left"), r.remaining_min+" "+t("pd_min")] : null,
     [t("pd_res_done"), r.done_count],
     r.invested_h!=null? [t("st_resh"), "~"+r.invested_h+" "+(S.lang==="ru"?"ч":"h")] : null,
@@ -2344,14 +2346,21 @@ function mdtFindCard(maps){
         el("span",{},[d.elapsed_sec+"s"]) ]));
       if(d.note) out.appendChild(el("div",{class:"muted small"},["⚠ "+d.note]));
       if(!d.spots){ out.appendChild(el("p",{class:"muted"},[t("mf_nomatch")])); return; }
-      out.appendChild(ltable([t("pl_map"),t("mf_total"),t("mf_spots"),t("mf_where")], d.per_map, function(r){
+      out.appendChild(scT(ltable([t("pl_map"),t("mf_total"),t("mf_spots"),t("mf_where")], d.per_map, function(r){
         return [ el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(r.map)},[String(r.map)]),
           String(r.total_count), String(r.spots),
-          el("span",{class:"small"},[r.by_where.map(function(w){return w.where+" ×"+w.count;}).join(", ")]) ]; }));
+          el("span",{class:"small"},[r.by_where.map(function(w){return w.where+" ×"+w.count;}).join(", ")]) ]; })));
+      if((d.by_owner||[]).length){
+        out.appendChild(el("div",{class:"muted small",style:"margin:8px 0 2px"},[t("mf_byowner")+":"]));
+        out.appendChild(scT(ltable([t("mf_owner"),t("mf_spots"),t("mf_total")], d.by_owner, function(o){
+          return [ o.owner? plLink(o.owner, o.owner_name) : el("span",{class:"muted"},[t("mf_nobody")]),
+            String(o.spots), el("b",{},[String(o.count)]) ]; })));
+      }
       var hb=el("div",{class:"mono small",style:"max-height:260px;overflow:auto;margin-top:6px"},[]);
       d.hits.slice(0,400).forEach(function(hh){ hb.appendChild(el("div",{},[
         "map"+hh.map+" ("+hh.x+","+hh.y+") "+hh.where+" — "+(hh.name||("#"+hh.type))+" ×"+hh.count+
-        (hh.durability? " ["+hh.durability+"]":"") ])); });
+        (hh.durability? " ["+hh.durability+"]":"")+
+        (hh.owner_name? "  ⌂ "+hh.owner_name : "") ])); });
       out.appendChild(hb);
       if(d.hits.length>400) out.appendChild(el("div",{class:"muted small"},["… "+d.hits.length+" точек, показаны 400"]));
     }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
