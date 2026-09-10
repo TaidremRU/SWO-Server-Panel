@@ -86,11 +86,239 @@ def _read_text(path, tail_bytes=0):
         return ""
 
 
+def _read_json(path, default=None):
+    """json из файла, терпит BOM (справочники игры сохранены с BOM)."""
+    try:
+        with io.open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {} if default is None else default
+
+
 def _to_epoch(ts):
     try:
         return datetime.strptime(ts, "%d.%m.%Y %H:%M:%S").timestamp()
     except ValueError:
         return 0.0
+
+
+def server_time(world_dir):
+    """Текущее «серверное время» (секунды) из Data\\game\\settings.json.
+
+    К нему привязаны ``user.lastTimeGame`` / ``timeResearchTech`` / ``timeBan`` /
+    ``timeAddRating`` в файлах игрока.
+    """
+    try:
+        return float(_read_json(os.path.join(world_dir, "Data", "game", "settings.json")).get("serverTime") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def load_clans(world_dir):
+    """{clan_id: {name, rating, clan_point, max_users, members:[{id, role, rating, clan_point}]}}."""
+    data = _read_json(os.path.join(world_dir, "Data", "game", "clans.json"))
+    out = {}
+    for c in data.get("clans", []):
+        try:
+            cid = int(c["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[cid] = {
+            "name": c.get("name") or ("clan %d" % cid),
+            "rating": c.get("rating"),
+            "clan_point": c.get("clanPoint"),
+            "max_users": c.get("maxUserCount"),
+            "members": [{"id": u.get("userId"), "role": u.get("role", 0),
+                        "rating": u.get("rating"), "clan_point": u.get("clanPoint")}
+                       for u in c.get("users", [])],
+        }
+    return out
+
+
+def _user_sessions(analytics_path, uid):
+    """Полная история сессий одного игрока из analytics.txt.
+
+    -> {total, total_secs, avg_secs, max_secs, first_seen, last_enter, online,
+        by_hour:[24], recent:[{enter, exit, secs}]}
+    """
+    enters = []          # незакрытые enter'ы (стек)
+    sessions = []        # {enter, exit, secs}
+    by_hour = [0] * 24
+    first_seen = None
+    last_enter = None
+    online = False
+    for ln in _read_text(analytics_path).splitlines():
+        m = _LINE_RX.match(ln)
+        if not m:
+            continue
+        ts, kind, u, extra = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        if u != uid:
+            continue
+        if first_seen is None:
+            first_seen = ts
+        if kind == "enter":
+            enters.append(ts)
+            last_enter = ts
+            online = True
+            try:
+                by_hour[int(ts.split()[1].split(":")[0])] += 1
+            except (IndexError, ValueError):
+                pass
+        elif kind == "exit":
+            secs = int(extra) if extra else 0
+            en = enters.pop() if enters else None
+            sessions.append({"enter": en, "exit": ts, "secs": secs})
+            online = False
+    closed = [s["secs"] for s in sessions if s["secs"]]
+    return {
+        "total": len(sessions) + len(enters),
+        "total_secs": sum(closed),
+        "avg_secs": (sum(closed) // len(closed)) if closed else 0,
+        "max_secs": max(closed) if closed else 0,
+        "first_seen": first_seen,
+        "last_enter": last_enter,
+        "online": online,
+        "by_hour": by_hour,
+        "recent": sessions[-15:][::-1],
+    }
+
+
+ROLE_NAMES = {0: "player", 1: "moderator", 2: "admin", 3: "GM"}
+
+
+def player_detail(cfg, uid):
+    """Полная карточка игрока (пароль ``code`` НЕ включается — см. ``player_code``)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден", "root": localserver_root(cfg)}
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+
+    names = load_user_list(world_dir)
+    uf = os.path.join(world_dir, "Data", "users", "user%d.json" % uid)
+    raw = _read_json(uf)
+    if not raw and uid not in names:
+        return {"ok": False, "error": "игрок %d не найден" % uid}
+    raw.pop("code", None)
+
+    st = server_time(world_dir)
+    sess = _user_sessions(os.path.join(world_dir, "analytics.txt"), uid)
+
+    unit = {}
+    if raw.get("unitId") is not None:
+        unit = _read_json(os.path.join(world_dir, "Data", "units", "unit%s.json" % raw["unitId"]))
+
+    clans = load_clans(world_dir)
+    clan = clans.get(raw.get("clanId") or 0)
+    clan_role = None
+    if clan:
+        for mm in clan["members"]:
+            if mm["id"] == uid:
+                clan_role = mm["role"]
+                break
+
+    def _rem_min(t):
+        return round((float(t) - st) / 60.0, 1) if (t and st and float(t) > st) else None
+
+    tb = float(raw.get("timeBan") or 0)
+    pos = (unit.get("pos") or {})
+    resp = (unit.get("respawnPoint") or {})
+    inv_u = (raw.get("Inventory") or {}).get("items", []) or []
+    inv_a = (unit.get("Inventory") or {}).get("items", []) or []
+
+    return {
+        "ok": True,
+        "id": uid,
+        "name": names.get(uid) or raw.get("name") or ("id %d" % uid),
+        "online": sess["online"],
+        "role": raw.get("role", 0),
+        "profile": {
+            "level": raw.get("unitLevel"),
+            "country": raw.get("country") or "",
+            "video_card": raw.get("videoCard") or "",
+            "screen": raw.get("screenSize") or None,
+            "clan_id": raw.get("clanId") or 0,
+            "clan_name": clan["name"] if clan else "",
+            "clan_role": clan_role,
+            "clan_point": next((m["clan_point"] for m in (clan["members"] if clan else []) if m["id"] == uid), None),
+            "rating": raw.get("addRating"),
+            "playtime_h": round(float(raw.get("timeGame") or 0) / 3600.0, 1),
+            "first_seen": sess["first_seen"],
+            "last_session_ago_h": round((st - float(raw.get("lastTimeGame") or 0)) / 3600.0, 1)
+                                  if (st and raw.get("lastTimeGame")) else None,
+            "banned": bool(raw.get("isBlock")) or tb > st > 0,
+            "ban_expires_in_h": round((tb - st) / 3600.0, 1) if tb > st > 0 else None,
+        },
+        "research": {
+            "current": raw.get("researchTech") or "",
+            "remaining_min": _rem_min(raw.get("timeResearchTech")),
+            "done_count": len(raw.get("techList") or []),
+            "tech_list": raw.get("techList") or [],
+            "booster": raw.get("techBooster"),
+        },
+        "missions": {"current": raw.get("currentMission"), "month": raw.get("missionMonth")},
+        "position": {
+            "map": raw.get("mapId"),
+            "x": pos.get("x"), "y": pos.get("y"),
+            "respawn": {"map": resp.get("mapId"), "x": (resp.get("pos") or {}).get("x"),
+                        "y": (resp.get("pos") or {}).get("y")} if resp else None,
+            "territories": [{"map": t.get("mapId"), "x": (t.get("pos") or {}).get("x"),
+                             "y": (t.get("pos") or {}).get("y")} for t in (raw.get("userTerritories") or [])],
+        },
+        "avatar": {
+            "species": unit.get("speciesId"),
+            "gender": unit.get("gender"),
+            "is_grown": unit.get("isGrown"),
+            "params": [{"type": p.get("type"), "val": p.get("val"), "max": p.get("valMax")}
+                       for p in (unit.get("paramList") or [])],
+            "long_params": [{"type": p.get("type"), "val": p.get("val")}
+                            for p in (unit.get("paramLongList") or [])],
+            "skills": [{"type": s.get("type"), "val": s.get("val")} for s in (unit.get("skillLevels") or [])],
+            "abilities": unit.get("ability") or [],
+            "buffs": len(unit.get("buffs") or []),
+            "stash_count": len(inv_u),
+            "carry_count": len(inv_a),
+            "_stash_raw": inv_u,   # слой 2 подставит имена
+            "_carry_raw": inv_a,
+        },
+        "sessions": {
+            "total": sess["total"],
+            "total_h": round(sess["total_secs"] / 3600.0, 1),
+            "avg_min": round(sess["avg_secs"] / 60.0, 1),
+            "max_min": round(sess["max_secs"] / 60.0, 1),
+            "by_hour": sess["by_hour"],
+            "recent": sess["recent"],
+        },
+        "clan_members": clan["members"] if clan else [],
+    }
+
+
+def player_code(cfg, uid):
+    """Пароль игрока (``code`` из user<N>.json / ``Code`` из user_list.json).
+
+    ОТДЕЛЬНАЯ функция — вызывается только эндпоинтом, который уже проверил
+    админский пароль. В обычную карточку (``player_detail``) code не попадает.
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return None
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return None
+    raw = _read_json(os.path.join(world_dir, "Data", "users", "user%d.json" % uid))
+    if raw.get("code"):
+        return str(raw["code"])
+    ul = _read_json(os.path.join(world_dir, "Data", "users", "user_list.json"))
+    for u in ul.get("userInfo", []):
+        try:
+            if int(u["Id"]) == uid:
+                return str(u.get("Code") or "") or None
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 def parse_analytics(path):

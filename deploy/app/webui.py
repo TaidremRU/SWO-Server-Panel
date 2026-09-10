@@ -380,6 +380,15 @@ class WebUI:
             if self.auth.must_change:
                 return self._json(h, {"error": "must_change"}, 403)
 
+            if route.startswith("players/"):
+                parts = route.split("/")
+                pid = parts[1] if len(parts) > 1 else ""
+                if len(parts) == 2 and method == "GET":
+                    return self._api_player_detail(h, pid, sess)
+                if len(parts) == 3 and parts[2] == "secret" and method == "POST":
+                    return self._api_player_secret(h, pid, sess)
+                return self._json(h, {"error": "unknown"}, 404)
+
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
             if not fn:
                 return self._json(h, {"error": "unknown"}, 404)
@@ -517,6 +526,34 @@ class WebUI:
         out = dict(payload)
         out["cached_age"] = int(now - ts)
         return self._json(h, out)
+
+    def _api_player_detail(self, h, pid, sess):
+        try:
+            d = players.player_detail(self.cfg, pid)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_detail %s", pid)
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_player_secret(self, h, pid, sess):
+        """Пароль игрока — только после повторного ввода админского пароля панели."""
+        ip = h.client_address[0]
+        ok, wait = self.throttle.check(ip)
+        if not ok:
+            return self._json(h, {"error": "throttled", "retry": wait}, 429)
+        b = self._body(h)
+        if not self.auth.verify(sess["user"], b.get("password") or ""):
+            self.throttle.fail(ip)
+            self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль при попытке показать код игрока #%s" % pid)
+            return self._json(h, {"error": "bad_password"}, 403)
+        self.throttle.ok(ip)
+        try:
+            code = players.player_code(self.cfg, pid)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_code %s", pid)
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        self.audit(ip, sess["user"], "ПОКАЗАН пароль игрока #%s" % pid)
+        return self._json(h, {"ok": True, "code": code})
 
     # --------------------------------------------------------------- screenshot
     def _api_shot(self, h, method, q, sess):
@@ -841,6 +878,20 @@ label.fld span{display:block;color:var(--mut);font-size:12.5px;margin-bottom:4px
 .thumbs figcaption{color:var(--mut);font-size:11.5px;margin-top:3px}
 .muted{color:var(--mut)} .mono{font-family:ui-monospace,Consolas,monospace}
 .hide{display:none!important}
+a.pl-link{color:var(--acc);cursor:pointer;text-decoration:none}
+a.pl-link:hover{text-decoration:underline}
+.ovl{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto;z-index:20}
+.dlg{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);width:760px;max-width:100%;padding:0}
+.dlg header{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line);border-radius:var(--radius) var(--radius) 0 0}
+.dlg .bd{padding:14px}
+.dlg .grid{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{font-size:11.5px;padding:1px 7px;border:1px solid var(--line);border-radius:20px;color:var(--mut)}
+.bar{position:relative;height:14px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden;min-width:90px}
+.bar>span{position:absolute;inset:0 auto 0 0;background:var(--acc);opacity:.55}
+.bar>b{position:absolute;inset:0;text-align:center;font-size:10.5px;font-weight:500;line-height:14px}
+.spark{display:flex;align-items:flex-end;gap:1px;height:38px}
+.spark i{flex:1;background:var(--acc);opacity:.5;min-height:1px}
 @media(max-width:560px){main{padding:10px}}
 </style>
 </head>
@@ -892,6 +943,21 @@ var T = {
   pl_recent:"Последние события",
   pl_ev_register:"зарегистрировался", pl_ev_enter:"вошёл", pl_ev_exit:"вышел",
   pl_none:"Данных о игроках нет", pl_map:"карта",
+  pd_profile:"Профиль", pd_research:"Исследования", pd_missions:"Миссии", pd_position:"Позиция",
+  pd_avatar:"Аватар", pd_sessions:"Сессии", pd_clan:"Клан", pd_close:"Закрыть",
+  pd_level:"Уровень", pd_country:"Страна", pd_video:"Видеокарта", pd_screen:"Экран",
+  pd_rating:"Рейтинг", pd_playtime:"Всего часов", pd_first_seen:"Первый вход",
+  pd_last_seen:"Последняя сессия", pd_ban_until:"Бан истекает через", pd_ban_perm:"заблокирован",
+  pd_res_cur:"Изучает", pd_res_left:"осталось", pd_res_done:"изучено техов", pd_booster:"бустер",
+  pd_mission_cur:"Текущая миссия", pd_mission_month:"месяц",
+  pd_respawn:"Респавн", pd_territories:"Территории", pd_coords:"Коорд.",
+  pd_species:"Вид", pd_gender:"Пол", pd_grown:"взрослый", pd_params:"Статы", pd_skills:"Навыки",
+  pd_abilities:"Способности", pd_buffs:"Баффы", pd_stash:"Склад", pd_carry:"При себе", pd_items:"предм.",
+  pd_sess_total:"Всего сессий", pd_sess_hours:"часов онлайн", pd_sess_avg:"средняя",
+  pd_sess_max:"макс", pd_sess_byhour:"Активность по часам суток", pd_sess_recent:"Последние сессии",
+  pd_show_code:"Показать пароль", pd_code_prompt:"Подтвердите своим паролем от панели:",
+  pd_code_btn:"Показать", pd_code_bad:"Неверный пароль", pd_min:"мин", pd_h_ago:"ч назад",
+  pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
   dash:"Dashboard", act:"Actions", srv:"Servers", players:"Players", roles:"Roles", logs:"Logs",
@@ -934,6 +1000,21 @@ var T = {
   pl_recent:"Recent events",
   pl_ev_register:"registered", pl_ev_enter:"entered", pl_ev_exit:"left",
   pl_none:"No player data", pl_map:"map",
+  pd_profile:"Profile", pd_research:"Research", pd_missions:"Missions", pd_position:"Position",
+  pd_avatar:"Avatar", pd_sessions:"Sessions", pd_clan:"Clan", pd_close:"Close",
+  pd_level:"Level", pd_country:"Country", pd_video:"GPU", pd_screen:"Screen",
+  pd_rating:"Rating", pd_playtime:"Total hours", pd_first_seen:"First seen",
+  pd_last_seen:"Last session", pd_ban_until:"Ban expires in", pd_ban_perm:"blocked",
+  pd_res_cur:"Researching", pd_res_left:"left", pd_res_done:"techs done", pd_booster:"booster",
+  pd_mission_cur:"Current mission", pd_mission_month:"month",
+  pd_respawn:"Respawn", pd_territories:"Territories", pd_coords:"Coords",
+  pd_species:"Species", pd_gender:"Gender", pd_grown:"grown", pd_params:"Stats", pd_skills:"Skills",
+  pd_abilities:"Abilities", pd_buffs:"Buffs", pd_stash:"Stash", pd_carry:"Carried", pd_items:"items",
+  pd_sess_total:"Total sessions", pd_sess_hours:"hours online", pd_sess_avg:"avg",
+  pd_sess_max:"max", pd_sess_byhour:"Activity by hour of day", pd_sess_recent:"Recent sessions",
+  pd_show_code:"Show password", pd_code_prompt:"Confirm with your panel password:",
+  pd_code_btn:"Show", pd_code_bad:"Wrong password", pd_min:"min", pd_h_ago:"h ago",
+  pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
 function t(k){ return (T[S.lang]&&T[S.lang][k]) || (T.ru[k]) || k; }
@@ -1303,7 +1384,7 @@ function renderPlayers(){
     var coord = (u.x!=null && u.y!=null)? (u.x+", "+u.y) : "—";
     tb.appendChild(el("tr",{class:u.online?"hl":""},[
       el("td",{class:"mono"},[String(u.id)]),
-      el("td",{},[u.name||"?"]),
+      el("td",{},[plLink(u.id, u.name)]),
       el("td",{},[st]),
       el("td",{class:"mono"},[u.map!=null? String(u.map) : "—"]),
       el("td",{class:"mono"},[coord]),
@@ -1321,15 +1402,132 @@ function renderPlayers(){
     rows.length+" / "+(j.users||[]).length+" • "+t("auto")+" "+ (j.cached_age||0) +"s • "+(j.generated||"")]));
 
   rec.innerHTML="";
-  var rl=el("div",{class:"mono small"},[]);
+  var rl=el("div",{class:"small"},[]);
   (j.recent||[]).forEach(function(e){
     var extra = (e.kind==="exit" && e.secs!=null)? " ("+fdur(e.secs)+")" : "";
-    rl.appendChild(el("div",{},[fshort(e.ts)+"  "+ (e.name||("id "+e.id)) +" — "+plEvLabel(e.kind)+extra]));
+    rl.appendChild(el("div",{class:"mono"},[fshort(e.ts)+"  ", plLink(e.id, e.name||("id "+e.id)), " — "+plEvLabel(e.kind)+extra]));
   });
   rec.appendChild(rl);
 }
 function fshort(ts){ if(!ts) return "—"; var m=ts.match(/^(\d\d?)\.(\d\d?)\.\d{4} (\d\d?:\d\d)/);
   return m? (m[1].padStart(2,"0")+"."+m[2].padStart(2,"0")+" "+m[3]) : ts; }
+function plLink(id,name){ return el("a",{class:"pl-link",onclick:function(){ openPlayer(id); }},[name||("id "+id)]); }
+
+// ---- player detail modal ----
+function openPlayer(id){
+  var ovl=el("div",{class:"ovl",onclick:function(e){ if(e.target===ovl) closePlayer(); }},[
+    el("div",{class:"dlg"},[
+      el("header",{},[el("div",{class:"row",style:"padding:10px 14px"},[
+        el("b",{id:"pd-name",style:"font-size:15px"},["#"+id]), el("span",{class:"sp"}),
+        el("button",{class:"small",onclick:closePlayer},[t("pd_close")])
+      ])]),
+      el("div",{class:"bd",id:"pd-body"},[el("p",{class:"muted"},["…"])])
+    ])
+  ]);
+  document.body.appendChild(ovl);
+  document.addEventListener("keydown",pdEsc);
+  api("/api/players/"+id).then(renderPlayerModal).catch(function(e){
+    var b=$("#pd-body"); if(b){ b.innerHTML=""; b.appendChild(el("div",{class:"msg err"},[errText(e)])); }
+  });
+}
+function pdEsc(e){ if(e.key==="Escape") closePlayer(); }
+function closePlayer(){ var o=$(".ovl"); if(o) o.remove(); document.removeEventListener("keydown",pdEsc); }
+function kvcard(title,rows){ return el("div",{class:"card"},[el("h3",{},[title])].concat(
+  rows.filter(function(r){return r;}).map(function(r){
+    return el("div",{class:"kv"},[el("span",{},[r[0]]),(typeof r[1]==="string"||typeof r[1]==="number")?el("b",{},[String(r[1])]):r[1]]); }))); }
+function renderPlayerModal(d){
+  var b=$("#pd-body"); if(!b) return; b.innerHTML="";
+  if(!d.ok){ b.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+  var nm=$("#pd-name"); if(nm) nm.textContent="#"+d.id+"  "+d.name;
+  var p=d.profile||{}, r=d.research||{}, po=d.position||{}, av=d.avatar||{}, s=d.sessions||{}, mi=d.missions||{};
+  var roleKey={0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[d.role];
+  var g=el("div",{class:"grid"},[]);
+
+  g.appendChild(kvcard(t("pd_profile"),[
+    [t("pl_col_role"), roleKey? t(roleKey) : ("role "+d.role)],
+    [t("pd_level"), p.level],
+    [t("pd_rating"), p.rating],
+    [t("pd_playtime"), p.playtime_h],
+    [t("pd_first_seen"), fshort(p.first_seen)],
+    p.last_session_ago_h!=null? [t("pd_last_seen"), p.last_session_ago_h+" "+t("pd_h_ago")] : null,
+    [t("pd_country"), p.country||"—"],
+    [t("pd_video"), p.video_card||"—"],
+    p.screen? [t("pd_screen"), p.screen.x+"×"+p.screen.y] : null,
+    p.banned? [t("pd_ban_until"), p.ban_expires_in_h!=null? (p.ban_expires_in_h+" "+(S.lang==="ru"?"ч":"h")) : t("pd_ban_perm")] : null
+  ]));
+
+  g.appendChild(kvcard(t("pd_research"),[
+    [t("pd_res_cur"), r.current||"—"],
+    r.remaining_min!=null? [t("pd_res_left"), r.remaining_min+" "+t("pd_min")] : null,
+    [t("pd_res_done"), r.done_count],
+    r.booster!=null? [t("pd_booster"), r.booster] : null
+  ].concat([ [t("pd_missions"), (mi.current!=null? mi.current : "—")+(mi.month!=null? " ("+t("pd_mission_month")+" "+mi.month+")":"")] ])));
+
+  var terr=(po.territories||[]);
+  g.appendChild(kvcard(t("pd_position"),[
+    [t("pl_col_map"), po.map!=null? po.map : "—"],
+    [t("pd_coords"), (po.x!=null? po.x+", "+po.y : "—")],
+    po.respawn? [t("pd_respawn"), po.respawn.map+" @ "+po.respawn.x+", "+po.respawn.y] : null,
+    [t("pd_territories"), terr.length? el("div",{class:"chips"}, terr.map(function(tt){
+      return el("span",{class:"chip"},[tt.map+": "+tt.x+","+tt.y]); })) : "—"]
+  ]));
+
+  var PBL={0:"pd_p0",1:"pd_p1",2:"pd_p2",3:"pd_p3"}, LPL={0:"pd_lp0",1:"pd_lp1",2:"pd_lp2"};
+  var params=(av.params||[]).filter(function(pp){ return pp.max>1; }).map(function(pp){
+    var pct=Math.max(0,Math.min(100, 100*pp.val/pp.max));
+    var lbl=PBL[pp.type]? t(PBL[pp.type]) : ("тип "+pp.type);
+    return [lbl, el("div",{class:"bar",title:pp.val+" / "+pp.max},[
+      el("span",{style:"width:"+pct+"%"},[]), el("b",{},[Math.round(pp.val)+" / "+Math.round(pp.max)])])];
+  });
+  var lps=(av.long_params||[]).map(function(pp){
+    var l=(LPL[pp.type] && t(LPL[pp.type])) || ("L"+pp.type); return [l, String(pp.val)]; });
+  g.appendChild(kvcard(t("pd_avatar"), params.concat(lps).concat([
+    [t("pd_skills"), (av.skills&&av.skills.length)? el("div",{class:"chips"}, av.skills.map(function(sk){
+      return el("span",{class:"chip"},["#"+sk.type+": "+sk.val]); })) : "—"],
+    [t("pd_abilities"), (av.abilities&&av.abilities.length)? String(av.abilities.length) : "—"],
+    [t("pd_buffs"), av.buffs||0],
+    [t("pd_stash")+" / "+t("pd_carry"), (av.stash_count||0)+" / "+(av.carry_count||0)+" "+t("pd_items")]
+  ])));
+
+  var sp=el("div",{class:"spark"}, (s.by_hour||[]).map(function(n){
+    var mx=Math.max.apply(null,(s.by_hour||[1])); return el("i",{style:"height:"+(mx? Math.round(100*n/mx):0)+"%",title:n},[]); }));
+  var recent=el("div",{class:"mono small"}, (s.recent||[]).map(function(x){
+    return el("div",{},[fshort(x.enter)+" → "+(x.exit? fshort(x.exit):"…")+"  "+(x.secs? fdur(x.secs):"")]); }));
+  g.appendChild(el("div",{class:"card"},[
+    el("h3",{},[t("pd_sessions")]),
+    el("div",{class:"kv"},[el("span",{},[t("pd_sess_total")]),el("b",{},[String(s.total||0)])]),
+    el("div",{class:"kv"},[el("span",{},[t("pd_sess_hours")]),el("b",{},[String(s.total_h||0)])]),
+    el("div",{class:"kv"},[el("span",{},[t("pd_sess_avg")+" / "+t("pd_sess_max")]),el("b",{},[(s.avg_min||0)+" / "+(s.max_min||0)+" "+t("pd_min")])]),
+    el("div",{class:"muted small",style:"margin:8px 0 3px"},[t("pd_sess_byhour")]), sp,
+    el("div",{class:"muted small",style:"margin:8px 0 3px"},[t("pd_sess_recent")]), recent
+  ]));
+
+  if(d.clan_members && d.clan_members.length){
+    g.appendChild(kvcard(t("pd_clan")+(p.clan_name? " · "+p.clan_name:""),
+      d.clan_members.map(function(m){ return ["#"+m.id, el("span",{},[plLink(m.id, "#"+m.id), " · r"+(m.rating||0)+" · "+(m.clan_point||0)+"cp"])]; })));
+  }
+
+  b.appendChild(g);
+
+  // reveal-password block
+  var codeBox=el("div",{class:"card",style:"margin-top:12px"},[]);
+  var showBtn=el("button",{class:"small danger",onclick:function(){
+    codeBox.innerHTML="";
+    var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
+    var msg=el("span",{class:"muted small"},[]);
+    var go=el("button",{class:"small",onclick:function(){
+      msg.textContent="…";
+      api("/api/players/"+d.id+"/secret",{body:{password:pw.value}}).then(function(res){
+        codeBox.innerHTML=""; codeBox.appendChild(el("div",{class:"kv"},[
+          el("span",{},["code"]), el("b",{class:"mono"},[res.code||"—"])]));
+      }).catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
+    }},[t("pd_code_btn")]);
+    codeBox.appendChild(el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pw, go, msg]));
+    pw.focus();
+  }},[t("pd_show_code")]);
+  codeBox.appendChild(showBtn);
+  b.appendChild(codeBox);
+}
 
 // ---- roles ----
 function tabRoles(v){
