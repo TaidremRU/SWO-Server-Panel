@@ -114,6 +114,52 @@ def server_time(world_dir):
         return 0.0
 
 
+_REF_CACHE = {}  # (world_dir, fname) -> (mtime, {key: val})
+
+
+def _load_ref(world_dir, fname, key_field, val_field):
+    """id->name из справочника игры (Data\\<fname>), кэш по mtime."""
+    path = os.path.join(world_dir, "Data", fname)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {}
+    ck = (world_dir, fname)
+    hit = _REF_CACHE.get(ck)
+    if hit and hit[0] == mt:
+        return hit[1]
+    data = _read_json(path)
+    out = {}
+    for it in data.get("items", []):
+        if key_field in it:
+            out[it[key_field]] = it.get(val_field)
+    _REF_CACHE[ck] = (mt, out)
+    return out
+
+
+def load_items(world_dir):
+    """{item_id(int): name}."""
+    return _load_ref(world_dir, "items.json", "id", "name")
+
+
+def load_abilities(world_dir):
+    """{ability_uid(int): id(str)}."""
+    return _load_ref(world_dir, "ability.json", "uid", "id")
+
+
+def _name_inv(items, item_names):
+    out = []
+    for it in items or []:
+        tid = it.get("type")
+        out.append({
+            "id": tid,
+            "name": item_names.get(tid) or ("item %s" % tid),
+            "count": it.get("count"),
+            "durability": round(it.get("durability"), 1) if it.get("durability") else None,
+        })
+    return out
+
+
 def load_clans(world_dir):
     """{clan_id: {name, rating, clan_point, max_users, members:[{id, role, rating, clan_point}]}}."""
     data = _read_json(os.path.join(world_dir, "Data", "game", "clans.json"))
@@ -225,6 +271,8 @@ def player_detail(cfg, uid):
     tb = float(raw.get("timeBan") or 0)
     pos = (unit.get("pos") or {})
     resp = (unit.get("respawnPoint") or {})
+    item_names = load_items(world_dir)
+    abil_names = load_abilities(world_dir)
     inv_u = (raw.get("Inventory") or {}).get("items", []) or []
     inv_a = (unit.get("Inventory") or {}).get("items", []) or []
 
@@ -276,12 +324,12 @@ def player_detail(cfg, uid):
             "long_params": [{"type": p.get("type"), "val": p.get("val")}
                             for p in (unit.get("paramLongList") or [])],
             "skills": [{"type": s.get("type"), "val": s.get("val")} for s in (unit.get("skillLevels") or [])],
-            "abilities": unit.get("ability") or [],
+            "abilities": [abil_names.get(a) or ("#%s" % a) for a in (unit.get("ability") or [])],
             "buffs": len(unit.get("buffs") or []),
             "stash_count": len(inv_u),
             "carry_count": len(inv_a),
-            "_stash_raw": inv_u,   # слой 2 подставит имена
-            "_carry_raw": inv_a,
+            "stash": _name_inv(inv_u, item_names),
+            "carry": _name_inv(inv_a, item_names),
         },
         "sessions": {
             "total": sess["total"],

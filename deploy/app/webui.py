@@ -1484,10 +1484,21 @@ function renderPlayerModal(d){
   g.appendChild(kvcard(t("pd_avatar"), params.concat(lps).concat([
     [t("pd_skills"), (av.skills&&av.skills.length)? el("div",{class:"chips"}, av.skills.map(function(sk){
       return el("span",{class:"chip"},["#"+sk.type+": "+sk.val]); })) : "—"],
-    [t("pd_abilities"), (av.abilities&&av.abilities.length)? String(av.abilities.length) : "—"],
-    [t("pd_buffs"), av.buffs||0],
-    [t("pd_stash")+" / "+t("pd_carry"), (av.stash_count||0)+" / "+(av.carry_count||0)+" "+t("pd_items")]
+    [t("pd_abilities"), (av.abilities&&av.abilities.length)? el("div",{class:"chips"}, av.abilities.map(function(a){
+      return el("span",{class:"chip"},[a]); })) : "—"],
+    [t("pd_buffs"), av.buffs||0]
   ])));
+
+  function invCard(title, list, cnt){
+    if(!list || !list.length) return kvcard(title,[["", (cnt||0)+" "+t("pd_items")]]);
+    var tbl=el("table",{}, [el("tr",{},[t("col_name"),"×","dur"].map(function(x){return el("th",{},[x]);}))].concat(
+      list.slice(0,60).map(function(it){ return el("tr",{},[
+        el("td",{},[it.name]), el("td",{class:"mono"},[String(it.count!=null?it.count:"")]),
+        el("td",{class:"mono muted"},[it.durability!=null? String(it.durability):"—"])]); })));
+    return el("div",{class:"card"},[el("h3",{},[title+" · "+list.length]), tbl]);
+  }
+  g.appendChild(invCard(t("pd_stash"), av.stash, av.stash_count));
+  g.appendChild(invCard(t("pd_carry"), av.carry, av.carry_count));
 
   var sp=el("div",{class:"spark"}, (s.by_hour||[]).map(function(n){
     var mx=Math.max.apply(null,(s.by_hour||[1])); return el("i",{style:"height:"+(mx? Math.round(100*n/mx):0)+"%",title:n},[]); }));
