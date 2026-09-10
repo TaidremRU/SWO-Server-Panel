@@ -127,6 +127,10 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 Интерфейс двуязычный (ru/en, тумблер в шапке, выбор в `localStorage` браузера), тёмная/светлая тема. Отключить панель целиком — `webui.enabled = false` в `config.json`.
 
+### Твинки
+
+Вкладка **«Твинки»** — детект аккаунтов, заходивших с одного IP, из `Logs\log_net_ip.txt` (`ник = IP = InterNetwork = порт`). Открывается после ввода **своего пароля от панели** (IP + связывание аккаунтов — чувствительно; попытка пишется в аудит). Показывает группы: IP → список аккаунтов (ID, ник со ссылкой на карточку, число подключений, первый/последний вход, другие IP этого аккаунта), отсортировано по размеру группы. Порог «мин. аккаунтов на IP» настраивается (по умолчанию 2). `config.json → players.twink_ignore_ips` — какие IP не учитывать (напр. локальный релей `127.0.0.2`, через который на текущей VM идут все клиенты — там реальных IP в логе нет).
+
 ### Игроки локального сервера
 
 Вкладка «Игроки» веб-панели (`players.py`). Читает файлы, которые пишет сам локальный сервер игры, из каталога активного мира под `%USERPROFILE%\AppData\LocalLow\Crematorium of Time\SigmaWorld\SigmaWorld\LocalServer\<мир>\`:
@@ -316,6 +320,10 @@ An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webu
 - **Players** — local-server player list and online status (see below).
 
 The interface is bilingual (ru/en, header toggle, choice in the browser `localStorage`), with a dark/light theme. Disable the panel entirely with `webui.enabled = false` in `config.json`.
+
+### Twinks
+
+The **"Twinks"** tab detects accounts that connected from the same IP, from `Logs\log_net_ip.txt` (`nick = IP = InterNetwork = port`). Opens after you enter **your own panel password** (IPs + linking accounts are sensitive; the attempt is audited). Shows groups: IP → list of accounts (ID, nickname linking to the card, connection count, first/last seen, the account's other IPs), sorted by group size. The "min accounts per IP" threshold is adjustable (default 2). `config.json → players.twink_ignore_ips` — IPs to skip (e.g. the local relay `127.0.0.2` that all clients go through on the current VM — there are no real client IPs in the log there).
 
 ### Local server players
 

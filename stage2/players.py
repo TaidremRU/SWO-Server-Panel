@@ -341,6 +341,62 @@ def _activity(world_dir, uid, nick):
     }
 
 
+def twink_report(cfg, min_accounts=2):
+    """Твинк-детект: какие аккаунты подключались с одного IP (из Logs\\log_net_ip.txt).
+
+    Чувствительно (IP + связывание аккаунтов) — вызывается только эндпоинтом,
+    проверившим админ-пароль. IP из ``players.twink_ignore_ips`` пропускаются
+    (напр. локальный релей ``127.0.0.2``).
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    ignore = set((_cfg_pl(cfg).get("twink_ignore_ips") or []))
+    names = load_user_list(world_dir)
+    nick2id = {}
+    for i, n in names.items():
+        nick2id.setdefault(n, i)
+
+    by_ip = {}          # ip -> {nick: {count, first, last}}
+    by_nick_ips = {}     # nick -> set(ip)
+    total = 0
+    for ln in _read_text(os.path.join(world_dir, "Logs", "log_net_ip.txt")).splitlines():
+        m = _NETIP_RX.match(ln)
+        if not m:
+            continue
+        ts, nick, ip = m.group(1), m.group(2), m.group(3)
+        if ip in ignore:
+            continue
+        total += 1
+        e = by_ip.setdefault(ip, {}).setdefault(nick, {"count": 0, "first": ts, "last": ts})
+        e["count"] += 1
+        e["last"] = ts
+        by_nick_ips.setdefault(nick, set()).add(ip)
+
+    groups = []
+    for ip, nicks in by_ip.items():
+        if len(nicks) < min_accounts:
+            continue
+        accs = [{
+            "id": nick2id.get(nk), "name": nk, "connects": v["count"],
+            "first_seen": v["first"], "last_seen": v["last"],
+            "other_ips": sorted(by_nick_ips.get(nk, set()) - {ip}),
+        } for nk, v in nicks.items()]
+        accs.sort(key=lambda a: -a["connects"])
+        groups.append({"ip": ip, "count": len(nicks), "accounts": accs})
+    groups.sort(key=lambda g: -g["count"])
+    return {
+        "ok": True,
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "min_accounts": min_accounts,
+        "ignored": sorted(ignore),
+        "records": total,
+        "ip_count": len(by_ip),
+        "flagged_ips": len(groups),
+        "groups": groups[:300],
+    }
+
+
 def player_sensitive(cfg, uid):
     """Приватные сообщения игрока + история IP. ТОЛЬКО после проверки админ-пароля
     вызывающим эндпоинтом. Аудит — там же."""

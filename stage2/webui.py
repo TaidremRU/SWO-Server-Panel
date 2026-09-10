@@ -606,6 +606,26 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_twinks(self, h, method, q, sess):
+        """Твинк-детект по IP — под админ-паролем панели (IP + связывание аккаунтов)."""
+        b = self._body(h)
+        ok, resp = self._reauth(h, sess, "твинк-детект по IP", body=b)
+        if not ok:
+            return resp
+        try:
+            mn = max(2, min(20, int(b.get("min_accounts") or 2)))
+        except (TypeError, ValueError):
+            mn = 2
+        try:
+            d = players.twink_report(self.cfg, mn)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: twink_report")
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        self.audit(h.client_address[0], sess["user"],
+                   "ТВИНК-ДЕТЕКТ: %d IP с >=%d аккаунтами (из %d IP)"
+                   % (d.get("flagged_ips", 0), mn, d.get("ip_count", 0)))
+        return self._json(h, d)
+
     def _api_player_inventory(self, h, pid, sess):
         """Выдать на склад / изъять из склада или инвентаря — оффлайн, под админ-паролем."""
         body = self._body(h)
@@ -989,7 +1009,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", players:"Игроки", roles:"Роли", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
   refresh:"Обновить", live:"Живой опрос", auto:"Авто",
   vm:"VM", steam:"Steam", game:"Игра", wd:"Watchdog", internals:"Внутренности бота", monitor:"Монитор сервера",
   uptime:"Аптайм", cpu:"CPU", ram:"RAM", disk:"Диск C:", session:"Сессия",
@@ -1029,6 +1049,10 @@ var T = {
   pl_recent:"Последние события",
   pl_ev_register:"зарегистрировался", pl_ev_enter:"вошёл", pl_ev_exit:"вышел",
   pl_none:"Данных о игроках нет", pl_map:"карта",
+  tw_intro:"Аккаунты, заходившие с одного IP (Logs\\log_net_ip.txt). Чувствительно — под паролем панели.",
+  tw_prompt:"Подтвердите своим паролем от панели:", tw_min:"мин. аккаунтов на IP",
+  tw_show:"Показать", tw_none:"Совпадений нет", tw_summary:"IP всего",
+  tw_flagged:"помечено IP", tw_connects:"подкл.", tw_other_ips:"ещё IP", tw_ignored:"игнор",
   pd_profile:"Профиль", pd_research:"Исследования", pd_missions:"Миссии", pd_position:"Позиция",
   pd_avatar:"Аватар", pd_sessions:"Сессии", pd_clan:"Клан", pd_close:"Закрыть",
   pd_level:"Уровень", pd_country:"Страна", pd_video:"Видеокарта", pd_screen:"Экран",
@@ -1055,7 +1079,7 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", players:"Players", roles:"Roles", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
   refresh:"Refresh", live:"Live poll", auto:"Auto",
   vm:"VM", steam:"Steam", game:"Game", wd:"Watchdog", internals:"Bot internals", monitor:"Server monitor",
   uptime:"Uptime", cpu:"CPU", ram:"RAM", disk:"Disk C:", session:"Session",
@@ -1095,6 +1119,10 @@ var T = {
   pl_recent:"Recent events",
   pl_ev_register:"registered", pl_ev_enter:"entered", pl_ev_exit:"left",
   pl_none:"No player data", pl_map:"map",
+  tw_intro:"Accounts that connected from the same IP (Logs\\log_net_ip.txt). Sensitive — behind the panel password.",
+  tw_prompt:"Confirm with your panel password:", tw_min:"min accounts per IP",
+  tw_show:"Show", tw_none:"No matches", tw_summary:"IPs total",
+  tw_flagged:"flagged IPs", tw_connects:"conn.", tw_other_ips:"more IPs", tw_ignored:"ignored",
   pd_profile:"Profile", pd_research:"Research", pd_missions:"Missions", pd_position:"Position",
   pd_avatar:"Avatar", pd_sessions:"Sessions", pd_clan:"Clan", pd_close:"Close",
   pd_level:"Level", pd_country:"Country", pd_video:"GPU", pd_screen:"Screen",
@@ -1174,14 +1202,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","players","roles","logs"];
+  var tabs=["dash","act","srv","players","twinks","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,players:tabPlayers,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -1737,6 +1765,47 @@ function renderPlayerModal(d){
   ]);
   secBox.appendChild(btnRow);
   b.appendChild(secBox);
+}
+
+// ---- twinks (same-IP account detector) ----
+function tabTwinks(v){
+  var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
+  var mn=el("input",{type:"number",value:"2",min:"2",max:"20",style:"padding:6px 8px;width:80px"});
+  var out=el("div",{id:"twout",style:"margin-top:12px"},[]);
+  function run(){
+    out.innerHTML=""; out.appendChild(el("p",{class:"muted"},["…"]));
+    api("/api/twinks",{body:{password:pw.value, min_accounts:parseInt(mn.value,10)||2}}).then(function(j){
+      out.innerHTML="";
+      out.appendChild(el("p",{class:"muted small"},[
+        t("tw_summary")+": "+j.ip_count+" • "+t("tw_flagged")+": "+j.flagged_ips+
+        (j.ignored&&j.ignored.length? " • "+t("tw_ignored")+": "+j.ignored.join(", "):"")+" • "+j.generated]));
+      if(!j.groups.length){ out.appendChild(el("p",{class:"muted"},[t("tw_none")])); return; }
+      j.groups.forEach(function(gr){
+        var tb=el("table",{},[el("tr",{},["ID",t("col_name"),t("tw_connects"),t("pl_col_enter"),t("pl_col_exit"),t("tw_other_ips")].map(function(x){return el("th",{},[x]);}))]);
+        gr.accounts.forEach(function(a){
+          tb.appendChild(el("tr",{},[
+            el("td",{class:"mono"},[a.id!=null? String(a.id):"—"]),
+            el("td",{},[a.id!=null? plLink(a.id, a.name) : a.name]),
+            el("td",{class:"mono"},[String(a.connects)]),
+            el("td",{class:"mono muted"},[fshort(a.first_seen)]),
+            el("td",{class:"mono muted"},[fshort(a.last_seen)]),
+            el("td",{class:"mono muted"},[a.other_ips&&a.other_ips.length? a.other_ips.join(" "):"—"])
+          ]));
+        });
+        out.appendChild(el("div",{class:"card",style:"margin-bottom:10px"},[
+          el("h3",{},["🌐 "+gr.ip+" · "+gr.count]), tb ]));
+      });
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e)])); });
+  }
+  v.appendChild(el("div",{},[
+    el("p",{class:"muted small"},[t("tw_intro")]),
+    el("div",{class:"row"},[
+      el("span",{class:"muted small"},[t("tw_prompt")]), pw,
+      el("label",{class:"small"},[t("tw_min")+" ", mn]),
+      el("button",{class:"small pri",onclick:run},[t("tw_show")])
+    ]),
+    out
+  ]));
 }
 
 // ---- roles ----
