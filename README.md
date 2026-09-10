@@ -138,7 +138,19 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 | `Data\users\user<N>.json` | профиль: всего часов (`timeGame`), уровень (`unitLevel`), роль (`role`: 0 игрок, 1 модератор, 2 админ, 3 GM), бан (`isBlock`/`timeBan`), карта, клан, страна |
 | `Logs\game_state.txt` | авторитетные счётчики онлайна по картам (без имён) — показываются рядом с оценкой по `analytics.txt` |
 
-Каталог мира — `config.json → players`: `localserver_root` (пусто = путь по умолчанию выше), `world` / `world_dir` (пусто = мир с самым свежим `analytics.txt`). Данные кэшируются в панели на 15 c. Пароли (`code` / `Code`) вырезаются на сервере и в выдачу не попадают. Отключить — `players.enabled = false`.
+Каталог мира — `config.json → players`: `localserver_root` (пусто = путь по умолчанию выше), `world` / `world_dir` (пусто = мир с самым свежим `analytics.txt`). Данные кэшируются в панели на 15 c. Пароли (`code` / `Code`) вырезаются на сервере и в выдачу карточки/списка не попадают. Отключить — `players.enabled = false`.
+
+**Карточка игрока** (клик по нику в таблице или ленте) — модальное окно:
+
+- **Профиль:** уровень, рейтинг, страна, видеокарта, разрешение экрана, всего часов, «последняя сессия N ч назад», бан + когда снят
+- **Клан** (из `Data\game\clans.json`): имя, рейтинг, состав с именами (👑 лидер) и переходами на карточки · **Друзья** (из `friends.json`)
+- **Исследования:** текущее + ~время до конца (по `serverTime` из `Data\game\settings.json`), изучено техов, бустер · **Миссии**
+- **Позиция:** карта / координаты / точка респавна / список территорий
+- **Аватар:** статы (`paramList`) полосками, навыки, способности с именами (из `Data\ability.json`), склад и «при себе» с названиями предметов (из `Data\items.json`)
+- **Сессии:** всего / часов онлайн / средняя / макс, гистограмма активности по часам суток, последние 15 сессий
+- **История:** смены ролей (`user_role.txt`), смерти/сбросы (`dead_user.txt`), снос земель (`delete_land*.txt`), месячные награды (`reward_order.txt`)
+- **Чат игрока:** его публичные сообщения из `chat_0..3.txt` (канал + время)
+- **Под своим паролем панели** (повторная проверка `auth.verify` + throttle + аудит): кнопка **«Показать пароль»** игрока (`code`) и кнопка **«Приваты и IP»** — приватные сообщения игрока (`chat_privat.txt`) и история IP (`log_net_ip.txt`). Каждый показ пишется в `webui_audit.log`.
 
 ### Установка
 
@@ -315,7 +327,19 @@ The panel's "Players" tab (`players.py`). Reads the files the game's local serve
 | `Data\users\user<N>.json` | profile: total hours (`timeGame`), level (`unitLevel`), role (`role`: 0 player, 1 moderator, 2 admin, 3 GM), ban (`isBlock`/`timeBan`), map, clan, country |
 | `Logs\game_state.txt` | authoritative online counts per map (no names) — shown next to the `analytics.txt` estimate |
 
-The world folder is set via `config.json → players`: `localserver_root` (empty = the default path above), `world` / `world_dir` (empty = the world with the freshest `analytics.txt`). The panel caches this for 15 s. Passwords (`code` / `Code`) are stripped server-side and never reach the client. Disable with `players.enabled = false`.
+The world folder is set via `config.json → players`: `localserver_root` (empty = the default path above), `world` / `world_dir` (empty = the world with the freshest `analytics.txt`). The panel caches this for 15 s. Passwords (`code` / `Code`) are stripped server-side and never reach the list/card. Disable with `players.enabled = false`.
+
+**Player card** (click a nickname in the table or feed) — a modal with:
+
+- **Profile:** level, rating, country, GPU, screen resolution, total hours, "last session N h ago", ban + when it lifts
+- **Clan** (from `Data\game\clans.json`): name, rating, members with names (👑 leader) and cross-links · **Friends** (from `friends.json`)
+- **Research:** current + est. time left (via `serverTime` from `Data\game\settings.json`), techs done, booster · **Missions**
+- **Position:** map / coords / respawn point / territory list
+- **Avatar:** stats (`paramList`) as bars, skills, named abilities (from `Data\ability.json`), stash and carried inventory with item names (from `Data\items.json`)
+- **Sessions:** total / hours online / avg / max, activity histogram by hour of day, last 15 sessions
+- **History:** role changes (`user_role.txt`), deaths/resets (`dead_user.txt`), land removals (`delete_land*.txt`), monthly rewards (`reward_order.txt`)
+- **Player chat:** their public messages from `chat_0..3.txt` (channel + time)
+- **Behind the panel admin's own password** (re-checked via `auth.verify` + throttle + audit): a **"Show password"** button for the player's `code`, and a **"DMs & IP"** button — the player's private messages (`chat_privat.txt`) and IP history (`log_net_ip.txt`). Every reveal is written to `webui_audit.log`.
 
 ### Install
 

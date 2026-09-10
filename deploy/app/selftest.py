@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Быстрая проверка модулей без запуска бесконечного цикла."""
+import json
 import os
 import sys
 
@@ -61,6 +62,20 @@ try:
         print("players OK: world=%r registered=%s online(analytics)=%s online(game_state)=%s recent=%d"
               % (_psnap["world"], _pt["registered"], _pt["online_analytics"],
                  _pt["online_game_state"], len(_psnap["recent"])))
+        # карточка игрока (слои 1–4): собирается и НЕ содержит пароль code
+        _uid = next((u["id"] for u in _psnap["users"] if u.get("name")), None)
+        if _uid is not None:
+            _det = players.player_detail(cfg, _uid)
+            assert _det.get("ok"), "player_detail: %s" % _det.get("error")
+            assert '"code"' not in json.dumps(_det, ensure_ascii=False), "player_detail: пароль в выдаче!"
+            for _fn in ("player_chat", "player_sensitive", "player_code", "load_items",
+                        "load_abilities", "load_clans", "load_friends", "server_time"):
+                assert hasattr(players, _fn), "players: нет %s" % _fn
+            _ch = players.player_chat(cfg, _uid, 5)
+            print("player_detail OK: #%s %r sessions=%s techs=%s friends=%s chat=%s items(ref)=%d"
+                  % (_uid, _det["name"], _det["sessions"]["total"],
+                     _det["research"]["done_count"], len(_det["friends"]),
+                     _ch.get("count"), len(players.load_items(players.find_world_dir(cfg)))))
     else:
         print("players: каталог мира не найден — %s (root=%s)"
               % (_psnap.get("error"), _psnap.get("root")))

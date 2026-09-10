@@ -160,6 +160,21 @@ def _name_inv(items, item_names):
     return out
 
 
+def load_friends(world_dir):
+    """{user_id: [{id, accesses}]} из Data\\game\\friends.json (accesses = число выданных прав)."""
+    data = _read_json(os.path.join(world_dir, "Data", "game", "friends.json"))
+    out = {}
+    for fl in data.get("friendLists", []):
+        try:
+            uid = int(fl["userId"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[uid] = [{"id": f.get("userId"),
+                     "accesses": sum(1 for a in (f.get("accesses") or []) if a.get("isAccess"))}
+                    for f in (fl.get("friends") or [])]
+    return out
+
+
 def load_clans(world_dir):
     """{clan_id: {name, rating, clan_point, max_users, members:[{id, role, rating, clan_point}]}}."""
     data = _read_json(os.path.join(world_dir, "Data", "game", "clans.json"))
@@ -395,6 +410,9 @@ def player_detail(cfg, uid):
             if mm["id"] == uid:
                 clan_role = mm["role"]
                 break
+    friends = [{"id": f["id"], "name": names.get(f["id"]) or ("id %s" % f["id"]),
+                "accesses": f["accesses"]}
+               for f in load_friends(world_dir).get(uid, [])]
 
     def _rem_min(t):
         return round((float(t) - st) / 60.0, 1) if (t and st and float(t) > st) else None
@@ -470,7 +488,12 @@ def player_detail(cfg, uid):
             "by_hour": sess["by_hour"],
             "recent": sess["recent"],
         },
-        "clan_members": clan["members"] if clan else [],
+        "clan": {"name": clan["name"], "rating": clan["rating"], "clan_point": clan["clan_point"],
+                 "max_users": clan["max_users"]} if clan else None,
+        "clan_members": [{"id": m["id"], "name": names.get(m["id"]) or ("id %s" % m["id"]),
+                          "role": m["role"], "rating": m["rating"], "clan_point": m["clan_point"]}
+                         for m in (clan["members"] if clan else [])],
+        "friends": friends,
         "activity": _activity(world_dir, uid, names.get(uid) or raw.get("name") or ""),
     }
 

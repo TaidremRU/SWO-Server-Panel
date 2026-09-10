@@ -1001,6 +1001,7 @@ var T = {
   pd_chat_none:"нет публичных сообщений", pd_sens_btn:"Приваты и IP",
   pd_priv:"Приватные сообщения", pd_ips:"История IP", pd_priv_none:"нет приватных сообщений",
   pd_dev_kill:"смерть", pd_dev_reset_position:"сброс позиции", pd_role_to:"→ роль", pd_role_by:"выдал",
+  pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -1063,6 +1064,7 @@ var T = {
   pd_chat_none:"no public messages", pd_sens_btn:"DMs & IP",
   pd_priv:"Private messages", pd_ips:"IP history", pd_priv_none:"no private messages",
   pd_dev_kill:"death", pd_dev_reset_position:"position reset", pd_role_to:"→ role", pd_role_by:"granted by",
+  pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
   pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -1562,9 +1564,18 @@ function renderPlayerModal(d){
     el("div",{class:"muted small",style:"margin:8px 0 3px"},[t("pd_sess_recent")]), recent
   ]));
 
-  if(d.clan_members && d.clan_members.length){
-    g.appendChild(kvcard(t("pd_clan")+(p.clan_name? " · "+p.clan_name:""),
-      d.clan_members.map(function(m){ return ["#"+m.id, el("span",{},[plLink(m.id, "#"+m.id), " · r"+(m.rating||0)+" · "+(m.clan_point||0)+"cp"])]; })));
+  if(d.clan && d.clan_members && d.clan_members.length){
+    var cl=d.clan;
+    var crows=[
+      [t("pd_clan_rating"), (cl.rating!=null? cl.rating : "—")+(cl.clan_point!=null? " · "+cl.clan_point+"cp":"")],
+      [t("pd_clan_slots"), d.clan_members.length+" / "+(cl.max_users!=null? cl.max_users : "?")]
+    ].concat(d.clan_members.map(function(m){
+      return [(m.role===0?"👑 ":"")+"#"+m.id, el("span",{},[plLink(m.id, m.name), " · r"+(m.rating||0)+" · "+(m.clan_point||0)+"cp"])]; }));
+    g.appendChild(kvcard(t("pd_clan")+(cl.name? " · "+cl.name:""), crows));
+  }
+  if(d.friends && d.friends.length){
+    g.appendChild(kvcard(t("pd_friends")+" · "+d.friends.length,
+      d.friends.map(function(f){ return ["#"+f.id, el("span",{},[plLink(f.id, f.name), " · "+f.accesses+" acc"])]; })));
   }
 
   var ac=d.activity||{};
