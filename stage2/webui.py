@@ -2356,13 +2356,16 @@ function mdtFindCard(maps){
           return [ o.owner? plLink(o.owner, o.owner_name) : el("span",{class:"muted"},[t("mf_nobody")]),
             String(o.spots), el("b",{},[String(o.count)]) ]; })));
       }
-      var hb=el("div",{class:"mono small",style:"max-height:260px;overflow:auto;margin-top:6px"},[]);
-      d.hits.slice(0,400).forEach(function(hh){ hb.appendChild(el("div",{},[
-        "map"+hh.map+" ("+hh.x+","+hh.y+") "+hh.where+" — "+(hh.name||("#"+hh.type))+" ×"+hh.count+
-        (hh.durability? " ["+hh.durability+"]":"")+
-        (hh.owner_name? "  ⌂ "+hh.owner_name : "") ])); });
-      out.appendChild(hb);
-      if(d.hits.length>400) out.appendChild(el("div",{class:"muted small"},["… "+d.hits.length+" точек, показаны 400"]));
+      out.appendChild(el("div",{class:"muted small",style:"margin:8px 0 2px"},[t("mf_spots")+":"]));
+      out.appendChild(scT(ltable([t("pl_map"),t("pd_coords"),t("mf_where"),t("st_tech"),t("mf_total"),t("mf_owner")],
+        d.hits.slice(0,600), function(hh){
+          return [ el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(hh.map)},["map"+hh.map]),
+            el("span",{class:"mono"},[hh.x+", "+hh.y]),
+            el("span",{class:"small"},[hh.where]),
+            (hh.name||("#"+hh.type))+(hh.durability? " ["+hh.durability+"]":""),
+            el("b",{},["×"+hh.count]),
+            hh.owner? plLink(hh.owner, hh.owner_name) : el("span",{class:"muted"},[t("mf_nobody")]) ]; })));
+      if(d.hits.length>600) out.appendChild(el("div",{class:"muted small"},["… "+d.hits.length+" точек, показаны 600"]));
     }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   }
   inp.addEventListener("keydown",function(e){ if(e.key==="Enter") run(); });
