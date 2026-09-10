@@ -1053,6 +1053,11 @@ def player_detail(cfg, uid):
             "buffs": len(unit.get("buffs") or []),
             "stash_count": len(inv_u),
             "carry_count": len(inv_a),
+            "carry_size": (unit.get("Inventory") or {}).get("size"),
+            "carry_limited": bool((unit.get("Inventory") or {}).get("isLimit")),
+            "stash_size": (raw.get("Inventory") or {}).get("size"),
+            "stash_limited": bool((raw.get("Inventory") or {}).get("isLimit")),
+            "equip_idx": (unit.get("Inventory") or {}).get("equipItem"),
             "stash": _name_inv(inv_u, item_names),
             "carry": _name_inv(inv_a, item_names),
         },
@@ -1746,6 +1751,80 @@ def parse_game_state(world_dir):
             out.append({"map": cur, "count": int(m.group(1))})
             cur = None
     return out
+
+
+def game_state_space_units(world_dir):
+    """Строка 'space unit count = N' из game_state.txt (всего космо-юнитов на сервере)."""
+    m = re.search(r"space unit count\s*=\s*(\d+)",
+                  _read_text(os.path.join(world_dir, "Logs", "game_state.txt")))
+    return int(m.group(1)) if m else None
+
+
+def space_report(cfg):
+    """Аналитика по космосу (карта 0). Из user<N>.json (mapId, spaceUnitId,
+    userTerritories) + analytics (реальный онлайн) + game_state (space unit count).
+    Детали кораблей (топливо/груз/HP) в JSON недоступны — они в бинарных картах.
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    last = {}
+    for ln in _read_text(os.path.join(world_dir, "analytics.txt")).splitlines():
+        m = _LINE_RX.match(ln)
+        if m:
+            last[int(m.group(3))] = m.group(2)
+
+    d = os.path.join(world_dir, "Data", "users")
+    try:
+        listing = os.listdir(d)
+    except OSError:
+        listing = []
+    in_space, has_ship = [], 0
+    planet_terr = {}          # map -> {owner_id: plots}
+    for nm in listing:
+        mm = _USER_FILE_RX.match(nm)
+        if not mm:
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        try:
+            uid = int(raw.get("id") if raw.get("id") is not None else mm.group(1))
+        except (TypeError, ValueError):
+            continue
+        if raw.get("spaceUnitId"):
+            has_ship += 1
+        if raw.get("mapId") == 0:
+            online = last.get(uid) == "enter"
+            in_space.append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
+                             "level": raw.get("unitLevel"), "online": online,
+                             "space_unit": raw.get("spaceUnitId"),
+                             "stuck": not online})
+        for tt in (raw.get("userTerritories") or []):
+            mp = tt.get("mapId")
+            if mp not in (0, 1, None):
+                planet_terr.setdefault(mp, {})
+                planet_terr[mp][uid] = planet_terr[mp].get(uid, 0) + 1
+
+    in_space.sort(key=lambda x: (x["online"], -(x["level"] or 0)), reverse=True)
+    planets = []
+    for mp, owners in sorted(planet_terr.items(), key=lambda kv: -sum(kv[1].values())):
+        plist = sorted(({"id": o, "name": names.get(o) or ("id %d" % o), "plots": n}
+                        for o, n in owners.items()), key=lambda x: -x["plots"])
+        planets.append({"map": mp, "plots": sum(owners.values()),
+                        "owner_count": len(owners), "owners": plist[:20]})
+
+    return {
+        "ok": True,
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "in_space": in_space,
+        "in_space_count": len(in_space),
+        "stuck_offline": sum(1 for x in in_space if x["stuck"]),
+        "space_units_total": game_state_space_units(world_dir),
+        "has_ship": has_ship,
+        "registered": len(names),
+        "planets": planets,
+        "note": "карта 0 = звёздная карта (космос); детали кораблей в JSON недоступны (бинарные map*.dt)",
+    }
 
 
 def snapshot(cfg, recent_limit=40):

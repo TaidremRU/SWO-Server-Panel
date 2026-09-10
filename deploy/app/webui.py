@@ -267,6 +267,7 @@ class WebUI:
         self._stats_cache = None  # (ts, payload)
         self._world_cache = None  # (ts, payload)
         self._health_cache = None  # (ts, payload)
+        self._space_cache = None  # (ts, payload)
         self._shot_lock = threading.Lock()
         self._shot_ts = 0.0
         self._shot_meta = ("", (0, 0))
@@ -722,6 +723,20 @@ class WebUI:
         return self._send(h, 200, "application/zip", data,
                           {"Content-Disposition": 'attachment; filename="%s"' % os.path.basename(path),
                            "Cache-Control": "no-store"})
+
+    def _api_space(self, h, method, q, sess):
+        now = time.time()
+        if not self._space_cache or now - self._space_cache[0] > 60:
+            try:
+                payload = players.space_report(self.cfg)
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: space_report")
+                payload = {"ok": False, "error": str(e)}
+            self._space_cache = (now, payload)
+        ts, payload = self._space_cache
+        out = dict(payload)
+        out["cached_age"] = int(now - ts)
+        return self._json(h, out, 200 if out.get("ok") else 500)
 
     def _api_health(self, h, method, q, sess):
         now = time.time()
@@ -1268,6 +1283,8 @@ var T = {
   st_toptime:"Топ по часам", st_clans:"Кланы", st_month:"Топ месяца", st_bans:"Бан-лист",
   st_staff:"Стафф", st_lvldist:"Уровни", st_countries:"Страны", st_hist:"история ролей",
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
+  sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
+  sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
   hh_slowphase:"медленные фазы старта", hh_lag:"Лаг-события (медленные тики)", hh_lagday:"в день",
   hh_byfunc:"по функциям", hh_connerr:"Ошибки коннекта",
@@ -1358,6 +1375,8 @@ var T = {
   st_toptime:"Top by hours", st_clans:"Clans", st_month:"Month top", st_bans:"Ban list",
   st_staff:"Staff", st_lvldist:"Levels", st_countries:"Countries", st_hist:"role history",
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
+  sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
+  sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
   hh_slowphase:"slow startup phases", hh_lag:"Lag events (slow ticks)", hh_lagday:"per day",
   hh_byfunc:"by function", hh_connerr:"Connection errors",
@@ -1899,9 +1918,19 @@ function renderPlayerModal(d){
   function pdMod(action, params, msgEl){
     return pdWrite("/api/players/"+d.id+"/moderate", Object.assign({action:action}, params||{}), msgEl);
   }
+  function invCap(where){
+    if(where==="carry"){
+      if(av.carry_limited && av.carry_size!=null){
+        var extra = av.carry_size>20? " (+"+(av.carry_size-20)+" к базе 20)" : "";
+        return " / "+av.carry_size+extra;
+      }
+      return "";
+    }
+    return av.stash_limited? (av.stash_size!=null? " / "+av.stash_size : "") : " · ∞";
+  }
   function invCard(title, list, where, cnt){
-    var head=el("h3",{},[title+" · "+(list?list.length:(cnt||0))]);
-    if(!list || !list.length) return el("div",{class:"card"},[head, el("div",{class:"muted small"},[(cnt||0)+" "+t("pd_items")])]);
+    var head=el("h3",{},[title+" · "+(list?list.length:(cnt||0))+invCap(where)]);
+    if(!list || !list.length) return el("div",{class:"card"},[head, el("div",{class:"muted small"},[(cnt||0)+" "+t("pd_items")+invCap(where)])]);
     var rows=list.slice(0,80).map(function(it){
       var tds=[el("td",{},[it.name]), el("td",{class:"mono"},[String(it.count!=null?it.count:"")]),
                el("td",{class:"mono muted"},[it.durability!=null? String(it.durability):"—"])];
@@ -2250,6 +2279,29 @@ function drawStats(j){
     wg.appendChild(tc);
     wbox.appendChild(wg); drawTerr();
   }).catch(function(){ wbox.innerHTML=""; });
+
+  var spbox=el("div",{style:"margin-top:14px"},[]);
+  b.appendChild(spbox);
+  api("/api/space").then(function(sj){
+    spbox.innerHTML="";
+    if(!sj.ok) return;
+    var sg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
+    sg.appendChild(el("div",{class:"card"},[el("h3",{},["🛰 "+t("sp_title")]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_inspace")]),el("b",{},[String(sj.in_space_count)+(sj.stuck_offline? "  ("+t("sp_stuck")+" "+sj.stuck_offline+" ⚠)":"")])]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_units")]),el("b",{},[String(sj.space_units_total!=null?sj.space_units_total:"—")])]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_ship")]),el("b",{},[sj.has_ship+" / "+sj.registered])]),
+      (sj.in_space||[]).length? el("div",{style:"margin-top:6px"}, sj.in_space.map(function(p){
+        return el("div",{class:"small"},[p.online? "🟢 " : "⚪ ", plLink(p.id,p.name), " · lvl "+(p.level||"?")+" · ship#"+(p.space_unit||"?"), p.stuck? " ⚠":""]); })) : null,
+      el("div",{class:"muted small",style:"margin-top:6px"},[sj.note])
+    ].filter(Boolean)));
+    if((sj.planets||[]).length){
+      sg.appendChild(el("div",{class:"card"},[el("h3",{},[t("sp_planets")+" · "+sj.planets.length]),
+        ltable([t("pl_map"),t("sp_plots"),t("sp_owners"),t("st_owner")], sj.planets.slice(0,20), function(p){
+          return [String(p.map), String(p.plots), String(p.owner_count),
+                  el("span",{class:"small"},[p.owners.slice(0,6).map(function(o){return o.name+"("+o.plots+")";}).join(", ")])]; })]));
+    }
+    spbox.appendChild(sg);
+  }).catch(function(){ spbox.innerHTML=""; });
 
   var hbox=el("div",{style:"margin-top:14px"},[]);
   b.appendChild(hbox);
