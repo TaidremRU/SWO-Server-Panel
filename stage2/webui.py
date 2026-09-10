@@ -263,6 +263,7 @@ class WebUI:
         self._players_cache = None  # (ts, payload)
         self._stats_cache = None  # (ts, payload)
         self._world_cache = None  # (ts, payload)
+        self._health_cache = None  # (ts, payload)
         self._shot_lock = threading.Lock()
         self._shot_ts = 0.0
         self._shot_meta = ("", (0, 0))
@@ -657,6 +658,57 @@ class WebUI:
                 payload = {"ok": False, "error": str(e)}
             self._world_cache = (now, payload)
         ts, payload = self._world_cache
+        out = dict(payload)
+        out["cached_age"] = int(now - ts)
+        return self._json(h, out, 200 if out.get("ok") else 500)
+
+    def _api_players_csv(self, h, method, q, sess):
+        try:
+            data, fn = players.players_csv(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: players_csv")
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        if data is None:
+            return self._json(h, {"error": fn}, 500)
+        return self._send(h, 200, "text/csv; charset=utf-8", data,
+                          {"Content-Disposition": 'attachment; filename="%s"' % fn,
+                           "Cache-Control": "no-store"})
+
+    def _api_world_backup(self, h, method, q, sess):
+        """POST {password, scope}: zip каталога мира (в нём пароли игроков) — под админ-паролем."""
+        b = self._body(h)
+        ok, resp = self._reauth(h, sess, "бэкап мира", body=b)
+        if not ok:
+            return resp
+        scope = "full" if (b.get("scope") == "full") else "state"
+        try:
+            path, err = players.make_world_backup(self.cfg, scope)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: make_world_backup")
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        if not path:
+            return self._json(h, {"error": err}, 500)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return self._json(h, {"error": "read", "detail": str(e)}, 500)
+        self.audit(h.client_address[0], sess["user"],
+                   "БЭКАП МИРА (%s, %d МБ) -> %s" % (scope, len(data) // 1048576, os.path.basename(path)))
+        return self._send(h, 200, "application/zip", data,
+                          {"Content-Disposition": 'attachment; filename="%s"' % os.path.basename(path),
+                           "Cache-Control": "no-store"})
+
+    def _api_health(self, h, method, q, sess):
+        now = time.time()
+        if not self._health_cache or now - self._health_cache[0] > 60:
+            try:
+                payload = players.server_health(self.cfg)
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: server_health")
+                payload = {"ok": False, "error": str(e)}
+            self._health_cache = (now, payload)
+        ts, payload = self._health_cache
         out = dict(payload)
         out["cached_age"] = int(now - ts)
         return self._json(h, out, 200 if out.get("ok") else 500)
@@ -1170,6 +1222,11 @@ var T = {
   st_toptime:"Топ по часам", st_clans:"Кланы", st_month:"Топ месяца", st_bans:"Бан-лист",
   st_staff:"Стафф", st_lvldist:"Уровни", st_countries:"Страны", st_hist:"история ролей",
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
+  hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
+  hh_slowphase:"медленные фазы старта", hh_lag:"Лаг-события (медленные тики)", hh_lagday:"в день",
+  hh_byfunc:"по функциям", hh_connerr:"Ошибки коннекта",
+  ex_title:"Экспорт / бэкап", ex_csv:"Игроки → CSV", ex_bstate:"Бэкап мира (state)",
+  ex_bfull:"Бэкап (всё, большой)", ex_wait:"собираю архив…",
   pd_profile:"Профиль", pd_research:"Исследования", pd_missions:"Миссии", pd_position:"Позиция",
   pd_avatar:"Аватар", pd_sessions:"Сессии", pd_clan:"Клан", pd_close:"Закрыть",
   pd_level:"Уровень", pd_country:"Страна", pd_video:"Видеокарта", pd_screen:"Экран",
@@ -1251,6 +1308,11 @@ var T = {
   st_toptime:"Top by hours", st_clans:"Clans", st_month:"Month top", st_bans:"Ban list",
   st_staff:"Staff", st_lvldist:"Levels", st_countries:"Countries", st_hist:"role history",
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
+  hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
+  hh_slowphase:"slow startup phases", hh_lag:"Lag events (slow ticks)", hh_lagday:"per day",
+  hh_byfunc:"by function", hh_connerr:"Connection errors",
+  ex_title:"Export / backup", ex_csv:"Players → CSV", ex_bstate:"World backup (state)",
+  ex_bfull:"Backup (full, large)", ex_wait:"building archive…",
   pd_profile:"Profile", pd_research:"Research", pd_missions:"Missions", pd_position:"Position",
   pd_avatar:"Avatar", pd_sessions:"Sessions", pd_clan:"Clan", pd_close:"Close",
   pd_level:"Level", pd_country:"Country", pd_video:"GPU", pd_screen:"Screen",
@@ -1956,9 +2018,30 @@ function ltable(head, rows, mk){
   rows.forEach(function(r){ tb.appendChild(el("tr",{},mk(r).map(function(c){return el("td",{},[c]);}))); });
   return tb;
 }
+function backupDownload(scope, pw, msg){
+  msg.textContent=t("ex_wait");
+  fetch("/api/world-backup",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify({password:pw,scope:scope})})
+    .then(function(r){ if(!r.ok) return r.json().then(function(j){ throw j; });
+      var fn=(r.headers.get("Content-Disposition")||"").match(/filename="?([^"]+)"?/); fn=fn?fn[1]:"world_backup.zip";
+      return r.blob().then(function(bl){ var a=document.createElement("a"); a.href=URL.createObjectURL(bl); a.download=fn; a.click();
+        setTimeout(function(){URL.revokeObjectURL(a.href);},4000); msg.textContent="✅ "+fn; }); })
+    .catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : (e&&(e.error||e.detail))||t("err_net"); });
+}
 function drawStats(j){
   var b=$("#stbody"); if(!b) return; b.innerHTML="";
   if(!j.ok){ b.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
+  var expPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:120px"});
+  var expMsg=el("span",{class:"muted small"},[]);
+  b.appendChild(el("div",{class:"card",style:"margin-bottom:12px"},[
+    el("h3",{},[t("ex_title")]),
+    el("div",{class:"row"},[
+      el("button",{class:"small",onclick:function(){ window.open("/api/players-csv","_blank"); }},[t("ex_csv")]),
+      expPw,
+      el("button",{class:"small",onclick:function(){ backupDownload("state",expPw.value,expMsg); }},[t("ex_bstate")]),
+      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("ex_bfull")+"?")) backupDownload("full",expPw.value,expMsg); }},[t("ex_bfull")]),
+      expMsg
+    ])
+  ]));
   var g=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
   var on=j.online||{};
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_online")]),
@@ -2038,6 +2121,32 @@ function drawStats(j){
     wg.appendChild(tc);
     wbox.appendChild(wg); drawTerr();
   }).catch(function(){ wbox.innerHTML=""; });
+
+  var hbox=el("div",{style:"margin-top:14px"},[]);
+  b.appendChild(hbox);
+  api("/api/health").then(function(hj){
+    hbox.innerHTML="";
+    if(!hj.ok) return;
+    var hg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
+    var rd=hj.ready||{};
+    hg.appendChild(el("div",{class:"card"},[el("h3",{},[t("hh_ready")]),
+      el("div",{class:"kv"},[el("span",{},[t("hh_startup")]),el("b",{},[String(rd.startup_ms||"—")])]),
+      el("div",{class:"kv"},[el("span",{},[t("hh_mem")]),el("b",{},[String(rd.managed_mb||"—")])]),
+      el("div",{class:"kv"},[el("span",{},[t("hh_clusters")]),el("b",{},[String(rd.clusters||"—")])]),
+      el("div",{class:"kv"},[el("span",{},["ts"]),el("b",{},[rd.ts||"—"])]),
+      el("div",{class:"muted small",style:"margin-top:6px"},[t("hh_slowphase")+": "+(hj.slow_phases||[]).map(function(p){return p.phase+" "+p.ms+"ms";}).join(", ")])]));
+    var lg=hj.lag||{};
+    var lmax=Math.max.apply(null,(lg.per_day||[]).map(function(x){return x.n;}).concat([1]));
+    hg.appendChild(el("div",{class:"card"},[el("h3",{},[t("hh_lag")+" · "+(lg.total||0)]),
+      el("div",{class:"spark",style:"height:52px"}, (lg.per_day||[]).map(function(x){
+        return el("i",{style:"height:"+Math.round(100*x.n/lmax)+"%",title:x.d+": "+x.n},[]); })),
+      el("div",{class:"muted small"},[(lg.per_day||[]).map(function(x){return x.d.slice(0,5);}).join("  ")]),
+      el("div",{class:"muted small",style:"margin-top:6px"},[t("hh_byfunc")+": "+(lg.by_func||[]).slice(0,8).map(function(f){return f.func+"×"+f.n+"(max "+f.max+")";}).join(", ")])]));
+    var ce=hj.conn_errors||{};
+    hg.appendChild(el("div",{class:"card"},[el("h3",{},[t("hh_connerr")+" · "+(ce.total||0)]),
+      (ce.by_player&&ce.by_player.length)? ltable(["#",t("col_name"),"n"], ce.by_player.slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.n)]; }) : el("div",{class:"muted small"},["—"])]));
+    hbox.appendChild(hg);
+  }).catch(function(){});
 }
 
 // ---- server chat / events ----

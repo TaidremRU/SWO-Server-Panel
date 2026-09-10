@@ -22,6 +22,7 @@
 не попадают ни в каком виде.
 """
 import collections
+import csv
 import glob
 import io
 import json
@@ -30,6 +31,7 @@ import os
 import re
 import shutil
 import time
+import zipfile
 from datetime import datetime
 
 _LINE_RX = re.compile(
@@ -610,6 +612,162 @@ def stats_bundle(cfg):
         "totals": {"registered": len(names), "with_profile": len(details),
                    "clans": len(clans), "staff": len(staff), "banned": len(banned)},
     }
+
+
+_PERF_RX = re.compile(r"phase=(\w+), durationMs=(\d+)")
+_READY_RX = re.compile(r"Server ready: startupMs=(\d+), clusters=(\S+), managedMb=(\d+), workingSetMb=(\d+)")
+_LAG_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): ft?=(\S+) time = ([\d,]+)")
+_CONNERR_RX = re.compile(r"id=(\d+) connect=(\w+)")
+
+
+def server_health(cfg):
+    """Здоровье сервера: последний Server ready (startup/память/кластеры),
+    лаг-события (медленные тики из time_shedule*), ошибки коннектов."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    logs = os.path.join(world_dir, "Logs")
+    names = load_user_list(world_dir)
+
+    # --- world_performance.txt: последний "Server ready" + медленные фазы ---
+    perf = _read_text(os.path.join(logs, "world_performance.txt")).splitlines()
+    ready, cur_phases, slow_phases = None, [], []
+    for ln in perf:
+        rm = _READY_RX.search(ln)
+        if rm:
+            ready = {"startup_ms": int(rm.group(1)), "clusters": rm.group(2),
+                     "managed_mb": int(rm.group(3)), "working_set_mb": int(rm.group(4)),
+                     "ts": ln[:19]}
+            slow_phases = sorted(cur_phases, key=lambda p: -p["ms"])[:6]  # фазы этого запуска
+            cur_phases = []
+        else:
+            pm = _PERF_RX.search(ln)
+            if pm:
+                cur_phases.append({"phase": pm.group(1), "ms": int(pm.group(2))})
+
+    # --- лаг-события: time_sheduleNet*.txt + shedule/time_schedule*.txt ---
+    lag_files = glob.glob(os.path.join(logs, "time_shedule*.txt")) + \
+        glob.glob(os.path.join(logs, "shedule", "time_shedule*.txt"))
+    by_func = {}
+    per_day = collections.Counter()
+    recent = []
+    total = 0
+    for fp in lag_files:
+        for ln in _read_text(fp, tail_bytes=600_000).splitlines():
+            m = _LAG_RX.match(ln)
+            if not m:
+                continue
+            total += 1
+            ts, fn = m.group(1), m.group(2)
+            try:
+                val = float(m.group(3).replace(",", "."))
+            except ValueError:
+                continue
+            e = by_func.setdefault(fn, {"n": 0, "max": 0.0})
+            e["n"] += 1
+            e["max"] = max(e["max"], val)
+            per_day[_day(ts)] += 1
+            recent.append({"ts": ts, "epoch": _to_epoch(ts), "func": fn, "val": round(val, 3)})
+    recent.sort(key=lambda x: x["epoch"])
+    days = sorted(per_day)[-12:]
+    lag = {
+        "total": total,
+        "per_day": [{"d": d, "n": per_day[d]} for d in days],
+        "by_func": sorted(({"func": k, "n": v["n"], "max": round(v["max"], 3)}
+                           for k, v in by_func.items()), key=lambda x: -x["n"])[:15],
+        "recent": [{k: r[k] for k in ("ts", "func", "val")} for r in recent[-40:][::-1]],
+    }
+
+    # --- ошибки коннектов error_game*.txt ---
+    cerr_by = collections.Counter()
+    cerr_recent = []
+    for fp in glob.glob(os.path.join(logs, "error_game*.txt")):
+        for ln in _read_text(fp).splitlines():
+            m = _CONNERR_RX.search(ln)
+            if m:
+                uid = int(m.group(1))
+                cerr_by[uid] += 1
+                cerr_recent.append(uid)
+    conn_errors = {
+        "total": sum(cerr_by.values()),
+        "by_player": sorted(({"id": i, "name": names.get(i) or ("id %d" % i), "n": n}
+                             for i, n in cerr_by.items()), key=lambda x: -x["n"])[:20],
+        "recent": [{"id": i, "name": names.get(i) or ("id %d" % i)} for i in cerr_recent[-20:][::-1]],
+    }
+
+    return {
+        "ok": True,
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ready": ready,
+        "slow_phases": slow_phases,
+        "lag": lag,
+        "conn_errors": conn_errors,
+        "memory_note": "memory_log.txt игрой не заполняется (все значения 0)",
+    }
+
+
+def players_csv(cfg):
+    """CSV списка игроков (из snapshot). -> (bytes, filename) | (None, err)."""
+    snap = snapshot(cfg)
+    if not snap.get("ok"):
+        return None, snap.get("error", "нет данных")
+    buf = io.StringIO()
+    cols = ["id", "name", "online", "level", "role", "banned", "playtime_h",
+            "map", "x", "y", "country", "clan", "sessions", "first_seen",
+            "last_enter", "last_exit"]
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for u in snap["users"]:
+        w.writerow(u)
+    fn = "players_%s_%s.csv" % (snap.get("world", "world"),
+                                datetime.now().strftime("%Y%m%d_%H%M%S"))
+    return buf.getvalue().encode("utf-8-sig"), fn
+
+
+_BACKUP_STATE_PARTS = ("analytics.txt", os.path.join("Data", "users"),
+                       os.path.join("Data", "units"), os.path.join("Data", "game"), "Logs")
+
+
+def make_world_backup(cfg, scope="state"):
+    """Zip каталога мира. scope: 'state' (users/units/game/logs + analytics — без
+    бинарных карт) или 'full' (всё). -> (path, None) | (None, err). Хранит
+    последние 5 в base_dir\\logs\\backups\\."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return None, "каталог мира не найден"
+    base = cfg.get("base_dir", os.path.dirname(os.path.abspath(__file__)))
+    out_dir = os.path.join(base, "logs", "backups")
+    os.makedirs(out_dir, exist_ok=True)
+    wname = os.path.basename(world_dir.rstrip("\\/"))
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    zpath = os.path.join(out_dir, "world_%s_%s_%s.zip" % (wname, scope, ts))
+    try:
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            if scope == "full":
+                for root, _dirs, files in os.walk(world_dir):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        z.write(fp, os.path.relpath(fp, world_dir))
+            else:
+                for part in _BACKUP_STATE_PARTS:
+                    p = os.path.join(world_dir, part)
+                    if os.path.isfile(p):
+                        z.write(p, part)
+                    elif os.path.isdir(p):
+                        for root, _dirs, files in os.walk(p):
+                            for f in files:
+                                fp = os.path.join(root, f)
+                                z.write(fp, os.path.relpath(fp, world_dir))
+    except OSError as e:
+        return None, "не удалось собрать архив: %s" % e
+    # оставить последние 5
+    try:
+        olds = sorted(glob.glob(os.path.join(out_dir, "world_*.zip")), key=os.path.getmtime)
+        for old in olds[:-5]:
+            os.remove(old)
+    except OSError:
+        pass
+    return zpath, None
 
 
 def world_map(cfg):
