@@ -10,8 +10,8 @@
 * ``Data\\users\\user_list.json`` — ``{"userInfo":[{"Id":..,"Name":..,"Code":..}]}``.
   ``Code`` — это пароль игрока, **наружу не отдаём**.
 * ``Data\\users\\user<N>.json`` — профиль: ``timeGame`` (всего секунд в игре),
-  ``unitLevel``, ``role`` (0 = игрок, >0 = стафф), ``isBlock`` / ``timeBan``,
-  ``mapId``, ``clanId``, ``country``.
+  ``unitLevel``, ``role`` (0 = игрок, 1 = модератор, 2 = админ, 3 = GM),
+  ``isBlock`` / ``timeBan``, ``mapId``, ``clanId``, ``country``, ``unitId``.
 * ``Logs\\game_state.txt`` — авторитетные счётчики онлайна по картам (без имён).
 
 Онлайн игрока = его последнее событие в ``analytics.txt`` — ``enter``. После

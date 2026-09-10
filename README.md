@@ -135,7 +135,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 |---|---|
 | `analytics.txt` | журнал `ДД.ММ.ГГГГ Ч:ММ:СС: register\|enter\|exit <id> [<сек>]` (час бывает однозначным). Онлайн = последнее событие игрока `enter`; `exit` несёт длину сессии в секундах; отсюда же лента последних событий |
 | `Data\users\user_list.json` | `id → имя` (поле `Code` — **пароль игрока, наружу не отдаётся**) |
-| `Data\users\user<N>.json` | профиль: всего часов (`timeGame`), уровень (`unitLevel`), роль (`role`, 0 = игрок), бан (`isBlock`/`timeBan`), карта, клан, страна |
+| `Data\users\user<N>.json` | профиль: всего часов (`timeGame`), уровень (`unitLevel`), роль (`role`: 0 игрок, 1 модератор, 2 админ, 3 GM), бан (`isBlock`/`timeBan`), карта, клан, страна |
 | `Logs\game_state.txt` | авторитетные счётчики онлайна по картам (без имён) — показываются рядом с оценкой по `analytics.txt` |
 
 Каталог мира — `config.json → players`: `localserver_root` (пусто = путь по умолчанию выше), `world` / `world_dir` (пусто = мир с самым свежим `analytics.txt`). Данные кэшируются в панели на 15 c. Пароли (`code` / `Code`) вырезаются на сервере и в выдачу не попадают. Отключить — `players.enabled = false`.
@@ -312,7 +312,7 @@ The panel's "Players" tab (`players.py`). Reads the files the game's local serve
 |---|---|
 | `analytics.txt` | log `DD.MM.YYYY H:MM:SS: register\|enter\|exit <id> [<sec>]` (the hour may be single-digit). Online = the player's last event is `enter`; `exit` carries the session length in seconds; also the recent-events feed |
 | `Data\users\user_list.json` | `id → name` (the `Code` field is the **player's password — never exposed**) |
-| `Data\users\user<N>.json` | profile: total hours (`timeGame`), level (`unitLevel`), role (`role`, 0 = player), ban (`isBlock`/`timeBan`), map, clan, country |
+| `Data\users\user<N>.json` | profile: total hours (`timeGame`), level (`unitLevel`), role (`role`: 0 player, 1 moderator, 2 admin, 3 GM), ban (`isBlock`/`timeBan`), map, clan, country |
 | `Logs\game_state.txt` | authoritative online counts per map (no names) — shown next to the `analytics.txt` estimate |
 
 The world folder is set via `config.json → players`: `localserver_root` (empty = the default path above), `world` / `world_dir` (empty = the world with the freshest `analytics.txt`). The panel caches this for 15 s. Passwords (`code` / `Code`) are stripped server-side and never reach the client. Disable with `players.enabled = false`.

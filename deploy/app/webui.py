@@ -888,7 +888,8 @@ var T = {
   pl_col_status:"Статус", pl_col_map:"Карта", pl_col_pos:"Коорд.",
   pl_col_enter:"Вход", pl_col_exit:"Выход", pl_col_sess:"Сессия",
   pl_col_hours:"Часов", pl_col_lvl:"Ур.", pl_col_role:"Роль", pl_col_ban:"Бан",
-  pl_role_player:"игрок", pl_role_staff:"стафф", pl_recent:"Последние события",
+  pl_role_player:"игрок", pl_role_staff:"стафф", pl_role_mod:"модератор", pl_role_admin:"админ", pl_role_gm:"GM",
+  pl_recent:"Последние события",
   pl_ev_register:"зарегистрировался", pl_ev_enter:"вошёл", pl_ev_exit:"вышел",
   pl_none:"Данных о игроках нет", pl_map:"карта",
   ago:"назад", never:"нет данных", n_a:"н/д" },
@@ -929,7 +930,8 @@ var T = {
   pl_col_status:"Status", pl_col_map:"Map", pl_col_pos:"Coords",
   pl_col_enter:"Enter", pl_col_exit:"Exit", pl_col_sess:"Session",
   pl_col_hours:"Hours", pl_col_lvl:"Lvl", pl_col_role:"Role", pl_col_ban:"Ban",
-  pl_role_player:"player", pl_role_staff:"staff", pl_recent:"Recent events",
+  pl_role_player:"player", pl_role_staff:"staff", pl_role_mod:"moderator", pl_role_admin:"admin", pl_role_gm:"GM",
+  pl_recent:"Recent events",
   pl_ev_register:"registered", pl_ev_enter:"entered", pl_ev_exit:"left",
   pl_none:"No player data", pl_map:"map",
   ago:"ago", never:"no data", n_a:"n/a" }
@@ -1258,7 +1260,9 @@ function renderPlayers(){
   var tb=el("table",{},[el("tr",{},head.map(function(x){return el("th",{},[x]);}))]);
   rows.forEach(function(u){
     var st = u.online? pill(true,t("running")) : el("span",{class:"muted"},[fshort(u.last_exit)]);
-    var role = (u.role>0)? el("span",{class:"pill warn"},[t("pl_role_staff")+" "+u.role]) : el("span",{class:"muted"},[t("pl_role_player")]);
+    var roleName = ({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[u.role]!=null)
+      ? t({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[u.role]) : (t("pl_role_staff")+" "+u.role);
+    var role = (u.role>0)? el("span",{class:"pill warn"},[roleName]) : el("span",{class:"muted"},[roleName]);
     var coord = (u.x!=null && u.y!=null)? (u.x+", "+u.y) : "—";
     tb.appendChild(el("tr",{class:u.online?"hl":""},[
       el("td",{class:"mono"},[String(u.id)]),
