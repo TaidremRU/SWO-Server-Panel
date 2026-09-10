@@ -139,12 +139,8 @@ def load_user_list(world_dir):
     return out
 
 
-_DETAIL_KEEP = ("unitLevel", "role", "isBlock", "timeBan", "timeGame",
-                "mapId", "clanId", "country")
-
-
 def load_user_details(world_dir):
-    """{id(int): {level, role, banned, playtime_h, map, clan, country}} из user<N>.json.
+    """{id(int): {level, role, banned, playtime_h, map, clan, country, unit_id}} из user<N>.json.
     Пароль (code) не читается в выдачу."""
     d = os.path.join(world_dir, "Data", "users")
     out = {}
@@ -172,7 +168,33 @@ def load_user_details(world_dir):
             "map": raw.get("mapId"),
             "clan": raw.get("clanId") or 0,
             "country": raw.get("country") or "",
+            "unit_id": raw.get("unitId"),
         }
+    return out
+
+
+def load_unit_positions(world_dir, unit_ids):
+    """{unit_id: {x, y, map}} из Data\\units\\unit<id>.json (позиция аватара игрока).
+
+    ``pos`` в файле юнита — координаты на основной карте; когда игрок внутри
+    под-локации (``user.mapId`` != ``unit.mapId``), это его последняя позиция на
+    основной карте.
+    """
+    d = os.path.join(world_dir, "Data", "units")
+    out = {}
+    for uid in unit_ids:
+        if uid is None:
+            continue
+        fp = os.path.join(d, "unit%s.json" % uid)
+        if not os.path.isfile(fp):
+            continue
+        try:
+            raw = json.loads(_read_text(fp) or "{}")
+        except ValueError:
+            continue
+        pos = raw.get("pos") or {}
+        if "x" in pos and "y" in pos:
+            out[uid] = {"x": pos.get("x"), "y": pos.get("y"), "map": raw.get("mapId")}
     return out
 
 
@@ -203,6 +225,7 @@ def snapshot(cfg, recent_limit=40):
     per, events = parse_analytics(os.path.join(world_dir, "analytics.txt"))
     names = load_user_list(world_dir)
     details = load_user_details(world_dir)
+    positions = load_unit_positions(world_dir, {d.get("unit_id") for d in details.values()})
     by_map = parse_game_state(world_dir)
 
     ids = set(names) | set(per) | set(details)
@@ -210,6 +233,7 @@ def snapshot(cfg, recent_limit=40):
     for uid in sorted(ids):
         a = per.get(uid, {})
         d = details.get(uid, {})
+        pos = positions.get(d.get("unit_id")) or {}
         users.append({
             "id": uid,
             "name": names.get(uid) or a.get("name") or ("id %s" % uid),
@@ -224,6 +248,8 @@ def snapshot(cfg, recent_limit=40):
             "banned": bool(d.get("banned")),
             "playtime_h": d.get("playtime_h"),
             "map": d.get("map"),
+            "x": pos.get("x"),
+            "y": pos.get("y"),
             "clan": d.get("clan", 0),
             "country": d.get("country", ""),
         })

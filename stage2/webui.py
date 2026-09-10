@@ -885,7 +885,8 @@ var T = {
   pl_head:"Игроки локального сервера", pl_world:"Мир", pl_registered:"зарегистрировано",
   pl_online:"онлайн (по аналитике)", pl_online_gs:"онлайн (game_state)", pl_bymap:"По картам",
   pl_only_online:"Только онлайн", pl_search:"поиск по имени",
-  pl_col_status:"Статус", pl_col_enter:"Вход", pl_col_exit:"Выход", pl_col_sess:"Сессия",
+  pl_col_status:"Статус", pl_col_map:"Карта", pl_col_pos:"Коорд.",
+  pl_col_enter:"Вход", pl_col_exit:"Выход", pl_col_sess:"Сессия",
   pl_col_hours:"Часов", pl_col_lvl:"Ур.", pl_col_role:"Роль", pl_col_ban:"Бан",
   pl_role_player:"игрок", pl_role_staff:"стафф", pl_recent:"Последние события",
   pl_ev_register:"зарегистрировался", pl_ev_enter:"вошёл", pl_ev_exit:"вышел",
@@ -925,7 +926,8 @@ var T = {
   pl_head:"Local server players", pl_world:"World", pl_registered:"registered",
   pl_online:"online (analytics)", pl_online_gs:"online (game_state)", pl_bymap:"By map",
   pl_only_online:"Online only", pl_search:"search by name",
-  pl_col_status:"Status", pl_col_enter:"Enter", pl_col_exit:"Exit", pl_col_sess:"Session",
+  pl_col_status:"Status", pl_col_map:"Map", pl_col_pos:"Coords",
+  pl_col_enter:"Enter", pl_col_exit:"Exit", pl_col_sess:"Session",
   pl_col_hours:"Hours", pl_col_lvl:"Lvl", pl_col_role:"Role", pl_col_ban:"Ban",
   pl_role_player:"player", pl_role_staff:"staff", pl_recent:"Recent events",
   pl_ev_register:"registered", pl_ev_enter:"entered", pl_ev_exit:"left",
@@ -1250,16 +1252,20 @@ function renderPlayers(){
     return (b.last_enter||"").localeCompare(a.last_enter||""); });
 
   body.innerHTML="";
-  var head=["ID",t("col_name"),t("pl_col_status"),t("pl_col_enter"),t("pl_col_exit"),t("pl_col_sess"),
+  var head=["ID",t("col_name"),t("pl_col_status"),t("pl_col_map"),t("pl_col_pos"),
+            t("pl_col_enter"),t("pl_col_exit"),t("pl_col_sess"),
             t("pl_col_hours"),t("pl_col_lvl"),t("pl_col_role"),t("pl_col_ban")];
   var tb=el("table",{},[el("tr",{},head.map(function(x){return el("th",{},[x]);}))]);
   rows.forEach(function(u){
     var st = u.online? pill(true,t("running")) : el("span",{class:"muted"},[fshort(u.last_exit)]);
     var role = (u.role>0)? el("span",{class:"pill warn"},[t("pl_role_staff")+" "+u.role]) : el("span",{class:"muted"},[t("pl_role_player")]);
+    var coord = (u.x!=null && u.y!=null)? (u.x+", "+u.y) : "—";
     tb.appendChild(el("tr",{class:u.online?"hl":""},[
       el("td",{class:"mono"},[String(u.id)]),
       el("td",{},[u.name||"?"]),
       el("td",{},[st]),
+      el("td",{class:"mono"},[u.map!=null? String(u.map) : "—"]),
+      el("td",{class:"mono"},[coord]),
       el("td",{class:"mono"},[fshort(u.last_enter)]),
       el("td",{class:"mono"},[fshort(u.last_exit)]),
       el("td",{},[u.session_secs!=null? fdur(u.session_secs) : "—"]),
