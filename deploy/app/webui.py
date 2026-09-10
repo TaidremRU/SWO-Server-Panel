@@ -779,6 +779,17 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_mapdt_find(self, h, method, q, sess):
+        """Поиск предмета по карте/всему миру: ?map=N|all&item=<id|имя|подстрока>."""
+        mp = (q.get("map") or ["all"])[0]
+        item = (q.get("item") or [""])[0]
+        try:
+            d = players.mapdt_find(self.cfg, mp, item)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt_find")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_server_events(self, h, method, q, sess):
         kinds = (q.get("kinds") or [""])[0]
         kinds = [k for k in kinds.split(",") if k] or None
@@ -1305,6 +1316,10 @@ var T = {
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
+  mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
+  mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
+  mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
+  mf_nomatch:"ничего не найдено", mf_matched:"совпадения по имени",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
   st_resh_note:"= сумма стоимости изученных техов (tech.json cost в минутах, 1440 = сутки); исследование идёт и оффлайн, бустеры/мозги ускоряют",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
@@ -1403,6 +1418,10 @@ var T = {
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
+  mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
+  mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
+  mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
+  mf_nomatch:"nothing found", mf_matched:"name matches",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
   st_resh_note:"= sum of researched techs' cost (tech.json cost is minutes, 1440 = a day); research runs offline too, boosters/brains speed it up",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
@@ -2232,6 +2251,46 @@ function openMapdt(mapId){
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
+function mdtFindCard(maps){
+  var inp=el("input",{placeholder:t("mf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
+  var sel=el("select",{style:"padding:5px 8px"},[el("option",{value:"all"},[t("mf_all")])].concat(
+    (maps||[]).filter(function(r){return r.map!=null && !r.space;}).map(function(r){
+      return el("option",{value:String(r.map)},["#"+r.map+" ("+(r.size||"?")+")"]); })));
+  var out=el("div",{id:"mf-out"},[]);
+  function run(){
+    var q=inp.value.trim(); if(!q) return;
+    out.innerHTML=""; out.appendChild(el("p",{class:"muted"},[t("mf_wait")]));
+    api("/api/mapdt-find?map="+encodeURIComponent(sel.value)+"&item="+encodeURIComponent(q)).then(function(d){
+      out.innerHTML="";
+      if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+      if(d.matched && d.matched.length>1) out.appendChild(el("div",{class:"muted small",style:"margin-bottom:4px"},[
+        t("mf_matched")+": "+d.matched.map(function(m){return m.name+" #"+m.id;}).join(", ")]));
+      out.appendChild(el("div",{class:"chart-legend"},[
+        el("span",{},[t("mf_total")+": "+d.total_count]),
+        el("span",{},[t("mf_spots")+": "+d.spots]),
+        el("span",{},[t("mf_scanned")+": "+d.scanned+(d.skipped&&d.skipped.length? " (−"+d.skipped.length+")":"")]),
+        el("span",{},[d.elapsed_sec+"s"]) ]));
+      if(d.note) out.appendChild(el("div",{class:"muted small"},["⚠ "+d.note]));
+      if(!d.spots){ out.appendChild(el("p",{class:"muted"},[t("mf_nomatch")])); return; }
+      out.appendChild(ltable([t("pl_map"),t("mf_total"),t("mf_spots"),t("mf_where")], d.per_map, function(r){
+        return [ el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(r.map)},[String(r.map)]),
+          String(r.total_count), String(r.spots),
+          el("span",{class:"small"},[r.by_where.map(function(w){return w.where+" ×"+w.count;}).join(", ")]) ]; }));
+      var hb=el("div",{class:"mono small",style:"max-height:260px;overflow:auto;margin-top:6px"},[]);
+      d.hits.slice(0,400).forEach(function(hh){ hb.appendChild(el("div",{},[
+        "map"+hh.map+" ("+hh.x+","+hh.y+") "+hh.where+" — "+(hh.name||("#"+hh.type))+" ×"+hh.count+
+        (hh.durability? " ["+hh.durability+"]":"") ])); });
+      out.appendChild(hb);
+      if(d.hits.length>400) out.appendChild(el("div",{class:"muted small"},["… "+d.hits.length+" точек, показаны 400"]));
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") run(); });
+  return el("div",{class:"card wide"},[ el("h3",{},["🔎 "+t("mf_title")]),
+    el("div",{class:"row",style:"gap:6px;margin-bottom:8px;flex-wrap:wrap"},[
+      inp, el("span",{class:"muted small"},[t("mf_map")]), sel,
+      el("button",{class:"small",onclick:run},[t("mf_go")]) ]),
+    out ]);
+}
 function backupDownload(scope, pw, msg){
   msg.textContent=t("ex_wait");
   fetch("/api/world-backup",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify({password:pw,scope:scope})})
@@ -2340,6 +2399,7 @@ function drawStats(j){
           r.map!=null && !r.space? el("a",{class:"pl-link",onclick:function(){ openMapdt(r.map); }},[t("md_open")]) : ""]; })]));
     if(w.space_note) wg.lastChild.appendChild(el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]));
     wg.appendChild(el("div",{class:"card wide",id:"mdt-card",style:"display:none"},[]));
+    wg.appendChild(mdtFindCard(w.maps));
     var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
     var tt=el("div",{id:"terrtab"},[]);
     function drawTerr(){

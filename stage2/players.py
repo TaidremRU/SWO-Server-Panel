@@ -40,7 +40,8 @@ except Exception:  # noqa: BLE001
     mapdt = None
 
 _MACHINE_NAMES = ("not", "furnace", "crusher", "extractor", "distiller", "press")
-_MAPDT_CACHE = {}  # path -> (mtime, summary)
+_MAPDT_CACHE = {}       # path -> (mtime, summary)
+_MAPDT_FIND_CACHE = {}  # (path, frozenset(want)) -> (mtime, result)
 
 _LINE_RX = re.compile(
     r"^\s*(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): (register|enter|exit) (\d+)(?: (\d+))?\s*$"
@@ -914,6 +915,123 @@ def mapdt_index(cfg):
         })
     out.sort(key=lambda x: -x["file_mb"])
     return {"ok": True, "maps": out}
+
+
+def _resolve_item_query(world_dir, query):
+    """query = id | точное имя | подстрока имени -> (want:set[int], matched:[{id,name}])."""
+    by_id, by_name = _items_full(world_dir)
+    s = str(query or "").strip()
+    if not s:
+        return set(), []
+    if s.isdigit() and int(s) in by_id:
+        i = int(s)
+        return {i}, [{"id": i, "name": by_id[i].get("name")}]
+    if s in by_name:
+        i = by_name[s]["id"]
+        return {i}, [{"id": i, "name": s}]
+    low = s.lower()
+    m = [{"id": i, "name": d.get("name")} for i, d in by_id.items()
+         if d.get("name") and low in d["name"].lower()]
+    m.sort(key=lambda x: (len(x["name"]), x["name"]))
+    return {x["id"] for x in m}, m[:40]
+
+
+def mapdt_find(cfg, map_id, item):
+    """Найти предмет(ы) во всём мире или на одной карте.
+
+    ``map_id`` = число или ``"all"``. ``item`` = id / имя / подстрока имени.
+    -> ``{ok, query, matched[{id,name}], want, per_map[{map,size,total_count,
+    spots,by_where,sec,capped}], hits[{map,x,y,where,type,name,count,durability}],
+    total_count, spots, scanned, skipped, elapsed_sec, note}``.
+    """
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    want, matched = _resolve_item_query(world_dir, item)
+    if not want:
+        return {"ok": False, "error": "предмет не найден: %r" % item}
+
+    md = os.path.join(world_dir, "Data", "maps")
+    ids = []
+    if str(map_id).lower() in ("all", "*", ""):
+        try:
+            for f in os.listdir(md):
+                mm = re.match(r"map(\d+)\.dt$", f)
+                if mm:
+                    ids.append(int(mm.group(1)))
+        except OSError:
+            pass
+        ids.sort(key=lambda n: os.path.getsize(os.path.join(md, "map%d.dt" % n)))
+    else:
+        try:
+            ids = [int(map_id)]
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad id"}
+
+    items = load_items(world_dir)
+    per_map, hits = [], []
+    total = spots = scanned = 0
+    skipped = []
+    budget = 150.0            # c: общий бюджет на скан всего мира
+    hit_cap = 5000
+    t_start = time.time()
+    fs = frozenset(want)
+    for mid in ids:
+        if time.time() - t_start > budget:
+            skipped.append(mid)
+            continue
+        path = os.path.join(md, "map%d.dt" % mid)
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            continue
+        ck = (path, fs)
+        cached = _MAPDT_FIND_CACHE.get(ck)
+        if cached and cached[0] == mt:
+            res = cached[1]
+        else:
+            t0 = time.time()
+            res = mapdt.find_item(path, want, world_dir=world_dir,
+                                  item_names=items, cap=hit_cap)
+            if res.get("ok"):
+                res["sec"] = round(time.time() - t0, 2)
+                _MAPDT_FIND_CACHE[ck] = (mt, res)
+        scanned += 1
+        if not res.get("ok"):
+            skipped.append(mid)
+            continue
+        if res["spots"]:
+            per_map.append({
+                "map": mid, "size": "%dx%d" % (res["w"], res["h"]),
+                "total_count": res["total_count"], "spots": res["spots"],
+                "by_where": res["by_where"], "sec": res.get("sec"),
+                "capped": res["capped"],
+            })
+            total += res["total_count"]
+            spots += res["spots"]
+            for hh in res["hits"]:
+                if len(hits) < hit_cap:
+                    hh2 = dict(hh)
+                    hh2["map"] = mid
+                    hits.append(hh2)
+    per_map.sort(key=lambda x: -x["total_count"])
+    return {
+        "ok": True,
+        "query": str(item),
+        "matched": matched,
+        "want": sorted(want),
+        "per_map": per_map,
+        "hits": hits,
+        "total_count": total,
+        "spots": spots,
+        "scanned": scanned,
+        "skipped": skipped,
+        "elapsed_sec": round(time.time() - t_start, 1),
+        "note": ("остановлено по лимиту времени (%ss); повторите — уже разобранные "
+                 "карты в кэше" % int(budget)) if skipped else None,
+    }
 
 
 def world_map(cfg):

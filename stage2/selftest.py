@@ -95,14 +95,22 @@ try:
             # бинарный парсер карт: индекс + разбор самой маленькой карты
             _mix = players.mapdt_index(cfg)
             assert _mix.get("ok"), "mapdt_index: %s" % _mix.get("error")
+            assert hasattr(players, "mapdt_find") and hasattr(mapdt, "find_item"), \
+                "нет mapdt_find/find_item"
             if _mix["maps"]:
                 _sm = _mix["maps"][-1]["map"]  # список отсортирован по убыванию размера
                 _md = players.mapdt_summary(cfg, _sm)
                 assert _md.get("ok"), "mapdt map%s: %s" % (_sm, _md.get("error"))
                 assert _md["trailing_bytes"] == 0, "mapdt: %d лишних байт" % _md["trailing_bytes"]
-                print("mapdt OK: %d карт, map%s %dx%d blocks=%d machines=%d trailing=0"
+                # поиск предмета по одной (маленькой) карте: не должен падать
+                _mf = players.mapdt_find(cfg, _sm, "tech_booster")
+                assert _mf.get("ok"), "mapdt_find: %s" % _mf.get("error")
+                assert '"code"' not in json.dumps(_mf, ensure_ascii=False)
+                print("mapdt OK: %d карт, map%s %dx%d blocks=%d machines=%d trailing=0; "
+                      "find(tech_booster)@map%s: %s шт в %s точках"
                       % (len(_mix["maps"]), _sm, _md["w"], _md["h"],
-                         _md["blocks_total"], _md["machines_total"]))
+                         _md["blocks_total"], _md["machines_total"],
+                         _sm, _mf["total_count"], _mf["spots"]))
             print("server-wide OK: chat=%d events=%d online_now=%s clans=%d health_lag=%d csv=%dB"
                   % (players.server_chat(cfg)["total"], players.server_events(cfg)["total"],
                      players.stats_bundle(cfg)["online"]["now"],

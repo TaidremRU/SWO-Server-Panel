@@ -85,7 +85,9 @@ class _R:
 
 
 # ------------------------------------------------------------ вложенные структуры
-def _read_item(r, version, item_ext):
+# ctx (мутируемый, один на разбор): {"want": set|None, "hits": list,
+#   "x": int, "y": int, "where": str, "cap": int} — сбор координат предметов.
+def _read_item(r, version, item_ext, ctx):
     it = {"type": r.i32(), "count": r.i32()}
     it["durability"] = r.i32() if version == 0 else r.f32()
     it["extData"] = r.u64()
@@ -102,12 +104,17 @@ def _read_item(r, version, item_ext):
                 for _ in range(r.i32()):      # buffs
                     r.i32()
                     r.f32()
+    w = ctx["want"]
+    if w is not None and it["type"] in w and len(ctx["hits"]) < ctx["cap"]:
+        ctx["hits"].append({"x": ctx["x"], "y": ctx["y"], "where": ctx["where"],
+                            "type": it["type"], "count": it["count"],
+                            "durability": round(it["durability"], 1) if it.get("durability") else 0})
     return it
 
 
-def _read_inventory(r, version, item_ext):
+def _read_inventory(r, version, item_ext, ctx):
     n = r.i32()
-    items = [_read_item(r, version, item_ext) for _ in range(n)]
+    items = [_read_item(r, version, item_ext, ctx) for _ in range(n)]
     size = r.i32()
     is_limit = r.boolean()
     is_limit_stack = r.boolean()
@@ -115,21 +122,29 @@ def _read_inventory(r, version, item_ext):
             "is_limit_stack": is_limit_stack}
 
 
-def _read_machine(r, version, item_ext):
+def _read_machine(r, version, item_ext, ctx):
     m = {"type": r.i32()}
-    m["material"] = _read_item(r, version, item_ext) if r.boolean() else None
-    m["product"] = _read_item(r, version, item_ext) if r.boolean() else None
-    m["fuel"] = _read_item(r, version, item_ext) if r.boolean() else None
+    _w = ctx["where"]
+    ctx["where"] = _w + "/machine.material"
+    m["material"] = _read_item(r, version, item_ext, ctx) if r.boolean() else None
+    ctx["where"] = _w + "/machine.product"
+    m["product"] = _read_item(r, version, item_ext, ctx) if r.boolean() else None
+    ctx["where"] = _w + "/machine.fuel"
+    m["fuel"] = _read_item(r, version, item_ext, ctx) if r.boolean() else None
+    ctx["where"] = _w
     m["energy"] = r.f32()
     return m
 
 
-def _read_unit(r, version, bot_version, item_ext):
+def _read_unit(r, version, bot_version, item_ext, ctx):
     u = {"id": r.u64(), "user_id": r.u32(), "species": r.u32(), "gender": r.i32()}
     r.f64()                                   # timeGrowing
     u["map"] = r.u32()
     u["pos"] = r.vec2w()
-    u["inventory"] = _read_inventory(r, version, item_ext)
+    _w = ctx["where"]
+    ctx["where"] = _w + "/unit"
+    u["inventory"] = _read_inventory(r, version, item_ext, ctx)
+    ctx["where"] = _w
     for _ in range(r.i32()):                  # paramList
         r.i32(); r.f32(); r.f32()
     for _ in range(r.i32()):                  # paramLongList
@@ -145,7 +160,7 @@ def _read_unit(r, version, bot_version, item_ext):
     u["is_grown"] = r.boolean()
     r.f32()                                   # timePrepareAttack
     if r.boolean():                           # box
-        _read_block(r, version, item_ext)
+        _read_block(r, version, item_ext, ctx)
     r.i32(); r.i32(); r.i32()                 # viewInfo: view(Pair int,int), color
     if r.boolean():                           # respawnPoint
         r.u32(); r.vec2w()
@@ -156,8 +171,10 @@ def _read_unit(r, version, bot_version, item_ext):
         r.u32()                               # flockId
     if bot_version > 1 and r.boolean():       # robot
         r.u32(); r.i32(); r.f32(); r.boolean()          # userId, robotType, energy, isActivate
+        ctx["where"] = _w + "/robot"
         for _ in range(r.i32()):
-            _read_inventory(r, MAP_VERSION, item_ext)    # Equipment
+            _read_inventory(r, MAP_VERSION, item_ext, ctx)   # Equipment
+        ctx["where"] = _w
         r.i32(); r.i32(); r.i32()                        # RobotProgram
         if bot_version > 2:
             r.vec2w()                                    # parking
@@ -170,57 +187,70 @@ def _read_unit(r, version, bot_version, item_ext):
     return u
 
 
-def _read_transport(r, version, item_ext):
+def _read_transport(r, version, item_ext, ctx):
     t = {"energy": r.f32(), "health": r.f32(), "user_id": r.u32()}
     r.f64()                                   # timeFree
-    t["inventory"] = _read_inventory(r, version, item_ext)
+    _w = ctx["where"]
+    ctx["where"] = _w + "/vehicle"
+    t["inventory"] = _read_inventory(r, version, item_ext, ctx)
+    ctx["where"] = _w + "/vehicle.equip"
     for _ in range(r.i32()):                  # Equipment
-        _read_inventory(r, version, item_ext)
+        _read_inventory(r, version, item_ext, ctx)
+    ctx["where"] = _w
     t["units"] = []
     if version > 1:
         for _ in range(r.i32()):             # transport (вложенные Block)
-            _read_block(r, version, item_ext)
+            _read_block(r, version, item_ext, ctx)
     if version > 4:
         bot_version = 4 if version > 6 else (3 if version > 5 else 2)
         for _ in range(r.i32()):
-            t["units"].append(_read_unit(r, version, bot_version, item_ext))
+            t["units"].append(_read_unit(r, version, bot_version, item_ext, ctx))
     return t
 
 
-def _read_shop(r, version, item_ext):
+def _read_shop(r, version, item_ext, ctx):
+    _w = ctx["where"]
+    ctx["where"] = _w + "/shop"
     for _ in range(r.i32()):                  # inventory (List<Item>)
-        _read_item(r, version, item_ext)
+        _read_item(r, version, item_ext, ctx)
     if r.boolean():                           # storage
-        _read_inventory(r, version, item_ext)
+        _read_inventory(r, version, item_ext, ctx)
+    ctx["where"] = _w
     for _ in range(r.i32()):                  # price
         r.i32(); r.i32()
     r.i32()                                   # countUse
 
 
-def _read_block(r, version, item_ext):
+def _read_block(r, version, item_ext, ctx):
     blk = {"type": r.i32(), "level": r.i32(), "health": r.f32(), "res": []}
     for _ in range(r.i32()):
         blk["res"].append({"type": r.i32(), "count": r.i32()})
-    blk["transport"] = _read_transport(r, version, item_ext) if r.boolean() else None
+    blk["transport"] = _read_transport(r, version, item_ext, ctx) if r.boolean() else None
     if version > 0 and r.boolean():
-        _read_shop(r, version, item_ext)
+        _read_shop(r, version, item_ext, ctx)
     return blk
 
 
-def _read_cell(r, version, item_ext):
+def _read_cell(r, version, item_ext, ctx):
     c = {"ground": r.i8(), "block": None, "grass": None, "box": None,
          "machine": None, "containers": [], "gas": None}
     if r.boolean():
-        c["block"] = _read_block(r, version, item_ext)
+        ctx["where"] = "block"
+        c["block"] = _read_block(r, version, item_ext, ctx)
     if r.boolean():
-        c["grass"] = _read_block(r, version, item_ext)
+        ctx["where"] = "grass"
+        c["grass"] = _read_block(r, version, item_ext, ctx)
     if r.boolean():
-        c["box"] = _read_block(r, version, item_ext)
+        ctx["where"] = "box"
+        c["box"] = _read_block(r, version, item_ext, ctx)
     for slot in ("underground", "ground_inv", "container"):
         if r.boolean():
-            c["containers"].append((slot, _read_inventory(r, version, item_ext)))
+            ctx["where"] = "container:" + slot
+            c["containers"].append((slot, _read_inventory(r, version, item_ext, ctx)))
     if r.boolean():
-        c["machine"] = _read_machine(r, version, item_ext)
+        ctx["where"] = "machine"
+        c["machine"] = _read_machine(r, version, item_ext, ctx)
+    ctx["where"] = ""
     if version > 2:
         c["energy"] = r.f32()
     if version > 3 and r.boolean():
@@ -258,8 +288,12 @@ def _load_item_ext(world_dir):
 
 
 # --------------------------------------------------------------------- публичное
-def parse(path, world_dir=None, keep_grid=False):
-    """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``."""
+def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
+    """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
+
+    ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
+    ``[{x, y, where, type, count, durability}]`` (не более ``cap`` записей).
+    """
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -267,6 +301,8 @@ def parse(path, world_dir=None, keep_grid=False):
         return {"ok": False, "error": "не открыть файл: %s" % e}
 
     item_ext = _load_item_ext(world_dir)
+    want = set(want) if want else None
+    ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap}
     r = _R(data)
     try:
         version = MAP_VERSION
@@ -292,7 +328,8 @@ def parse(path, world_dir=None, keep_grid=False):
         for _x in range(w):
             row = [] if keep_grid else None
             for _y in range(h):
-                c = _read_cell(r, version, item_ext)
+                ctx["x"], ctx["y"] = _x, _y
+                c = _read_cell(r, version, item_ext, ctx)
                 if c["ground"]:
                     land += 1
                 else:
@@ -301,6 +338,10 @@ def parse(path, world_dir=None, keep_grid=False):
                     blocks[c["block"]["type"]] += 1
                     for rr in c["block"]["res"]:
                         res_in_blocks[rr["type"]] += rr["count"]
+                        if want and rr["type"] in want and len(ctx["hits"]) < cap:
+                            ctx["hits"].append({"x": _x, "y": _y, "where": "block.res",
+                                                "type": rr["type"], "count": rr["count"],
+                                                "durability": 0})
                     if c["block"].get("transport"):
                         vehicles += 1
                         vehicle_units += len(c["block"]["transport"].get("units") or [])
@@ -370,6 +411,8 @@ def parse(path, world_dir=None, keep_grid=False):
             "oxygen_map": bool(oxygen_map),
             "trailing_bytes": trailing,
             "grid": grid,
+            "hits": ctx["hits"] if want else None,
+            "hits_capped": bool(want) and len(ctx["hits"]) >= cap,
         }
     except (EOFError, struct.error) as e:
         return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p,
@@ -390,3 +433,36 @@ def summary(path, world_dir=None, item_names=None):
         for row in d.get(key, []):
             row["name"] = item_names.get(row["type"]) or ("#%s" % row["type"])
     return d
+
+
+def find_item(path, want, world_dir=None, item_names=None, cap=20000):
+    """Найти все предметы с id из ``want`` на карте ``path``.
+
+    -> ``{ok, w, h, want, total_count, spots, by_where[{where,spots,count}],
+    hits[{x,y,where,type,name,count,durability}], capped}``.
+    """
+    want = set(want) if not isinstance(want, set) else want
+    d = parse(path, world_dir=world_dir, keep_grid=False, want=want, cap=cap)
+    if not d.get("ok"):
+        return d
+    hits = d.get("hits") or []
+    by_where = Counter()
+    cnt_where = Counter()
+    total = 0
+    for hh in hits:
+        total += hh["count"]
+        by_where[hh["where"]] += hh["count"]
+        cnt_where[hh["where"]] += 1
+        if item_names:
+            hh["name"] = item_names.get(hh["type"]) or ("#%s" % hh["type"])
+    return {
+        "ok": True,
+        "w": d["w"], "h": d["h"],
+        "want": sorted(want),
+        "total_count": total,
+        "spots": len(hits),
+        "by_where": [{"where": k, "spots": cnt_where[k], "count": v}
+                     for k, v in by_where.most_common()],
+        "hits": hits,
+        "capped": d.get("hits_capped", False),
+    }
