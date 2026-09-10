@@ -76,8 +76,14 @@ try:
                         "player_add_tech", "player_set_stat", "player_reset_code",
                         "server_chat", "server_events", "server_private_chat",
                         "stats_bundle", "world_map", "server_health", "twink_report",
-                        "players_csv", "make_world_backup", "tech_track_scan", "tech_track_read"):
+                        "players_csv", "make_world_backup", "tech_track_scan", "tech_track_read",
+                        "player_item_search", "tech_meta", "tech_label", "mapdt_find"):
                 assert hasattr(players, _fn), "players: нет %s" % _fn
+            _pf = players.player_item_search(cfg, "tech_booster")
+            assert _pf.get("ok"), "player_item_search: %s" % _pf.get("error")
+            assert '"code"' not in json.dumps(_pf, ensure_ascii=False), "player_item_search: пароль в выдаче"
+            _tm = players.tech_meta(players.find_world_dir(cfg))
+            assert _tm and all("label" in v for v in _tm.values()), "tech_meta пуст/без label"
             _cat = players.item_catalog(cfg)
             assert _cat.get("ok") and _cat["items"], "item_catalog пуст"
             for _bf, _lbl in ((players.server_chat(cfg, 20), "server_chat"),

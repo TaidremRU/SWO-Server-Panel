@@ -790,6 +790,16 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_player_item_find(self, h, method, q, sess):
+        """Кто из игроков держит предмет: ?item=<id|имя|подстрока>."""
+        item = (q.get("item") or [""])[0]
+        try:
+            d = players.player_item_search(self.cfg, item)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_item_find")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_server_events(self, h, method, q, sess):
         kinds = (q.get("kinds") or [""])[0]
         kinds = [k for k in kinds.split(",") if k] or None
@@ -1245,6 +1255,9 @@ a.pl-link:hover{text-decoration:underline}
 .chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin:2px 0 6px}
 .chart-legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 .card.wide{grid-column:1 / -1}
+.sc{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.sc>table{border:0}
+.sc-lg{max-height:60vh}
 @media(max-width:560px){main{padding:10px}}
 </style>
 </head>
@@ -1256,7 +1269,10 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
+  pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
+  pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
   sc_server:"Чат сервера", sc_events:"События", sc_private:"Приваты", sc_all:"все каналы",
   sc_search:"поиск", ev_join:"вошёл", ev_leave:"вышел", ev_register:"регистрация",
   ev_death:"смерть", ev_land:"снос земли", ev_kind:"тип", sc_priv_note:"Все приватные сообщения сервера — под паролем панели.",
@@ -1313,6 +1329,7 @@ var T = {
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
+  st_branch:"ветка", st_technote:"названия техов приблизительные (по id — игра не отдаёт их серверу): ветка + тир",
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
@@ -1358,7 +1375,10 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
+  pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
+  pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
   sc_server:"Server chat", sc_events:"Events", sc_private:"DMs", sc_all:"all channels",
   sc_search:"search", ev_join:"joined", ev_leave:"left", ev_register:"registered",
   ev_death:"death", ev_land:"land removed", ev_kind:"type", sc_priv_note:"All server private messages — behind the panel password.",
@@ -1415,6 +1435,7 @@ var T = {
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
+  st_branch:"branch", st_technote:"tech names are approximate (derived from id — the game doesn't expose them to the server): branch + tier",
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
@@ -1513,14 +1534,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","players","twinks","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -1667,7 +1688,19 @@ function tabAct(v){
     return el("button",{class:cls,onclick:function(){ runAction(d[0], d[3]||{}, d[2], t(d[1])); }},[t(d[1])]);
   }));
   var out=el("div",{id:"actout"},[]);
-  v.appendChild(el("div",{},[grid, out]));
+  var expPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:120px"});
+  var expMsg=el("span",{class:"muted small"},[]);
+  var exp=el("div",{class:"card",style:"margin-top:16px"},[
+    el("h3",{},[t("ex_title")]),
+    el("div",{class:"row",style:"flex-wrap:wrap;gap:8px"},[
+      el("button",{class:"small",onclick:function(){ window.open("/api/players-csv","_blank"); }},[t("ex_csv")]),
+      expPw,
+      el("button",{class:"small",onclick:function(){ backupDownload("state",expPw.value,expMsg); }},[t("ex_bstate")]),
+      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("ex_bfull")+"?")) backupDownload("full",expPw.value,expMsg); }},[t("ex_bfull")]),
+      expMsg
+    ])
+  ]);
+  v.appendChild(el("div",{},[grid, out, exp]));
 }
 function runAction(op, extra, needConfirm, label){
   if(needConfirm && !window.confirm(t("confirm")+":\n"+label)) return;
@@ -1757,6 +1790,7 @@ function tabPlayers(v){
         .map(function(o){ return el("option",{value:o[0]},[o[1]]); }))
     ]),
     el("div",{id:"plsum",class:"grid",style:"margin-bottom:12px"},[]),
+    pfFindCard(),
     el("div",{id:"plbody"},[el("p",{class:"muted"},["…"])]),
     el("div",{class:"card",style:"margin-top:12px"},[
       el("h3",{},[t("pl_recent")]), el("div",{id:"plrecent"},[])
@@ -2251,14 +2285,46 @@ function openMapdt(mapId){
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
-function mdtFindCard(maps){
-  var inp=el("input",{list:"mf-itemlist",placeholder:t("mf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
-  if(!$("#mf-itemlist")){
-    var dl=el("datalist",{id:"mf-itemlist"},[]);
-    document.body.appendChild(dl);
-    api("/api/items").then(function(ij){ if(ij.ok) (ij.items||[]).forEach(function(it){
-      dl.appendChild(el("option",{value:it.name},["#"+it.id])); }); }).catch(function(){});
+function pfFindCard(){
+  ensureItemList();
+  var inp=el("input",{list:"mf-itemlist",placeholder:t("pf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
+  var out=el("div",{id:"pf-out"},[]);
+  function run(){
+    var q=inp.value.trim(); if(!q) return;
+    out.innerHTML=""; out.appendChild(el("p",{class:"muted"},[t("pf_wait")]));
+    api("/api/player-item-find?item="+encodeURIComponent(q)).then(function(d){
+      out.innerHTML="";
+      if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+      if(d.matched && d.matched.length>1) out.appendChild(el("div",{class:"muted small",style:"margin-bottom:4px"},[
+        t("pf_matched")+": "+d.matched.map(function(m){return m.name+" #"+m.id;}).join(", ")]));
+      var tt=d.totals||{};
+      out.appendChild(el("div",{class:"chart-legend"},[
+        el("span",{},[t("pf_players")+": "+tt.players]),
+        el("span",{},[t("pf_stash")+": "+tt.stash]),
+        el("span",{},[t("pf_carry")+": "+tt.carry]),
+        el("span",{},[t("pf_total")+": "+tt.total]) ]));
+      if(!(d.players||[]).length){ out.appendChild(el("p",{class:"muted"},[t("pf_none")])); return; }
+      out.appendChild(scT(ltable(["#",t("col_name"),t("pl_col_status"),t("pf_stash"),t("pf_carry"),t("pf_total")], d.players, function(r){
+        return [String(r.id), plLink(r.id,r.name),
+          r.online? pill(true,t("running")) : el("span",{class:"muted"},["off"]),
+          String(r.stash), String(r.carry), el("b",{},[String(r.total)])]; })));
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   }
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") run(); });
+  return el("div",{class:"card",style:"margin-bottom:12px"},[ el("h3",{},["🔎 "+t("pf_title")]),
+    el("div",{class:"row",style:"gap:6px;flex-wrap:wrap"},[ inp, el("button",{class:"small",onclick:run},[t("pf_go")]) ]),
+    out ]);
+}
+function ensureItemList(){
+  if($("#mf-itemlist")) return;
+  var dl=el("datalist",{id:"mf-itemlist"},[]);
+  document.body.appendChild(dl);
+  api("/api/items").then(function(ij){ if(ij.ok) (ij.items||[]).forEach(function(it){
+    dl.appendChild(el("option",{value:it.name},["#"+it.id])); }); }).catch(function(){});
+}
+function mdtFindCard(maps){
+  ensureItemList();
+  var inp=el("input",{list:"mf-itemlist",placeholder:t("mf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
   var sel=el("select",{style:"padding:5px 8px"},[el("option",{value:"all"},[t("mf_all")])].concat(
     (maps||[]).filter(function(r){return r.map!=null && !r.space;}).map(function(r){
       return el("option",{value:String(r.map)},["#"+r.map+" ("+(r.size||"?")+")"]); })));
@@ -2306,21 +2372,10 @@ function backupDownload(scope, pw, msg){
         setTimeout(function(){URL.revokeObjectURL(a.href);},4000); msg.textContent="✅ "+fn; }); })
     .catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : (e&&(e.error||e.detail))||t("err_net"); });
 }
+function scT(node, lg){ return el("div",{class:"sc"+(lg?" sc-lg":"")},[node]); }
 function drawStats(j){
   var b=$("#stbody"); if(!b) return; b.innerHTML="";
   if(!j.ok){ b.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
-  var expPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:120px"});
-  var expMsg=el("span",{class:"muted small"},[]);
-  b.appendChild(el("div",{class:"card",style:"margin-bottom:12px"},[
-    el("h3",{},[t("ex_title")]),
-    el("div",{class:"row"},[
-      el("button",{class:"small",onclick:function(){ window.open("/api/players-csv","_blank"); }},[t("ex_csv")]),
-      expPw,
-      el("button",{class:"small",onclick:function(){ backupDownload("state",expPw.value,expMsg); }},[t("ex_bstate")]),
-      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("ex_bfull")+"?")) backupDownload("full",expPw.value,expMsg); }},[t("ex_bfull")]),
-      expMsg
-    ])
-  ]));
   var g=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
 
   var on=j.online||{};
@@ -2338,44 +2393,47 @@ function drawStats(j){
     [el("span",{class:"pill"},[t("st_ret")+" D1 "+(rt.d1[1]? Math.round(100*rt.d1[0]/rt.d1[1]):0)+"% / D7 "+(rt.d7[1]? Math.round(100*rt.d7[0]/rt.d7[1]):0)+"%  (n="+rt.d1[1]+")"])]));
 
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toplvl")]),
-    ltable(["#",t("col_name"),t("pd_level")], (j.top_level||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.level)]; })]));
+    scT(ltable(["#",t("col_name"),t("pd_level")], (j.top_level||[]).slice(0,30), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.level)]; }))]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptime")]),
-    ltable(["#",t("col_name"),"h"], (j.top_time||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.playtime_h)]; })]));
+    scT(ltable(["#",t("col_name"),"h"], (j.top_time||[]).slice(0,30), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.playtime_h)]; }))]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptechp")]),
-    ltable(["#",t("col_name"),t("st_techs"),t("st_resh"),t("st_researching")], (j.top_tech_players||[]).slice(0,15), function(r){
-      return [String(r.id), plLink(r.id,r.name), String(r.tech_count), "~"+(r.research_h||0)+"ч", r.research||"—"]; }),
+    scT(ltable(["#",t("col_name"),t("st_techs"),t("st_resh"),t("st_researching")], (j.top_tech_players||[]).slice(0,30), function(r){
+      return [String(r.id), plLink(r.id,r.name), String(r.tech_count), "~"+(r.research_h||0)+"ч", r.research_name||r.research||"—"]; })),
     el("div",{class:"muted small",style:"margin-top:4px"},[t("st_resh_note")])]));
 
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_clans")+" · "+(j.clan_board||[]).length]),
-    ltable([t("col_name"),"rating","size"], (j.clan_board||[]).slice(0,15), function(c){
-      return [c.name+"", String(c.rating), c.size+"/"+(c.max||"?")]; })]));
+    scT(ltable([t("col_name"),"rating","size"], (j.clan_board||[]).slice(0,30), function(c){
+      return [c.name+"", String(c.rating), c.size+"/"+(c.max||"?")]; }))]));
 
   var bans=j.banned||[];
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_bans")+" · "+bans.length]),
-    bans.length? ltable(["#",t("col_name")], bans.slice(0,30), function(r){ return [String(r.id), plLink(r.id,r.name)]; }) : el("div",{class:"muted small"},["—"])]));
+    bans.length? scT(ltable(["#",t("col_name")], bans, function(r){ return [String(r.id), plLink(r.id,r.name)]; })) : el("div",{class:"muted small"},["—"])]));
 
   var staff=j.staff||[];
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_staff")+" · "+staff.length]),
-    ltable(["#",t("col_name"),t("pl_col_role")], staff, function(r){
-      return [String(r.id), plLink(r.id,r.name), t({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[r.role]||"pl_role_staff")]; }),
+    scT(ltable(["#",t("col_name"),t("pl_col_role")], staff, function(r){
+      return [String(r.id), plLink(r.id,r.name), t({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[r.role]||"pl_role_staff")]; })),
     (j.role_history&&j.role_history.length)? el("div",{class:"muted small",style:"margin-top:8px"},[t("st_hist")+": "+j.role_history.map(function(x){return x.target+"→"+x.role;}).join(", ")]) : null
   ].filter(Boolean)));
 
   var months=j.months||[];
   if(months.length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_month")]),
-    el("div",{}, months.map(function(mo){ return el("div",{style:"margin-bottom:6px"},[
+    scT(el("div",{style:"padding:4px"}, months.map(function(mo){ return el("div",{style:"margin-bottom:6px"},[
       el("b",{},[mo.date]), " — ",
-      el("span",{class:"small"},[(mo.rewards||[]).map(function(r){return r.name+"("+r.reward+")";}).join(", ")])]); }))]));
+      el("span",{class:"small"},[(mo.rewards||[]).map(function(r){return r.name+"("+r.reward+")";}).join(", ")])]); })))]));
 
   var lh=j.level_hist||[];
   b.appendChild(bigChart(t("st_lvldist"), "bar", lh.map(function(x){return x.bucket+"+";}),
     [{name:t("st_lvldist"), unit:"игроков", data:lh.map(function(x){return x.n;}), color:CHART_COL[1]}]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_countries")]),
-    ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
+    scT(ltable([t("st_countries"),"n"], (j.country_hist||[]), function(r){ return [r.country, String(r.n)]; }))]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+(j.top_tech||[]).length]),
-    ltable([t("st_tech"),"игроков",t("st_resh")], (j.top_tech||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; })]));
+    scT(ltable([t("st_tech"),t("st_branch"),"игроков",t("st_resh")], (j.top_tech||[]).slice(0,30), function(r){
+      return [r.tech, el("span",{class:"small"},[r.name||"—"]), String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; })),
+    el("div",{class:"muted small",style:"margin-top:4px"},[t("st_technote")])]));
   if((j.researching||[]).length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+t("st_researching")]),
-    ltable([t("st_tech"),"игроков",t("st_resh")], (j.researching||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; })]));
+    scT(ltable([t("st_tech"),t("st_branch"),"игроков",t("st_resh")], (j.researching||[]).slice(0,30), function(r){
+      return [r.tech, el("span",{class:"small"},[r.name||"—"]), String(r.n), r.cost_h!=null? "~"+r.cost_h+"ч":"—"]; }))]));
 
   var ttc=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
   g.appendChild(ttc);
@@ -2391,59 +2449,6 @@ function drawStats(j){
   b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[
     "рег "+j.totals.registered+" • профилей "+j.totals.with_profile+" • кланов "+j.totals.clans+
     " • "+t("st_resh")+" суммарно ~"+(j.total_research_h||0)+"ч • "+(j.cached_age||0)+"s • "+j.generated]));
-
-  var wbox=el("div",{style:"margin-top:14px"},[el("p",{class:"muted"},["…"])]);
-  b.appendChild(wbox);
-  api("/api/world").then(function(w){
-    wbox.innerHTML="";
-    if(!w.ok){ wbox.appendChild(el("div",{class:"msg err"},[w.error||"error"])); return; }
-    var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
-    wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
-      el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
-      ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,60),
-        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories),
-          r.map!=null && !r.space? el("a",{class:"pl-link",onclick:function(){ openMapdt(r.map); }},[t("md_open")]) : ""]; })]));
-    if(w.space_note) wg.lastChild.appendChild(el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]));
-    wg.appendChild(el("div",{class:"card wide",id:"mdt-card",style:"display:none"},[]));
-    wg.appendChild(mdtFindCard(w.maps));
-    var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
-    var tt=el("div",{id:"terrtab"},[]);
-    function drawTerr(){
-      var f=mf.value.trim();
-      var rows=(w.territories||[]).filter(function(x){ return !f || String(x.map)===f; });
-      tt.innerHTML="";
-      tt.appendChild(ltable([t("pl_map"),t("pd_coords"),t("st_owner")], rows.slice(0,300), function(x){
-        return [String(x.map), x.x+","+x.y, plLink(x.owner_id, x.owner)]; }));
-      tt.appendChild(el("p",{class:"muted small"},[rows.length+" / "+(w.territories||[]).length]));
-    }
-    mf.oninput=drawTerr;
-    var tc=el("div",{class:"card"},[el("h3",{},[t("st_terr")]), el("div",{class:"row",style:"margin-bottom:6px"},[mf]), tt]);
-    wg.appendChild(tc);
-    wbox.appendChild(wg); drawTerr();
-  }).catch(function(){ wbox.innerHTML=""; });
-
-  var spbox=el("div",{style:"margin-top:14px"},[]);
-  b.appendChild(spbox);
-  api("/api/space").then(function(sj){
-    spbox.innerHTML="";
-    if(!sj.ok) return;
-    var sg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
-    sg.appendChild(el("div",{class:"card"},[el("h3",{},["🛰 "+t("sp_title")]),
-      el("div",{class:"kv"},[el("span",{},[t("sp_inspace")]),el("b",{},[String(sj.in_space_count)+(sj.stuck_offline? "  ("+t("sp_stuck")+" "+sj.stuck_offline+" ⚠)":"")])]),
-      el("div",{class:"kv"},[el("span",{},[t("sp_units")]),el("b",{},[String(sj.space_units_total!=null?sj.space_units_total:"—")])]),
-      el("div",{class:"kv"},[el("span",{},[t("sp_ship")]),el("b",{},[sj.has_ship+" / "+sj.registered])]),
-      (sj.in_space||[]).length? el("div",{style:"margin-top:6px"}, sj.in_space.map(function(p){
-        return el("div",{class:"small"},[p.online? "🟢 " : "⚪ ", plLink(p.id,p.name), " · lvl "+(p.level||"?")+" · ship#"+(p.space_unit||"?"), p.stuck? " ⚠":""]); })) : null,
-      el("div",{class:"muted small",style:"margin-top:6px"},[sj.note])
-    ].filter(Boolean)));
-    if((sj.planets||[]).length){
-      sg.appendChild(el("div",{class:"card"},[el("h3",{},[t("sp_planets")+" · "+sj.planets.length]),
-        ltable([t("pl_map"),t("sp_plots"),t("sp_owners"),t("st_owner")], sj.planets.slice(0,20), function(p){
-          return [String(p.map), String(p.plots), String(p.owner_count),
-                  el("span",{class:"small"},[p.owners.slice(0,6).map(function(o){return o.name+"("+o.plots+")";}).join(", ")])]; })]));
-    }
-    spbox.appendChild(sg);
-  }).catch(function(){ spbox.innerHTML=""; });
 
   var hbox=el("div",{style:"margin-top:14px"},[]);
   b.appendChild(hbox);
@@ -2468,6 +2473,71 @@ function drawStats(j){
       [{name:t("hh_lag"), unit:"событий", data:(lg.per_day||[]).map(function(x){return x.n;}), color:CHART_COL[3]}],
       [el("span",{class:"muted small"},[t("hh_byfunc")+": "+(lg.by_func||[]).slice(0,8).map(function(f){return f.func+"×"+f.n+"(max "+f.max+")";}).join(", ")])]));
   }).catch(function(){});
+}
+
+// ---- map tab (world / item search / territories / space) ----
+function tabMap(v){
+  var wrap=el("div",{},[
+    el("div",{class:"row",style:"margin-bottom:10px"},[el("button",{class:"small",onclick:function(){ loadMap(true); }},[t("refresh")])]),
+    el("div",{id:"mapbody"},[el("p",{class:"muted"},["…"])])
+  ]);
+  v.appendChild(wrap); loadMap(false);
+}
+function loadMap(force){
+  var b=$("#mapbody"); if(!b) return; b.innerHTML=""; b.appendChild(el("p",{class:"muted"},["…"]));
+  Promise.all([
+    api("/api/world"+(force?"?_="+Date.now():"")),
+    api("/api/space").catch(function(){ return {ok:false}; })
+  ]).then(function(res){ drawMap(res[0], res[1]); })
+   .catch(function(e){ b.innerHTML=""; b.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+function drawMap(w, sj){
+  var b=$("#mapbody"); if(!b) return; b.innerHTML="";
+  if(!w || !w.ok){ b.appendChild(el("div",{class:"msg err"},[(w&&w.error)||"error"])); return; }
+  var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
+  wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
+    el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
+    scT(ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,80),
+      function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories),
+        r.map!=null && !r.space? el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(r.map)},[t("md_open")]) : ""]; })),
+    w.space_note? el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]) : null
+  ].filter(Boolean)));
+  wg.appendChild(el("div",{class:"card wide",id:"mdt-card",style:"display:none"},[]));
+  wg.appendChild(mdtFindCard(w.maps));
+
+  var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
+  var tt=el("div",{id:"terrtab"},[]);
+  function drawTerr(){
+    var f=mf.value.trim();
+    var rows=(w.territories||[]).filter(function(x){ return !f || String(x.map)===f; });
+    tt.innerHTML="";
+    tt.appendChild(scT(ltable([t("pl_map"),t("pd_coords"),t("st_owner")], rows.slice(0,500), function(x){
+      return [String(x.map), x.x+","+x.y, plLink(x.owner_id, x.owner)]; })));
+    tt.appendChild(el("p",{class:"muted small"},[rows.length+" / "+(w.territories||[]).length]));
+  }
+  mf.oninput=drawTerr;
+  wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_terr")]), el("div",{class:"row",style:"margin-bottom:6px"},[mf]), tt]));
+  b.appendChild(wg);
+  drawTerr();
+
+  if(sj && sj.ok){
+    var sg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"},[]);
+    sg.appendChild(el("div",{class:"card"},[el("h3",{},["🛰 "+t("sp_title")]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_inspace")]),el("b",{},[String(sj.in_space_count)+(sj.stuck_offline? "  ("+t("sp_stuck")+" "+sj.stuck_offline+" ⚠)":"")])]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_units")]),el("b",{},[String(sj.space_units_total!=null?sj.space_units_total:"—")])]),
+      el("div",{class:"kv"},[el("span",{},[t("sp_ship")]),el("b",{},[sj.has_ship+" / "+sj.registered])]),
+      (sj.in_space||[]).length? scT(el("div",{style:"margin-top:6px;padding:4px"}, sj.in_space.map(function(p){
+        return el("div",{class:"small"},[p.online? "🟢 " : "⚪ ", plLink(p.id,p.name), " · lvl "+(p.level||"?")+" · ship#"+(p.space_unit||"?"), p.stuck? " ⚠":""]); }))) : null,
+      el("div",{class:"muted small",style:"margin-top:6px"},[sj.note])
+    ].filter(Boolean)));
+    if((sj.planets||[]).length){
+      sg.appendChild(el("div",{class:"card"},[el("h3",{},[t("sp_planets")+" · "+sj.planets.length]),
+        scT(ltable([t("pl_map"),t("sp_plots"),t("sp_owners"),t("st_owner")], sj.planets.slice(0,40), function(p){
+          return [String(p.map), String(p.plots), String(p.owner_count),
+                  el("span",{class:"small"},[p.owners.slice(0,6).map(function(o){return o.name+"("+o.plots+")";}).join(", ")])]; }))]));
+    }
+    b.appendChild(sg);
+  }
 }
 
 // ---- server chat / events ----

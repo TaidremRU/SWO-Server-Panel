@@ -562,6 +562,8 @@ def stats_bundle(cfg):
     for it in _read_json(os.path.join(world_dir, "Data", "tech.json")).get("items", []):
         if "id" in it:
             tech_cost[it["id"]] = it.get("cost")
+    tmeta = tech_meta(world_dir)
+    _tlabel = lambda tch: (tmeta.get(tch) or {}).get("label") or tch
 
     # лидерборды / распределения из профилей
     us = []
@@ -572,7 +574,8 @@ def stats_bundle(cfg):
                    "clan": dd.get("clan", 0), "country": dd.get("country") or "?",
                    "tech_count": len(dd.get("techs") or []),
                    "research_h": round(sum(tech_cost.get(t) or 0 for t in (dd.get("techs") or [])) / 60.0, 1),
-                   "research": dd.get("research") or ""})
+                   "research": dd.get("research") or "",
+                   "research_name": _tlabel(dd["research"]) if dd.get("research") else ""})
     top_level = sorted(us, key=lambda x: -x["level"])[:20]
     top_time = sorted(us, key=lambda x: -x["playtime_h"])[:20]
     top_tech_players = sorted(us, key=lambda x: -x["tech_count"])[:20]
@@ -593,9 +596,11 @@ def stats_bundle(cfg):
         c = tech_cost.get(tch)
         return round(c / 60.0, 1) if c else None
 
-    top_tech = [{"tech": tch, "n": n, "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
+    top_tech = [{"tech": tch, "name": _tlabel(tch), "n": n,
+                 "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
                 for tch, n in tcnt.most_common(30)]
-    researching = [{"tech": tch, "n": n, "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
+    researching = [{"tech": tch, "name": _tlabel(tch), "n": n,
+                    "cost": tech_cost.get(tch), "cost_h": _ch(tch)}
                    for tch, n in rcnt.most_common(20)]
 
     # стафф-история
@@ -934,6 +939,152 @@ def _resolve_item_query(world_dir, query):
          if d.get("name") and low in d["name"].lower()]
     m.sort(key=lambda x: (len(x["name"]), x["name"]))
     return {x["id"] for x in m}, m[:40]
+
+
+# --- поиск предметов у игроков (склад + при себе) ----------------------------
+_INV_IDX_CACHE = {}  # world_dir -> (ts, {uid: {stash: Counter, carry: Counter}})
+
+
+def _inventory_index(world_dir, ttl=30):
+    """{uid: {"stash": Counter{type:count}, "carry": Counter}} по всем игрокам.
+    Склад — `user<N>.json → Inventory.items`, при себе — `unit<unitId>.json`.
+    Кэш на ``ttl`` секунд (полный скан ~285 пар файлов)."""
+    now = time.time()
+    hit = _INV_IDX_CACHE.get(world_dir)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    ud = os.path.join(world_dir, "Data", "users")
+    nd = os.path.join(world_dir, "Data", "units")
+    idx = {}
+    try:
+        files = os.listdir(ud)
+    except OSError:
+        files = []
+    for nm in files:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(ud, nm))
+        if not raw:
+            continue
+        try:
+            uid = int(raw.get("id", m.group(1)))
+        except (TypeError, ValueError):
+            continue
+        stash = collections.Counter()
+        for it in (raw.get("Inventory") or {}).get("items", []) or []:
+            t = it.get("type")
+            if t is not None:
+                stash[t] += it.get("count") or 0
+        carry = collections.Counter()
+        unid = raw.get("unitId")
+        if unid is not None:
+            un = _read_json(os.path.join(nd, "unit%s.json" % unid)) or {}
+            for it in (un.get("Inventory") or {}).get("items", []) or []:
+                t = it.get("type")
+                if t is not None:
+                    carry[t] += it.get("count") or 0
+        idx[uid] = {"stash": stash, "carry": carry}
+    _INV_IDX_CACHE[world_dir] = (now, idx)
+    return idx
+
+
+def player_item_search(cfg, item):
+    """Кто из игроков держит предмет ``item`` (id / имя / подстрока) — на складе
+    и/или при себе. -> ``{ok, query, matched[{id,name}], want, players[{id,name,
+    online,stash,carry,total}], totals{players,stash,carry,total}}`` (сорт по total)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    want, matched = _resolve_item_query(world_dir, item)
+    if not want:
+        return {"ok": False, "error": "предмет не найден: %r" % item}
+    names = load_user_list(world_dir)
+    per, _ = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+    idx = _inventory_index(world_dir)
+    rows = []
+    t_st = t_ca = 0
+    for uid, inv in idx.items():
+        st = sum(inv["stash"].get(t, 0) for t in want)
+        ca = sum(inv["carry"].get(t, 0) for t in want)
+        if not (st or ca):
+            continue
+        t_st += st
+        t_ca += ca
+        rows.append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
+                     "online": bool((per.get(uid) or {}).get("online")),
+                     "stash": st, "carry": ca, "total": st + ca})
+    rows.sort(key=lambda r: (-r["total"], r["name"].lower()))
+    return {
+        "ok": True, "query": str(item), "matched": matched, "want": sorted(want),
+        "players": rows,
+        "totals": {"players": len(rows), "stash": t_st, "carry": t_ca,
+                   "total": t_st + t_ca},
+    }
+
+
+# --- человеко-читаемые подписи к техам --------------------------------------
+# tech.json не хранит названий (только id/parent/cost/level); реальные имена — в
+# ассетах клиента, недоступны серверу. Подпись = ветка (по префиксу id) + тир
+# (глубина в дереве). Названия веток — эвристика по мнемонике id.
+_TECH_FAMILY = {
+    "b": "Строительство", "bb": "Стройблоки", "bt": "Стройтех", "car": "Транспорт",
+    "ce": "Транспорт+", "ceh": "Транспорт+", "cet": "Транспорт+", "ceb": "Транспорт+",
+    "ac": "Авиатех", "c": "Крафт", "e": "Энергетика", "r": "Наука",
+    "re": "Переработка", "s": "Спутники", "sc": "Спутники", "o": "Оборона",
+    "a": "Броня", "w": "Оружие", "wr": "Дальнобойное", "wc": "Оружие+",
+    "ws": "Оружие+", "ax": "Инструменты", "p": "Прочность", "sh": "Щиты",
+    "h": "Здоровье", "m": "Добыча", "hm": "Медицина", "rb": "Робо",
+    "clan": "Клан", "rob": "Клан·роботы", "proc": "Клан·переработка",
+    "progm": "Клан·программы", "rcp": "Клан·рецепты", "cl": "Эндгейм",
+}
+_TECH_META_CACHE = {}  # path -> (mtime, {id: {...}})
+
+
+def tech_meta(world_dir):
+    """{tech_id: {family, root, depth, level, cost_min, cost_h, clan, label}}."""
+    if not world_dir:
+        return {}
+    p = os.path.join(world_dir, "Data", "tech.json")
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return {}
+    hit = _TECH_META_CACHE.get(p)
+    if hit and hit[0] == mt:
+        return hit[1]
+    raw = _read_json(p) or {}
+    items = {it["id"]: it for it in raw.get("items", []) if "id" in it}
+    out = {}
+    for tid, it in items.items():
+        # корень ветки + глубина
+        root, depth, cur, seen = tid, 0, tid, set()
+        while True:
+            par = (items.get(cur) or {}).get("parent")
+            if not par or par in seen:
+                break
+            seen.add(par)
+            root, cur, depth = par, par, depth + 1
+        pref = re.match(r"[a-zA-Z]+", tid)
+        pref = pref.group(0) if pref else tid
+        fam = _TECH_FAMILY.get(pref) or _TECH_FAMILY.get(root) or ("ветка " + pref)
+        cost = it.get("cost")
+        out[tid] = {
+            "family": fam, "root": root, "depth": depth,
+            "level": it.get("level"), "cost_min": cost,
+            "cost_h": round(cost / 60.0, 1) if cost else None,
+            "clan": bool(it.get("isClan")),
+            "label": "%s · тир %d" % (fam, depth + 1),
+        }
+    _TECH_META_CACHE[p] = (mt, out)
+    return out
+
+
+def tech_label(world_dir, tid):
+    if not tid:
+        return ""
+    m = tech_meta(world_dir).get(tid)
+    return ("%s — %s" % (tid, m["label"])) if m else tid
 
 
 def mapdt_find(cfg, map_id, item):
@@ -1294,9 +1445,12 @@ def player_detail(cfg, uid):
         },
         "research": {
             "current": raw.get("researchTech") or "",
+            "current_name": tech_label(world_dir, raw.get("researchTech")),
             "remaining_min": _rem_min(raw.get("timeResearchTech")),
             "done_count": len(raw.get("techList") or []),
             "tech_list": raw.get("techList") or [],
+            "tech_named": [{"id": t, "label": tech_label(world_dir, t)}
+                           for t in (raw.get("techList") or [])],
             "invested_h": round(sum(_load_ref(world_dir, "tech.json", "id", "cost").get(t) or 0
                                     for t in (raw.get("techList") or [])) / 60.0, 1),
             "booster": raw.get("techBooster"),
