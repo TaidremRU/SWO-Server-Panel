@@ -19,6 +19,7 @@ PBKDF2-HMAC-SHA256. Сессия — cookie ``sid`` (в памяти проце�
 Протокол — обычный HTTP: панель только для локальной сети (как и остальной
 доступ к этому боксу).
 """
+import copy
 import hashlib
 import http.cookies
 import json
@@ -59,6 +60,122 @@ def _now_iso():
 
 class _Bad(Exception):
     """Ошибка валидации ввода — отдаётся клиенту как 400."""
+
+
+# ------------------------------------------------------------------ настройки бота
+# (section, title_ru, title_en, [(path, label_ru, label_en, type, hint_ru)])
+# type: bool int float str secret strlist intlist intn (int|None) json
+SETTINGS_SCHEMA = [
+    ("general", "Общее", "General", [
+        ("poll_seconds", "Интервал опроса, с", "Poll interval, s", "int", "как часто супервизор снимает статус"),
+        ("initial_delay_seconds", "Задержка старта, с", "Startup delay, s", "int", ""),
+        ("task_name", "Имя задачи планировщика", "Scheduled task name", "str", "менять только вместе с самой задачей"),
+        ("game_server_host", "Хост игрового сервера", "Game server host", "str", "для будущего пакетного слоя"),
+    ]),
+    ("webui", "Веб-панель", "Web panel", [
+        ("webui.host", "Хост", "Host", "str", "0.0.0.0 = все интерфейсы; нужен перезапуск"),
+        ("webui.port", "Порт", "Port", "int", "нужен перезапуск + правило фаервола"),
+        ("webui.enabled", "Включена", "Enabled", "bool", ""),
+    ]),
+    ("watchdog", "Watchdog", "Watchdog", [
+        ("watchdog.enabled", "Включён", "Enabled", "bool", ""),
+        ("watchdog.auto_start_steam", "Авто-запуск Steam", "Auto-start Steam", "bool", ""),
+        ("watchdog.auto_start_game", "Авто-запуск игры", "Auto-start game", "bool", ""),
+        ("watchdog.auto_login", "Авто-вход в игру", "Auto-login", "bool", ""),
+        ("watchdog.grace_after_launch_seconds", "Пауза после запуска, с", "Grace after launch, s", "int", ""),
+        ("watchdog.max_restarts_per_hour", "Макс. перезапусков/час", "Max restarts/hour", "int", ""),
+        ("watchdog.login_settle_seconds", "Пауза перед авто-входом, с", "Login settle, s", "int", ""),
+        ("watchdog.login_retry_seconds", "Повтор входа, с", "Login retry, s", "int", ""),
+    ]),
+    ("monitor", "Монитор сервера", "Server monitor", [
+        ("monitor.enabled", "Включён", "Enabled", "bool", ""),
+        ("monitor.server_name", "Имя сервера", "Server name", "str", "подсветка в списке лобби и алерты о пропаже"),
+        ("monitor.interval_seconds", "Интервал, с", "Interval, s", "int", ""),
+        ("monitor.misses_before_alert", "Промахов до алерта", "Misses before alert", "int", ""),
+        ("monitor.repeat_alert_seconds", "Повтор алерта, с", "Repeat alert, s", "int", "0 = без напоминаний"),
+    ]),
+    ("players", "Данные локального сервера", "Local server data", [
+        ("players.enabled", "Читать файлы сервера", "Read server files", "bool", ""),
+        ("players.world", "Имя мира", "World name", "str", "пусто = автовыбор по свежести analytics.txt"),
+        ("players.world_dir", "Путь к миру", "World dir", "str", "пусто = по localserver_root + world"),
+        ("players.localserver_root", "Корень LocalServer", "LocalServer root", "str", "пусто = стандартный AppData-путь"),
+        ("players.twink_ignore_ips", "Игнор-IP для твинков", "Twink ignore IPs", "strlist", "через запятую; на релее это 127.0.0.1, 127.0.0.2"),
+        ("players.tech_track.enabled", "Трекинг техов/бустеров", "Tech tracking", "bool", ""),
+        ("players.tech_track.interval_seconds", "Интервал трекинга, с", "Tracking interval, s", "int", ""),
+    ]),
+    ("telegram", "Telegram", "Telegram", [
+        ("telegram.allowed_user_ids", "Админы (ID)", "Admins (IDs)", "intlist", "полный доступ; нужен ≥1"),
+        ("telegram.moderator_user_ids", "Модераторы (ID)", "Moderators (IDs)", "intlist", "ограниченный набор команд"),
+        ("telegram.super_admin_id", "Главный админ (ID)", "Super admin (ID)", "intn", "получатель аудита; должен быть среди админов"),
+        ("telegram.default_lang", "Язык по умолчанию", "Default language", "str", "ru или en"),
+        ("telegram.alerts_enabled", "Слать алерты", "Send alerts", "bool", ""),
+        ("telegram.poll_timeout", "Long-poll таймаут, с", "Long-poll timeout, s", "int", ""),
+        ("telegram.proxy", "Прокси", "Proxy", "str", "socks5h://host:port (с VM Telegram заблокирован)"),
+        ("telegram.token", "Токен бота", "Bot token", "secret", "пусто = не менять"),
+    ]),
+    ("serverlist", "Steam / список серверов", "Steam / server list", [
+        ("steam_web_api_key", "Steam Web API key", "Steam Web API key", "secret", "пусто = не менять"),
+        ("steam_api_dll", "Путь steam_api64.dll", "steam_api64.dll path", "str", ""),
+        ("python_exe", "python.exe для subprocess", "python.exe for subprocess", "str", "пусто = авто"),
+    ]),
+]
+_SETTINGS_FIELDS = {p: (typ, lr) for _, _, _, fs in SETTINGS_SCHEMA for (p, lr, le, typ, hint) in fs}
+
+
+def _cfg_get_path(d, path):
+    cur = d
+    for seg in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(seg)
+    return cur
+
+
+def _cfg_set_path(d, path, val):
+    segs = path.split(".")
+    cur = d
+    for seg in segs[:-1]:
+        cur = cur.setdefault(seg, {})
+        if not isinstance(cur, dict):
+            raise _Bad("путь %s занят не-объектом" % path)
+    cur[segs[-1]] = val
+
+
+def _coerce_setting(path, typ, raw):
+    """Привести значение к типу поля; бросает _Bad."""
+    try:
+        if typ == "bool":
+            return bool(raw) if not isinstance(raw, str) else raw.strip().lower() in ("1", "true", "on", "yes", "да")
+        if typ == "int":
+            return int(str(raw).strip())
+        if typ == "float":
+            return float(str(raw).strip())
+        if typ == "intn":
+            s = str(raw).strip()
+            return None if s in ("", "none", "null", "-") else int(s)
+        if typ in ("str", "secret"):
+            return str(raw)
+        if typ == "strlist":
+            if isinstance(raw, list):
+                return [str(x).strip() for x in raw if str(x).strip()]
+            return [x.strip() for x in re.split(r"[\s,;]+", str(raw)) if x.strip()]
+        if typ == "intlist":
+            if isinstance(raw, list):
+                src = raw
+            else:
+                src = [x for x in re.split(r"[\s,;]+", str(raw)) if x]
+            out, seen = [], set()
+            for x in src:
+                n = int(str(x).strip())
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+            return out
+        if typ == "json":
+            return json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError) as e:
+        raise _Bad("поле «%s»: не привести к %s (%s)" % (path, typ, e))
+    raise _Bad("неизвестный тип поля %s" % typ)
 
 
 # --------------------------------------------------------------------------- auth
@@ -1096,6 +1213,120 @@ class WebUI:
         return self._json(h, {"ok": True, "allowed_user_ids": admins, "moderator_user_ids": mods,
                               "super_admin_id": sa, "default_lang": lang, "alerts_enabled": alerts})
 
+    def _api_settings(self, h, method, q, sess):
+        """Полный редактор настроек бота (config.json) + игровые аккаунты."""
+        if method == "GET":
+            sections = []
+            for key, tr, te, fields in SETTINGS_SCHEMA:
+                out_fields = []
+                for (p, lr, le, typ, hint) in fields:
+                    cur = _cfg_get_path(self.cfg, p)
+                    fd = {"path": p, "label_ru": lr, "label_en": le, "type": typ, "hint": hint}
+                    if typ == "secret":
+                        fd["value"] = ""
+                        fd["has_secret"] = bool(cur)
+                    elif typ == "intlist":
+                        fd["value"] = ", ".join(str(x) for x in (cur or []))
+                    elif typ == "strlist":
+                        fd["value"] = ", ".join(cur or [])
+                    elif typ == "intn":
+                        fd["value"] = "" if cur is None else str(cur)
+                    elif typ == "bool":
+                        fd["value"] = bool(cur)
+                    else:
+                        fd["value"] = "" if cur is None else cur
+                    out_fields.append(fd)
+                sections.append({"key": key, "title_ru": tr, "title_en": te, "fields": out_fields})
+            accs = []
+            for a in (self.cfg.get("game_accounts") or []):
+                accs.append({"label": a.get("label") or a.get("user") or "?",
+                             "user": a.get("user") or "", "has_password": bool(a.get("password"))})
+            lf = self.cfg.get("login_flow", {}) or {}
+            return self._json(h, {
+                "ok": True, "sections": sections,
+                "game_accounts": accs, "active_account": self.cfg.get("active_account") or "",
+                "login_flow_json": json.dumps(lf, ensure_ascii=False, indent=2),
+                "restart_hint_ru": "большинство изменений применяются после перезапуска задачи "
+                                   "(кнопка «Перезапустить задачу» на вкладке «Действия»); "
+                                   "роли/язык/алерты — сразу.",
+            })
+
+        b = self._body(h)
+        cfg = copy.deepcopy(self.cfg)
+        try:
+            vals = b.get("values") or {}
+            if not isinstance(vals, dict):
+                raise _Bad("values: ожидается объект")
+            for p, raw in vals.items():
+                fd = _SETTINGS_FIELDS.get(p)
+                if not fd:
+                    continue
+                typ, _ = fd
+                if typ == "secret":
+                    if str(raw).strip() == "":
+                        continue          # пусто = не менять
+                    _cfg_set_path(cfg, p, str(raw))
+                else:
+                    _cfg_set_path(cfg, p, _coerce_setting(p, typ, raw))
+
+            if "login_flow" in b and b["login_flow"] not in (None, ""):
+                lf = b["login_flow"]
+                lf = json.loads(lf) if isinstance(lf, str) else lf
+                if not isinstance(lf, dict):
+                    raise _Bad("login_flow: ожидается JSON-объект")
+                cfg["login_flow"] = lf
+
+            # игровые аккаунты
+            if "game_accounts" in b:
+                old = {a.get("label"): a for a in (self.cfg.get("game_accounts") or [])}
+                new = []
+                for a in (b.get("game_accounts") or []):
+                    lbl = (a.get("label") or a.get("user") or "").strip()
+                    if not lbl:
+                        continue
+                    pw = a.get("password")
+                    if pw in (None, "", "••••••"):
+                        pw = (old.get(lbl) or {}).get("password", "")
+                    new.append({"label": lbl, "user": (a.get("user") or "").strip(), "password": pw})
+                cfg["game_accounts"] = new
+                aa = (b.get("active_account") or "").strip()
+                cfg["active_account"] = aa if any(x["label"] == aa for x in new) else (new[0]["label"] if new else "")
+
+            tg = cfg.setdefault("telegram", {})
+            admins = tg.get("allowed_user_ids") or []
+            if not admins:
+                raise _Bad("нужен хотя бы один администратор Telegram")
+            sa = tg.get("super_admin_id")
+            if sa is not None and sa not in admins:
+                raise _Bad("главный админ должен быть среди администраторов")
+            lang = (tg.get("default_lang") or "ru").lower()
+            if lang not in i18n.SUPPORTED:
+                tg["default_lang"] = "ru"
+            port = _cfg_get_path(cfg, "webui.port")
+            if port is not None and not (1 <= int(port) <= 65535):
+                raise _Bad("порт вне 1..65535")
+        except _Bad as e:
+            return self._json(h, {"error": "invalid", "detail": str(e)}, 400)
+        except ValueError as e:
+            return self._json(h, {"error": "invalid", "detail": "JSON/число: %s" % e}, 400)
+
+        self.cfg.clear()
+        self.cfg.update(cfg)
+        try:
+            common.save_config(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: settings save_config")
+            return self._json(h, {"error": "save_failed", "detail": str(e)}, 500)
+        try:
+            self.bot.apply_roles(self.cfg.get("telegram", {}))
+        except Exception:  # noqa: BLE001
+            logging.exception("webui: apply_roles after settings")
+        self.audit(h.client_address[0], sess["user"],
+                   "настройки: изменено %d полей%s%s" % (
+                       len(vals), " +login_flow" if b.get("login_flow") else "",
+                       " +аккаунты(%d)" % len(cfg.get("game_accounts") or []) if "game_accounts" in b else ""))
+        return self._json(h, {"ok": True, "restart_recommended": True})
+
     # ----------------------------------------------------------------- actions
     _OPS = {"startgame", "stopgame", "restartgame", "restartsteam", "login",
             "watchdog", "restartvm", "stopbot", "restarttask", "testalert"}
@@ -1306,7 +1537,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1332,7 +1563,7 @@ var T = {
   col_name:"Сервер", col_players:"Игроки", col_map:"Мир", col_ver:"Версия", col_addr:"Адрес", col_mem:"В лобби",
   roles_admins:"Администраторы (Telegram ID)", roles_mods:"Модераторы (Telegram ID)",
   roles_super:"Главный админ (super_admin_id)", roles_lang:"Язык бота по умолчанию",
-  roles_alerts:"Алерты в Telegram включены", roles_hint:"ID через запятую/пробел/с новой строки. ID из обоих списков считается администратором. Нужен ≥1 админ. Главный админ должен быть среди администраторов.",
+  set_save:"Сохранить настройки", set_saved:"Сохранено", set_restart:"Часть изменений применится после перезапуска задачи.", set_accounts:"Игровые аккаунты", set_acc_add:"＋ аккаунт", set_acc_label:"метка", set_acc_user:"логин", set_acc_pw:"пароль (пусто = не менять)", set_acc_active:"активный", set_lf:"login_flow (JSON, продвинутое)", set_secret_set:"задан", set_secret_ph:"оставьте пустым, чтобы не менять", roles_alerts:"Алерты в Telegram включены", roles_hint:"ID через запятую/пробел/с новой строки. ID из обоих списков считается администратором. Нужен ≥1 админ. Главный админ должен быть среди администраторов.",
   save:"Сохранить", saved:"Сохранено, роли применены на лету",
   log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)",
   level:"Уровень", lines:"строк", download:"Скачать", navshots_none:"Скринов последовательности входа нет",
@@ -1418,7 +1649,7 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -1444,7 +1675,7 @@ var T = {
   col_name:"Server", col_players:"Players", col_map:"World", col_ver:"Version", col_addr:"Address", col_mem:"In lobby",
   roles_admins:"Administrators (Telegram IDs)", roles_mods:"Moderators (Telegram IDs)",
   roles_super:"Super admin (super_admin_id)", roles_lang:"Default bot language",
-  roles_alerts:"Telegram alerts enabled", roles_hint:"IDs separated by comma / space / newline. An ID in both lists counts as admin. At least one admin required. Super admin must be one of the admins.",
+  set_save:"Save settings", set_saved:"Saved", set_restart:"Some changes take effect after restarting the task.", set_accounts:"Game accounts", set_acc_add:"＋ account", set_acc_label:"label", set_acc_user:"username", set_acc_pw:"password (empty = keep)", set_acc_active:"active", set_lf:"login_flow (JSON, advanced)", set_secret_set:"set", set_secret_ph:"leave empty to keep", roles_alerts:"Telegram alerts enabled", roles_hint:"IDs separated by comma / space / newline. An ID in both lists counts as admin. At least one admin required. Super admin must be one of the admins.",
   save:"Save", saved:"Saved, roles applied live",
   log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)",
   level:"Level", lines:"lines", download:"Download", navshots_none:"No login-sequence screenshots",
@@ -1590,7 +1821,7 @@ function shell(){
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -2860,37 +3091,104 @@ function tabTwinks(v){
 }
 
 // ---- roles ----
-function tabRoles(v){
-  var out=el("div",{id:"rout"},[el("p",{class:"muted"},["…"])]);
+var SET_FIELDS={};   // path -> {type, getval()}
+var SET_ACCS=[];
+function tabSettings(v){
+  var out=el("div",{id:"setout"},[el("p",{class:"muted"},["…"])]);
   v.appendChild(out);
-  api("/api/roles").then(function(j){ drawRoles(out,j); })
+  api("/api/settings").then(function(j){ drawSettings(out,j); })
     .catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
-function drawRoles(out,j){
-  out.innerHTML="";
-  var fAdm=el("textarea",{id:"radm"},[ (j.allowed_user_ids||[]).join(", ") ]);
-  var fMod=el("textarea",{id:"rmod"},[ (j.moderator_user_ids||[]).join(", ") ]);
-  var fSup=el("input",{id:"rsup",value:j.super_admin_id!=null?j.super_admin_id:"",style:"width:220px"});
-  var fLang=el("select",{id:"rlang"}, ["ru","en"].map(function(l){ return el("option",{value:l,selected:j.default_lang===l?"selected":null},[l]); }));
-  var fAlerts=el("input",{id:"ralerts",type:"checkbox"}); if(j.alerts_enabled) fAlerts.checked=true;
-  var card=el("div",{class:"card"},[
-    el("label",{class:"fld"},[el("span",{},[t("roles_admins")]),fAdm]),
-    el("label",{class:"fld"},[el("span",{},[t("roles_mods")]),fMod]),
-    el("label",{class:"fld"},[el("span",{},[t("roles_super")]),fSup]),
-    el("label",{class:"fld"},[el("span",{},[t("roles_lang")]),fLang]),
-    el("label",{class:"fld"},[el("span",{},[t("roles_alerts")]),fAlerts]),
-    el("p",{class:"muted small"},[t("roles_hint")]),
-    el("div",{id:"rmsg"}),
-    el("button",{class:"pri",onclick:saveRoles},[t("save")])
-  ]);
-  out.appendChild(card);
+function setFieldInput(fd){
+  var lab=(S.lang==="ru"? fd.label_ru : fd.label_en)||fd.path;
+  var inp;
+  if(fd.type==="bool"){
+    inp=el("input",{type:"checkbox"}); if(fd.value) inp.checked=true;
+    SET_FIELDS[fd.path]={type:fd.type, get:function(){ return inp.checked; }};
+    return el("label",{class:"row",style:"gap:8px"},[inp, el("span",{},[lab]),
+      fd.hint? el("span",{class:"muted small"},["— "+fd.hint]):null].filter(Boolean));
+  }
+  if(fd.type==="strlist"||fd.type==="intlist"){
+    inp=el("textarea",{rows:"2",style:"width:100%;font-family:inherit"},[String(fd.value||"")]);
+  } else if(fd.type==="secret"){
+    inp=el("input",{type:"password",placeholder:t("set_secret_ph"),style:"width:100%"});
+  } else {
+    inp=el("input",{value:fd.value==null?"":String(fd.value),style:"width:100%"});
+  }
+  SET_FIELDS[fd.path]={type:fd.type, get:function(){ return inp.value; }};
+  return el("label",{class:"fld"},[
+    el("span",{},[lab + (fd.type==="secret" && fd.has_secret? "  ("+t("set_secret_set")+")":"")]),
+    inp,
+    fd.hint? el("div",{class:"muted small"},[fd.hint]):null ].filter(Boolean));
 }
-function saveRoles(){
-  var m=$("#rmsg"); m.innerHTML="";
-  var body={ allowed_user_ids:$("#radm").value, moderator_user_ids:$("#rmod").value,
-    super_admin_id:$("#rsup").value.trim(), default_lang:$("#rlang").value, alerts_enabled:$("#ralerts").checked };
-  api("/api/roles",{body:body}).then(function(){ m.appendChild(el("div",{class:"msg ok"},[t("saved")])); })
-    .catch(function(e){ m.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+function accRow(a){
+  var lbl=el("input",{value:a.label||"",placeholder:t("set_acc_label"),style:"width:120px"});
+  var usr=el("input",{value:a.user||"",placeholder:t("set_acc_user"),style:"width:150px"});
+  var pw=el("input",{type:"password",placeholder:a.has_password? "••••••":t("set_acc_pw"),style:"width:170px"});
+  var rec={label:lbl,user:usr,pw:pw};
+  SET_ACCS.push(rec);
+  var rm=el("button",{class:"small danger",onclick:function(){ row.remove(); SET_ACCS=SET_ACCS.filter(function(x){return x!==rec;}); }},["×"]);
+  var row=el("div",{class:"row",style:"gap:6px;margin-bottom:5px;align-items:center"},[
+    el("input",{type:"radio",name:"setacc",value:a.label||"",checked:a.active?"checked":null,title:t("set_acc_active")}),
+    lbl, usr, pw, rm ]);
+  return row;
+}
+function drawSettings(out,j){
+  out.innerHTML=""; SET_FIELDS={}; SET_ACCS=[];
+  if(!j.ok){ out.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
+  var grid=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(320px,1fr))"},[]);
+  (j.sections||[]).forEach(function(sec){
+    var card=el("div",{class:"card"},[el("h3",{},[S.lang==="ru"? sec.title_ru : sec.title_en])]);
+    sec.fields.forEach(function(fd){ card.appendChild(setFieldInput(fd)); });
+    grid.appendChild(card);
+  });
+  out.appendChild(grid);
+
+  // игровые аккаунты
+  var accBox=el("div",{},[]);
+  (j.game_accounts||[]).forEach(function(a){
+    a.active=(a.label===j.active_account);
+    accBox.appendChild(accRow(a));
+  });
+  var accCard=el("div",{class:"card",style:"margin-top:12px"},[
+    el("h3",{},["🎮 "+t("set_accounts")]),
+    accBox,
+    el("button",{class:"small",onclick:function(){ accBox.appendChild(accRow({})); }},[t("set_acc_add")]),
+    el("p",{class:"muted small"},[t("set_acc_pw")])
+  ]);
+  out.appendChild(accCard);
+
+  // login_flow advanced
+  var lfTa=el("textarea",{rows:"10",style:"width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px"},[j.login_flow_json||"{}"]);
+  out.appendChild(el("details",{style:"margin-top:12px"},[
+    el("summary",{class:"small"},[t("set_lf")]),
+    el("div",{class:"card"},[lfTa])
+  ]));
+
+  var msg=el("div",{id:"setmsg",style:"margin-top:10px"},[]);
+  out.appendChild(el("div",{class:"row",style:"margin-top:12px;gap:10px"},[
+    el("button",{class:"pri",onclick:function(){ saveSettings(lfTa,msg); }},[t("set_save")]),
+    el("span",{class:"muted small"},[j.restart_hint_ru||""])
+  ]));
+  out.appendChild(msg);
+}
+function saveSettings(lfTa,msg){
+  msg.innerHTML="";
+  var values={};
+  Object.keys(SET_FIELDS).forEach(function(p){ values[p]=SET_FIELDS[p].get(); });
+  var radios=Array.prototype.slice.call(document.querySelectorAll('input[name="setacc"]'));
+  var ci=radios.findIndex(function(r){ return r.checked; });
+  var active=(ci>=0 && SET_ACCS[ci])? SET_ACCS[ci].label.value.trim() : "";
+  var accs=SET_ACCS.map(function(r){ return {label:r.label.value.trim(), user:r.user.value.trim(), password:r.pw.value}; })
+                   .filter(function(a){ return a.label||a.user; });
+  var body={values:values, game_accounts:accs, active_account:active};
+  var lf=lfTa.value.trim();
+  if(lf && lf!=="{}"){ try{ JSON.parse(lf); body.login_flow=lf; }catch(e){ msg.appendChild(el("div",{class:"msg err"},["login_flow: невалидный JSON — "+e.message])); return; } }
+  api("/api/settings",{body:body}).then(function(r){
+    msg.appendChild(el("div",{class:"msg ok"},[t("set_saved")+(r.restart_recommended? " — "+t("set_restart"):"")]));
+    if(r.restart_recommended) msg.appendChild(el("button",{class:"small danger",style:"margin-left:8px",
+      onclick:function(){ if(window.confirm(t("a_restarttask")+"?")){ S.tab="act"; localStorage.setItem("sw_tab","act"); render(); setTimeout(function(){ runAction("restarttask",{},1,t("a_restarttask")); },300); } }},[t("a_restarttask")]));
+  }).catch(function(e){ msg.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 
 // ---- logs ----
