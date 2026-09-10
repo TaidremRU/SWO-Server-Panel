@@ -394,6 +394,8 @@ class WebUI:
                     return self._api_player_sensitive(h, pid, sess)
                 if sub == "inventory" and method == "POST":
                     return self._api_player_inventory(h, pid, sess)
+                if sub == "moderate" and method == "POST":
+                    return self._api_player_moderate(h, pid, sess)
                 return self._json(h, {"error": "unknown"}, 404)
 
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
@@ -691,6 +693,50 @@ class WebUI:
         else:
             self.audit(h.client_address[0], sess["user"],
                        "ИНВЕНТАРЬ игрока #%s: %s отклонено — %s" % (pid, op, d.get("error")))
+        return self._json(h, d, 200 if d.get("ok") else 400)
+
+    def _api_player_moderate(self, h, pid, sess):
+        """Бан/роль/телепорт/техи/статы/сброс пароля — оффлайн, под админ-паролем."""
+        body = self._body(h)
+        act = (body.get("action") or "").strip()
+        ACTS = {"ban", "unban", "role", "position", "tech", "stat", "reset_code"}
+        if act not in ACTS:
+            return self._json(h, {"error": "bad_action"}, 400)
+        ok, b = self._reauth(h, sess, "модерация игрока #%s (%s)" % (pid, act), body=body)
+        if not ok:
+            return b
+        try:
+            if act == "ban":
+                d = players.player_set_ban(self.cfg, pid, True, b.get("hours") or 0)
+            elif act == "unban":
+                d = players.player_set_ban(self.cfg, pid, False, 0)
+            elif act == "role":
+                d = players.player_set_role(self.cfg, pid, b.get("role"), sess["user"])
+            elif act == "position":
+                d = players.player_set_position(self.cfg, pid, b.get("map"), b.get("x"),
+                                                b.get("y"), bool(b.get("respawn")))
+            elif act == "tech":
+                d = players.player_add_tech(self.cfg, pid, b.get("tech") or "")
+            elif act == "stat":
+                d = players.player_set_stat(self.cfg, pid, b.get("field"), b.get("value"))
+            else:  # reset_code
+                d = players.player_reset_code(self.cfg, pid, b.get("code") or "")
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: moderate %s %s", act, pid)
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        summ = {"ban": "бан hours=%s" % b.get("hours"), "unban": "разбан",
+                "role": "роль=%s" % b.get("role"),
+                "position": "телепорт %s @ %s,%s%s" % (b.get("map"), b.get("x"), b.get("y"),
+                                                       " +респавн" if b.get("respawn") else ""),
+                "tech": "техи %s" % b.get("tech"),
+                "stat": "%s=%s" % (b.get("field"), b.get("value")),
+                "reset_code": "сброс пароля"}.get(act, act)
+        if d.get("ok"):
+            self.audit(h.client_address[0], sess["user"],
+                       "МОДЕРАЦИЯ игрока #%s: %s (бэкап %s)" % (pid, summ, d.get("backup")))
+        else:
+            self.audit(h.client_address[0], sess["user"],
+                       "МОДЕРАЦИЯ игрока #%s: %s отклонено — %s" % (pid, summ, d.get("error")))
         return self._json(h, d, 200 if d.get("ok") else 400)
 
     # --------------------------------------------------------------- screenshot
@@ -1112,6 +1158,9 @@ var T = {
   pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
   pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
   pd_inv_count:"кол-во", pd_inv_from:"откуда", pd_inv_carry:"при себе",
+  pd_mod:"Модерация (оффлайн)", pd_mod_ban:"Забанить", pd_mod_unban:"Разбанить",
+  pd_mod_tp:"Телепорт", pd_mod_givetech:"Выдать техи", pd_mod_resetpw:"Сброс пароля игрока",
+  pd_mod_newcode:"новый пароль игрока",
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -1185,6 +1234,9 @@ var T = {
   pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
   pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
   pd_inv_count:"qty", pd_inv_from:"from", pd_inv_carry:"carried",
+  pd_mod:"Moderation (offline)", pd_mod_ban:"Ban", pd_mod_unban:"Unban",
+  pd_mod_tp:"Teleport", pd_mod_givetech:"Grant tech", pd_mod_resetpw:"Reset player password",
+  pd_mod_newcode:"new player password",
   pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -1661,12 +1713,19 @@ function renderPlayerModal(d){
   ])));
 
   var canEdit = d.online===false;
-  var pdInvPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:130px"});
-  function pdInvOp(op, where, item, count, msgEl){
+  var pdEditPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:130px"});
+  function pdWrite(url, extra, msgEl){
     if(msgEl) msgEl.textContent="…";
-    api("/api/players/"+d.id+"/inventory",{body:{password:pdInvPw.value,op:op,where:where,item:item,count:count}})
-      .then(function(res){ if(msgEl) msgEl.textContent="✅"; api("/api/players/"+d.id).then(renderPlayerModal); })
-      .catch(function(e){ if(msgEl) msgEl.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
+    var body=Object.assign({password:pdEditPw.value}, extra);
+    return api(url,{body:body})
+      .then(function(res){ if(msgEl) msgEl.textContent="✅"; api("/api/players/"+d.id).then(renderPlayerModal); return res; })
+      .catch(function(e){ if(msgEl) msgEl.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); throw e; });
+  }
+  function pdInvOp(op, where, item, count, msgEl){
+    return pdWrite("/api/players/"+d.id+"/inventory", {op:op,where:where,item:item,count:count}, msgEl);
+  }
+  function pdMod(action, params, msgEl){
+    return pdWrite("/api/players/"+d.id+"/moderate", Object.assign({action:action}, params||{}), msgEl);
   }
   function invCard(title, list, where, cnt){
     var head=el("h3",{},[title+" · "+(list?list.length:(cnt||0))]);
@@ -1699,7 +1758,7 @@ function renderPlayerModal(d){
     }
     g.appendChild(el("div",{class:"card"},[
       el("h3",{},[t("pd_inv_edit")]),
-      el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pdInvPw]),
+      el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pdEditPw]),
       el("div",{class:"row",style:"margin-top:8px"},[
         giveItem, giveCnt,
         el("button",{class:"small pri",onclick:function(){
@@ -1707,6 +1766,34 @@ function renderPlayerModal(d){
         }},["＋ "+t("pd_inv_give")]),
         giveMsg
       ])
+    ]));
+
+    // --- модерация ---
+    var mMsg=el("span",{class:"muted small"},[]);
+    var banH=el("input",{type:"number",value:"0",min:"0",title:"0 = навсегда",style:"padding:4px 7px;width:80px"});
+    var roleS=el("select",{}, [0,1,2,3].map(function(r){ return el("option",{value:r,selected:d.role===r?"selected":null},
+      [t({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[r])]); }));
+    var mMap=el("input",{type:"number",placeholder:"map",style:"padding:4px 7px;width:70px",value:(po.map!=null?po.map:"")});
+    var mX=el("input",{type:"number",placeholder:"x",style:"padding:4px 7px;width:70px",value:(po.x!=null?po.x:"")});
+    var mY=el("input",{type:"number",placeholder:"y",style:"padding:4px 7px;width:70px",value:(po.y!=null?po.y:"")});
+    var mResp=el("input",{type:"checkbox"});
+    var mTech=el("input",{placeholder:"b5, e7 …",style:"padding:4px 7px"});
+    var mStatF=el("select",{}, [["unitLevel",t("pd_level")],["addRating",t("pd_rating")]].map(function(o){return el("option",{value:o[0]},[o[1]]);}));
+    var mStatV=el("input",{type:"number",style:"padding:4px 7px;width:90px"});
+    var mCode=el("input",{placeholder:t("pd_mod_newcode"),style:"padding:4px 7px"});
+    function mrow(label, kids){ return el("div",{class:"row",style:"margin:5px 0"},[el("span",{class:"muted small",style:"min-width:90px"},[label])].concat(kids)); }
+    g.appendChild(el("div",{class:"card"},[
+      el("h3",{},[t("pd_mod")]),
+      mrow(t("pd_ban_until"),[banH, el("span",{class:"muted small"},["ч, 0=∞"]),
+        el("button",{class:"small danger",onclick:function(){ pdMod("ban",{hours:parseFloat(banH.value)||0},mMsg); }},[t("pd_mod_ban")]),
+        el("button",{class:"small",onclick:function(){ pdMod("unban",{},mMsg); }},[t("pd_mod_unban")])]),
+      mrow(t("pl_col_role"),[roleS, el("button",{class:"small",onclick:function(){ pdMod("role",{role:parseInt(roleS.value,10)},mMsg); }},[t("save")])]),
+      mrow(t("pd_position"),[mMap,mX,mY, el("label",{class:"small"},[mResp," respawn"]),
+        el("button",{class:"small",onclick:function(){ pdMod("position",{map:mMap.value,x:mX.value,y:mY.value,respawn:mResp.checked},mMsg); }},[t("pd_mod_tp")])]),
+      mrow(t("pd_research"),[mTech, el("button",{class:"small",onclick:function(){ pdMod("tech",{tech:mTech.value},mMsg); }},[t("pd_mod_givetech")])]),
+      mrow(t("pd_params"),[mStatF,mStatV, el("button",{class:"small",onclick:function(){ pdMod("stat",{field:mStatF.value,value:parseInt(mStatV.value,10)},mMsg); }},[t("save")])]),
+      mrow(t("pd_mod_resetpw"),[mCode, el("button",{class:"small danger",onclick:function(){ if(mCode.value) pdMod("reset_code",{code:mCode.value},mMsg); }},[t("save")])]),
+      mMsg
     ]));
   } else {
     g.appendChild(el("div",{class:"card"},[el("div",{class:"muted small"},["🔒 "+t("pd_inv_online")])]));

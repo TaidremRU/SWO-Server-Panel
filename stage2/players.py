@@ -904,6 +904,213 @@ def take_items(cfg, uid, where, item, count):
             "items": _name_inv(out, names)}
 
 
+# --------------------------------------------------------- модерация игрока (запись)
+_ROLE_WORD = {0: "player", 1: "moderator", 2: "admin", 3: "master"}
+
+
+def _edit_offline_user(cfg, uid, mutate, what):
+    """Каркас правки ``user<N>.json`` оффлайн-игрока.
+
+    ``mutate(raw)`` меняет словарь на месте и возвращает dict доп-полей для ответа
+    (или ``{"_error": "..."}`` чтобы отменить). Оффлайн проверяется в начале И
+    перед записью; бэкап + атомарная запись + guard по mtime.
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверный id"}
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок сейчас онлайн — %s только для оффлайн" % what}
+    uf = _user_file(world_dir, uid)
+    if not os.path.isfile(uf):
+        return {"ok": False, "error": "файл игрока не найден"}
+    mt = os.path.getmtime(uf)
+    raw = _read_json(uf)
+    extra = mutate(raw)
+    if isinstance(extra, dict) and extra.get("_error"):
+        return {"ok": False, "error": extra["_error"]}
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок зашёл в игру — запись отменена"}
+    bak = _game_edit_backup(cfg, uf)
+    ok, err = _write_json_compact(uf, raw, mt)
+    if not ok:
+        return {"ok": False, "error": err}
+    out = {"ok": True, "id": uid, "backup": os.path.basename(os.path.dirname(bak))}
+    if isinstance(extra, dict):
+        out.update(extra)
+    return out
+
+
+def player_set_ban(cfg, uid, blocked, hours=0):
+    """``isBlock`` + ``timeBan`` (serverTime + hours*3600; hours=0/blocked=False -> 0)."""
+    wd = find_world_dir(cfg)
+    st = server_time(wd) if wd else 0.0
+    try:
+        hours = float(hours or 0)
+    except (TypeError, ValueError):
+        hours = 0.0
+
+    def m(raw):
+        raw["isBlock"] = bool(blocked)
+        raw["timeBan"] = (st + hours * 3600.0) if (blocked and hours > 0 and st) else 0.0
+        return {"isBlock": raw["isBlock"], "timeBan": raw["timeBan"],
+                "perm": bool(blocked) and hours <= 0}
+
+    return _edit_offline_user(cfg, uid, m, "бан")
+
+
+def player_set_role(cfg, uid, role, by_user="panel"):
+    try:
+        role = int(role)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "роль 0..3"}
+    if role not in _ROLE_WORD:
+        return {"ok": False, "error": "роль 0..3"}
+    wd = find_world_dir(cfg)
+    names = load_user_list(wd) if wd else {}
+
+    def m(raw):
+        raw["role"] = role
+        return {"role": role, "role_word": _ROLE_WORD[role]}
+
+    res = _edit_offline_user(cfg, uid, m, "смена роли")
+    if res.get("ok") and wd:
+        try:
+            nick = names.get(int(uid), "id %s" % uid)
+            with io.open(os.path.join(wd, "Logs", "user_role.txt"), "a", encoding="utf-8") as f:
+                f.write("set role user %s[%s] admin=panel[%s] role=%s\n"
+                        % (uid, nick, by_user, _ROLE_WORD[role]))
+        except OSError:
+            logging.warning("player_set_role: не удалось дописать user_role.txt")
+    return res
+
+
+def player_set_position(cfg, uid, map_id, x, y, also_respawn=False):
+    """``unit.pos`` (+ ``unit.mapId`` и ``user.mapId``, если map_id задан) +
+    опционально ``unit.respawnPoint``. Оффлайн."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        uid = int(uid)
+        x, y = int(x), int(y)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "координаты — числа"}
+    mid = None
+    if str(map_id).strip() not in ("", "None"):
+        try:
+            mid = int(map_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "карта — число"}
+    if not _is_offline(wd, uid):
+        return {"ok": False, "error": "игрок сейчас онлайн — телепорт только для оффлайн"}
+    uf = _user_file(wd, uid)
+    ru = _read_json(uf)
+    unit_id = ru.get("unitId")
+    if unit_id is None:
+        return {"ok": False, "error": "у игрока нет юнита"}
+    pf = os.path.join(wd, "Data", "units", "unit%s.json" % unit_id)
+    if not os.path.isfile(pf):
+        return {"ok": False, "error": "файл юнита не найден"}
+    pmt = os.path.getmtime(pf)
+    unit = _read_json(pf)
+    unit.setdefault("pos", {})["x"] = x
+    unit["pos"]["y"] = y
+    if mid is not None:
+        unit["mapId"] = mid
+    if also_respawn:
+        unit["respawnPoint"] = {"mapId": unit.get("mapId", 0), "pos": {"x": x, "y": y}}
+    if not _is_offline(wd, uid):
+        return {"ok": False, "error": "игрок зашёл — отмена"}
+    bak = _game_edit_backup(cfg, pf)
+    ok, err = _write_json_compact(pf, unit, pmt)
+    if not ok:
+        return {"ok": False, "error": err}
+    if mid is not None:  # держим user.mapId в согласии
+        try:
+            umt = os.path.getmtime(uf)
+            ru2 = _read_json(uf)
+            ru2["mapId"] = mid
+            _game_edit_backup(cfg, uf)
+            _write_json_compact(uf, ru2, umt)
+        except OSError:
+            pass
+    return {"ok": True, "id": uid, "map": mid if mid is not None else unit.get("mapId"),
+            "x": x, "y": y, "respawn": also_respawn,
+            "backup": os.path.basename(os.path.dirname(bak))}
+
+
+def player_add_tech(cfg, uid, tech):
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    valid = {it["id"] for it in _read_json(os.path.join(wd, "Data", "tech.json")).get("items", []) if "id" in it}
+    reqs = [x.strip() for x in re.split(r"[\s,]+", str(tech)) if x.strip()]
+    if not reqs:
+        return {"ok": False, "error": "не указаны техи"}
+    bad = [x for x in reqs if x not in valid]
+    if bad:
+        return {"ok": False, "error": "нет таких техов: %s" % ", ".join(bad[:10])}
+
+    def m(raw):
+        cur = raw.setdefault("techList", [])
+        added = [x for x in reqs if x not in cur]
+        cur.extend(added)
+        return {"added": added, "tech_count": len(cur)}
+
+    return _edit_offline_user(cfg, uid, m, "выдача техов")
+
+
+def player_set_stat(cfg, uid, field, value):
+    if field not in ("unitLevel", "addRating"):
+        return {"ok": False, "error": "field: unitLevel|addRating"}
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "значение — число"}
+    if not (0 <= value <= 1_000_000_000):
+        return {"ok": False, "error": "0..1e9"}
+
+    def m(raw):
+        raw[field] = value
+        return {field: value}
+
+    return _edit_offline_user(cfg, uid, m, "правка " + field)
+
+
+def player_reset_code(cfg, uid, newcode):
+    newcode = str(newcode or "")
+    if not (1 <= len(newcode) <= 64):
+        return {"ok": False, "error": "пароль 1..64 символа"}
+    wd = find_world_dir(cfg)
+
+    def m(raw):
+        raw["code"] = newcode
+        return {}
+
+    res = _edit_offline_user(cfg, uid, m, "сброс пароля игрока")
+    if res.get("ok") and wd:  # синхронизируем user_list.json Code
+        ulp = os.path.join(wd, "Data", "users", "user_list.json")
+        try:
+            umt = os.path.getmtime(ulp)
+            ul = _read_json(ulp)
+            for u in ul.get("userInfo", []):
+                try:
+                    if int(u.get("Id", -1)) == int(uid):
+                        u["Code"] = newcode
+                except (TypeError, ValueError):
+                    pass
+            _game_edit_backup(cfg, ulp)
+            _write_json_compact(ulp, ul, umt)
+        except OSError:
+            logging.warning("player_reset_code: user_list.json не обновлён")
+    return {"ok": res.get("ok"), "id": res.get("id"), "backup": res.get("backup"),
+            "error": res.get("error")}  # сам код в ответ НЕ кладём
+
+
 def player_code(cfg, uid):
     """Пароль игрока (``code`` из user<N>.json / ``Code`` из user_list.json).
 
