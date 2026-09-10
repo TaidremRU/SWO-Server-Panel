@@ -1285,7 +1285,8 @@ var T = {
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
-  st_toptech:"Топ изученных техов", st_researching:"Сейчас изучают", st_tech:"тех", st_size:"размер",
+  st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
+  st_toptechp:"Топ по числу техов", st_techs:"техов",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
   hh_slowphase:"медленные фазы старта", hh_lag:"Лаг-события (медленные тики)", hh_lagday:"в день",
   hh_byfunc:"по функциям", hh_connerr:"Ошибки коннекта",
@@ -1378,7 +1379,8 @@ var T = {
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
-  st_toptech:"Top researched techs", st_researching:"Now researching", st_tech:"tech", st_size:"size",
+  st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
+  st_toptechp:"Top by tech count", st_techs:"techs",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
   hh_slowphase:"slow startup phases", hh_lag:"Lag events (slow ticks)", hh_lagday:"per day",
   hh_byfunc:"by function", hh_connerr:"Connection errors",
@@ -2214,6 +2216,9 @@ function drawStats(j){
     ltable(["#",t("col_name"),t("pd_level")], (j.top_level||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.level)]; })]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptime")]),
     ltable(["#",t("col_name"),"h"], (j.top_time||[]).slice(0,15), function(r){ return [String(r.id), plLink(r.id,r.name), String(r.playtime_h)]; })]));
+  g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptechp")]),
+    ltable(["#",t("col_name"),t("st_techs"),t("st_researching")], (j.top_tech_players||[]).slice(0,15), function(r){
+      return [String(r.id), plLink(r.id,r.name), String(r.tech_count), r.research||"—"]; })]));
 
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_clans")+" · "+(j.clan_board||[]).length]),
     ltable([t("col_name"),"rating","size"], (j.clan_board||[]).slice(0,15), function(c){
@@ -2243,7 +2248,7 @@ function drawStats(j){
     ltable([t("st_countries"),"n"], (j.country_hist||[]).slice(0,12), function(r){ return [r.country, String(r.n)]; })]));
   g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+(j.top_tech||[]).length]),
     ltable([t("st_tech"),"игроков","cost"], (j.top_tech||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
-  if((j.researching||[]).length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_researching")]),
+  if((j.researching||[]).length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_toptech")+" · "+t("st_researching")]),
     ltable([t("st_tech"),"игроков","cost"], (j.researching||[]).slice(0,20), function(r){ return [r.tech, String(r.n), r.cost!=null? String(r.cost):"—"]; })]));
 
   var ttc=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);

@@ -554,9 +554,12 @@ def stats_bundle(cfg):
         us.append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
                    "level": dd.get("level") or 0, "playtime_h": dd.get("playtime_h") or 0,
                    "role": dd.get("role", 0), "banned": bool(dd.get("banned")),
-                   "clan": dd.get("clan", 0), "country": dd.get("country") or "?"})
+                   "clan": dd.get("clan", 0), "country": dd.get("country") or "?",
+                   "tech_count": len(dd.get("techs") or []),
+                   "research": dd.get("research") or ""})
     top_level = sorted(us, key=lambda x: -x["level"])[:20]
     top_time = sorted(us, key=lambda x: -x["playtime_h"])[:20]
+    top_tech_players = sorted(us, key=lambda x: -x["tech_count"])[:20]
     banned = [u for u in us if u["banned"]]
     staff = sorted((u for u in us if u["role"] > 0), key=lambda x: -x["role"])
     lvl_hist = collections.Counter(min(x["level"] // 5 * 5, 60) for x in us)
@@ -616,6 +619,7 @@ def stats_bundle(cfg):
                    "retention": {"d1": [d1_hit, d1_tot], "d7": [d7_hit, d7_tot]}},
         "top_level": top_level,
         "top_time": top_time,
+        "top_tech_players": top_tech_players,
         "banned": banned,
         "staff": staff,
         "role_history": role_hist[::-1],
