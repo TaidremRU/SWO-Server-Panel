@@ -69,8 +69,11 @@ try:
             assert _det.get("ok"), "player_detail: %s" % _det.get("error")
             assert '"code"' not in json.dumps(_det, ensure_ascii=False), "player_detail: пароль в выдаче!"
             for _fn in ("player_chat", "player_sensitive", "player_code", "load_items",
-                        "load_abilities", "load_clans", "load_friends", "server_time"):
+                        "load_abilities", "load_clans", "load_friends", "server_time",
+                        "item_catalog", "give_stash_items", "take_items", "_is_offline"):
                 assert hasattr(players, _fn), "players: нет %s" % _fn
+            _cat = players.item_catalog(cfg)
+            assert _cat.get("ok") and _cat["items"], "item_catalog пуст"
             _ch = players.player_chat(cfg, _uid, 5)
             print("player_detail OK: #%s %r sessions=%s techs=%s friends=%s chat=%s items(ref)=%d"
                   % (_uid, _det["name"], _det["sessions"]["total"],

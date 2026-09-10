@@ -151,6 +151,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **История:** смены ролей (`user_role.txt`), смерти/сбросы (`dead_user.txt`), снос земель (`delete_land*.txt`), месячные награды (`reward_order.txt`)
 - **Чат игрока:** его публичные сообщения из `chat_0..3.txt` (канал + время)
 - **Под своим паролем панели** (повторная проверка `auth.verify` + throttle + аудит): кнопка **«Показать пароль»** игрока (`code`) и кнопка **«Приваты и IP»** — приватные сообщения игрока (`chat_privat.txt`) и история IP (`log_net_ip.txt`). Каждый показ пишется в `webui_audit.log`.
+- **Правка инвентаря — только для оффлайн-игрока** (последнее событие в `analytics.txt` = `exit`; повторная проверка прямо перед записью; при входе игрока запись отменяется). Тоже под своим паролем панели. **Выдать на склад** (`user<N>.json → Inventory.items`): предмет по имени/id из `Data\items.json` + количество, с разбивкой по `stack`, `life` = `items.life × 90000` (или копируется у уже имеющейся записи того же типа), инструментам ставится полная `durability`. **Изъять** со склада или из инвентаря при себе (`unit<id>.json → Inventory.items`): уменьшает `count`, не больше, чем есть. Перед каждой записью — бэкап файла в `logs\game_edits\<ts>\`; правится только `Inventory.items`; атомарная запись; guard по `mtime` (если файл изменился между чтением и записью — отмена). Всё пишется в `webui_audit.log` («ИНВЕНТАРЬ игрока #N: give/take …»).
 
 ### Установка
 
@@ -340,6 +341,7 @@ The world folder is set via `config.json → players`: `localserver_root` (empty
 - **History:** role changes (`user_role.txt`), deaths/resets (`dead_user.txt`), land removals (`delete_land*.txt`), monthly rewards (`reward_order.txt`)
 - **Player chat:** their public messages from `chat_0..3.txt` (channel + time)
 - **Behind the panel admin's own password** (re-checked via `auth.verify` + throttle + audit): a **"Show password"** button for the player's `code`, and a **"DMs & IP"** button — the player's private messages (`chat_privat.txt`) and IP history (`log_net_ip.txt`). Every reveal is written to `webui_audit.log`.
+- **Inventory editing — offline players only** (last `analytics.txt` event is `exit`; re-checked right before the write; if the player logs in the write is aborted). Also behind the panel admin's password. **Give to stash** (`user<N>.json → Inventory.items`): item by name/id from `Data\items.json` + quantity, split by `stack`, `life` = `items.life × 90000` (or copied from an existing entry of the same type), tools get full `durability`. **Take** from stash or from the carried inventory (`unit<id>.json → Inventory.items`): decrements `count`, never more than present. Before every write — a backup of the file to `logs\game_edits\<ts>\`; only `Inventory.items` is touched; atomic write; `mtime` guard (aborts if the file changed between read and write). Everything is written to `webui_audit.log` ("ИНВЕНТАРЬ игрока #N: give/take …").
 
 ### Install
 

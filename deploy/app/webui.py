@@ -392,6 +392,8 @@ class WebUI:
                     return self._api_player_secret(h, pid, sess)
                 if sub == "sensitive" and method == "POST":
                     return self._api_player_sensitive(h, pid, sess)
+                if sub == "inventory" and method == "POST":
+                    return self._api_player_inventory(h, pid, sess)
                 return self._json(h, {"error": "unknown"}, 404)
 
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
@@ -552,19 +554,21 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 404)
 
-    def _reauth(self, h, sess, what):
-        """Повторная проверка админ-пароля панели (для чувствительных данных).
-        -> (ok, error_response_or_None)."""
+    def _reauth(self, h, sess, what, body=None):
+        """Повторная проверка админ-пароля панели (для чувствительных операций).
+        ``body`` — уже разобранный JSON тела (если None — читается здесь).
+        -> (ok, body_dict_or_error_response)."""
         ip = h.client_address[0]
-        ok, wait = self.throttle.check(ip)
-        if not ok:
+        okt, wait = self.throttle.check(ip)
+        if not okt:
             return False, self._json(h, {"error": "throttled", "retry": wait}, 429)
-        if not self.auth.verify(sess["user"], (self._body(h).get("password") or "")):
+        b = body if body is not None else self._body(h)
+        if not self.auth.verify(sess["user"], (b.get("password") or "")):
             self.throttle.fail(ip)
             self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль: %s" % what)
             return False, self._json(h, {"error": "bad_password"}, 403)
         self.throttle.ok(ip)
-        return True, None
+        return True, b
 
     def _api_player_secret(self, h, pid, sess):
         """Пароль игрока — только после повторного ввода админского пароля панели."""
@@ -593,6 +597,48 @@ class WebUI:
                    "ПОКАЗАНЫ приваты/IP игрока #%s (%d сообщ., %d IP)"
                    % (pid, len(d.get("private", [])), len(d.get("distinct_ips", []))))
         return self._json(h, d)
+
+    def _api_items(self, h, method, q, sess):
+        try:
+            d = players.item_catalog(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: item_catalog")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_player_inventory(self, h, pid, sess):
+        """Выдать на склад / изъять из склада или инвентаря — оффлайн, под админ-паролем."""
+        body = self._body(h)
+        op = (body.get("op") or "").strip()
+        where = (body.get("where") or "stash").strip()
+        item = body.get("item")
+        try:
+            count = int(body.get("count") or 0)
+        except (TypeError, ValueError):
+            return self._json(h, {"error": "bad_count"}, 400)
+        if op not in ("give", "take"):
+            return self._json(h, {"error": "bad_op"}, 400)
+        ok, b = self._reauth(h, sess, "правка инвентаря игрока #%s" % pid, body=body)
+        if not ok:
+            return b
+        try:
+            if op == "give":
+                d = players.give_stash_items(self.cfg, pid, item, count)
+            else:
+                d = players.take_items(self.cfg, pid, where, item, count)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_inventory %s %s", op, pid)
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        if d.get("ok"):
+            self.audit(h.client_address[0], sess["user"],
+                       "ИНВЕНТАРЬ игрока #%s: %s %s×%s %s (бэкап %s)"
+                       % (pid, op, d.get("name") or item,
+                          d.get("count") if op == "give" else d.get("removed"),
+                          d.get("where"), d.get("backup")))
+        else:
+            self.audit(h.client_address[0], sess["user"],
+                       "ИНВЕНТАРЬ игрока #%s: %s отклонено — %s" % (pid, op, d.get("error")))
+        return self._json(h, d, 200 if d.get("ok") else 400)
 
     # --------------------------------------------------------------- screenshot
     def _api_shot(self, h, method, q, sess):
@@ -1002,6 +1048,9 @@ var T = {
   pd_priv:"Приватные сообщения", pd_ips:"История IP", pd_priv_none:"нет приватных сообщений",
   pd_dev_kill:"смерть", pd_dev_reset_position:"сброс позиции", pd_role_to:"→ роль", pd_role_by:"выдал",
   pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
+  pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
+  pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
+  pd_inv_count:"кол-во", pd_inv_from:"откуда", pd_inv_carry:"при себе",
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -1065,6 +1114,9 @@ var T = {
   pd_priv:"Private messages", pd_ips:"IP history", pd_priv_none:"no private messages",
   pd_dev_kill:"death", pd_dev_reset_position:"position reset", pd_role_to:"→ role", pd_role_by:"granted by",
   pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
+  pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
+  pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
+  pd_inv_count:"qty", pd_inv_from:"from", pd_inv_carry:"carried",
   pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -1540,16 +1592,57 @@ function renderPlayerModal(d){
     [t("pd_buffs"), av.buffs||0]
   ])));
 
-  function invCard(title, list, cnt){
-    if(!list || !list.length) return kvcard(title,[["", (cnt||0)+" "+t("pd_items")]]);
-    var tbl=el("table",{}, [el("tr",{},[t("col_name"),"×","dur"].map(function(x){return el("th",{},[x]);}))].concat(
-      list.slice(0,60).map(function(it){ return el("tr",{},[
-        el("td",{},[it.name]), el("td",{class:"mono"},[String(it.count!=null?it.count:"")]),
-        el("td",{class:"mono muted"},[it.durability!=null? String(it.durability):"—"])]); })));
-    return el("div",{class:"card"},[el("h3",{},[title+" · "+list.length]), tbl]);
+  var canEdit = d.online===false;
+  var pdInvPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:130px"});
+  function pdInvOp(op, where, item, count, msgEl){
+    if(msgEl) msgEl.textContent="…";
+    api("/api/players/"+d.id+"/inventory",{body:{password:pdInvPw.value,op:op,where:where,item:item,count:count}})
+      .then(function(res){ if(msgEl) msgEl.textContent="✅"; api("/api/players/"+d.id).then(renderPlayerModal); })
+      .catch(function(e){ if(msgEl) msgEl.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
   }
-  g.appendChild(invCard(t("pd_stash"), av.stash, av.stash_count));
-  g.appendChild(invCard(t("pd_carry"), av.carry, av.carry_count));
+  function invCard(title, list, where, cnt){
+    var head=el("h3",{},[title+" · "+(list?list.length:(cnt||0))]);
+    if(!list || !list.length) return el("div",{class:"card"},[head, el("div",{class:"muted small"},[(cnt||0)+" "+t("pd_items")])]);
+    var rows=list.slice(0,80).map(function(it){
+      var tds=[el("td",{},[it.name]), el("td",{class:"mono"},[String(it.count!=null?it.count:"")]),
+               el("td",{class:"mono muted"},[it.durability!=null? String(it.durability):"—"])];
+      if(canEdit) tds.push(el("td",{},[el("button",{class:"small danger",title:t("pd_inv_take"),onclick:function(){
+        var n=parseInt(window.prompt(t("pd_inv_take")+" "+it.name+" ×", String(it.count||1)),10);
+        if(n>0) pdInvOp("take", where, it.id, n, null);
+      }},["–"])]));
+      return el("tr",{},tds);
+    });
+    var hd=[t("col_name"),"×","dur"]; if(canEdit) hd.push("");
+    var tbl=el("table",{}, [el("tr",{},hd.map(function(x){return el("th",{},[x]);}))].concat(rows));
+    return el("div",{class:"card"},[head, tbl]);
+  }
+  g.appendChild(invCard(t("pd_stash"), av.stash, "stash", av.stash_count));
+  g.appendChild(invCard(t("pd_carry"), av.carry, "carry", av.carry_count));
+
+  if(canEdit){
+    var giveItem=el("input",{list:"pd-itemlist",placeholder:t("pd_inv_item"),style:"padding:5px 8px"});
+    var giveCnt=el("input",{type:"number",value:"1",min:"1",style:"padding:5px 8px;width:90px"});
+    var giveMsg=el("span",{class:"muted small"},[]);
+    if(!$("#pd-itemlist")){
+      var dl=el("datalist",{id:"pd-itemlist"},[]);
+      document.body.appendChild(dl);
+      api("/api/items").then(function(ij){ if(ij.ok) (ij.items||[]).forEach(function(it){
+        dl.appendChild(el("option",{value:it.name},[])); }); }).catch(function(){});
+    }
+    g.appendChild(el("div",{class:"card"},[
+      el("h3",{},[t("pd_inv_edit")]),
+      el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pdInvPw]),
+      el("div",{class:"row",style:"margin-top:8px"},[
+        giveItem, giveCnt,
+        el("button",{class:"small pri",onclick:function(){
+          pdInvOp("give","stash",giveItem.value.trim(),parseInt(giveCnt.value,10)||1,giveMsg);
+        }},["＋ "+t("pd_inv_give")]),
+        giveMsg
+      ])
+    ]));
+  } else {
+    g.appendChild(el("div",{class:"card"},[el("div",{class:"muted small"},["🔒 "+t("pd_inv_online")])]));
+  }
 
   var sp=el("div",{class:"spark"}, (s.by_hour||[]).map(function(n){
     var mx=Math.max.apply(null,(s.by_hour||[1])); return el("i",{style:"height:"+(mx? Math.round(100*n/mx):0)+"%",title:n},[]); }));

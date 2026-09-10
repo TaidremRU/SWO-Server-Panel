@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from datetime import datetime
 
 _LINE_RX = re.compile(
@@ -496,6 +497,229 @@ def player_detail(cfg, uid):
         "friends": friends,
         "activity": _activity(world_dir, uid, names.get(uid) or raw.get("name") or ""),
     }
+
+
+# --------------------------------------------------------------- правка инвентаря
+LIFE_FACTOR = 90000  # life в записи ≈ items.json.life × 90000 (проверено на tech_booster/silver_coin)
+_ITEMS_FULL_CACHE = {}  # world_dir -> (mtime, {id: def}, {name: def})
+
+
+def _items_full(world_dir):
+    path = os.path.join(world_dir, "Data", "items.json")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {}, {}
+    hit = _ITEMS_FULL_CACHE.get(world_dir)
+    if hit and hit[0] == mt:
+        return hit[1], hit[2]
+    full = _read_json(path).get("items", [])
+    by_id = {it["id"]: it for it in full if "id" in it}
+    by_name = {it["name"]: it for it in full if it.get("name")}
+    _ITEMS_FULL_CACHE[world_dir] = (mt, by_id, by_name)
+    return by_id, by_name
+
+
+def item_catalog(cfg):
+    """[{id, name, stack}] — все предметы игры, для выбора при выдаче."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    by_id, _ = _items_full(world_dir)
+    out = [{"id": i, "name": d.get("name"), "stack": d.get("stack", 1)}
+           for i, d in by_id.items()]
+    out.sort(key=lambda x: (x["name"] or ""))
+    return {"ok": True, "items": out}
+
+
+def _resolve_item(world_dir, item):
+    by_id, by_name = _items_full(world_dir)
+    s = str(item).strip()
+    if s.isdigit() and int(s) in by_id:
+        return int(s), by_id[int(s)]
+    if s in by_name:
+        return by_name[s]["id"], by_name[s]
+    return None, None
+
+
+def _last_event(world_dir, uid):
+    last = None
+    for ln in _read_text(os.path.join(world_dir, "analytics.txt")).splitlines():
+        m = _LINE_RX.match(ln)
+        if m and int(m.group(3)) == uid:
+            last = m.group(2)
+    return last  # "enter" | "exit" | "register" | None
+
+
+def _is_offline(world_dir, uid):
+    return _last_event(world_dir, uid) != "enter"
+
+
+def _game_edit_backup(cfg, path):
+    base = cfg.get("base_dir", os.path.dirname(os.path.abspath(__file__)))
+    dst_dir = os.path.join(base, "logs", "game_edits", datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, os.path.basename(path))
+    shutil.copy2(path, dst)
+    return dst
+
+
+def _write_json_compact(path, data, expect_mtime):
+    """Атомарная запись компактного JSON (как пишет игра). Если mtime изменился
+    между чтением и записью — отмена."""
+    try:
+        cur = os.path.getmtime(path)
+    except OSError as e:
+        return False, "файл исчез: %s" % e
+    if expect_mtime is not None and abs(cur - expect_mtime) > 0.002:
+        return False, "файл изменился между чтением и записью — отмена (игрок мог зайти)"
+    tmp = path + ".swtmp"
+    with io.open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+    return True, None
+
+
+def _user_file(world_dir, uid):
+    return os.path.join(world_dir, "Data", "users", "user%d.json" % uid)
+
+
+def _inv_container(world_dir, uid, where):
+    """-> (path, mtime, root_obj, inv_dict) для 'stash' (файл игрока) или 'carry'
+    (файл его юнита). Или (None, None, None, err_str)."""
+    uf = _user_file(world_dir, uid)
+    if not os.path.isfile(uf):
+        return None, None, None, "файл игрока не найден"
+    if where == "stash":
+        mt = os.path.getmtime(uf)
+        root = _read_json(uf)
+        return uf, mt, root, root.setdefault("Inventory", {})
+    # carry -> unit file
+    root_u = _read_json(uf)
+    unit_id = root_u.get("unitId")
+    if unit_id is None:
+        return None, None, None, "у игрока нет юнита"
+    pf = os.path.join(world_dir, "Data", "units", "unit%s.json" % unit_id)
+    if not os.path.isfile(pf):
+        return None, None, None, "файл юнита не найден"
+    mt = os.path.getmtime(pf)
+    root = _read_json(pf)
+    return pf, mt, root, root.setdefault("Inventory", {})
+
+
+def give_stash_items(cfg, uid, item, count):
+    """Добавить предмет на СКЛАД игрока (только оффлайн). -> результат-словарь."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        uid, count = int(uid), int(count)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверные параметры"}
+    if not (1 <= count <= 1_000_000_000):
+        return {"ok": False, "error": "count должен быть 1..1e9"}
+    item_id, idef = _resolve_item(world_dir, item)
+    if item_id is None:
+        return {"ok": False, "error": "предмет не найден: %r" % item}
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок сейчас онлайн — правка склада только для оффлайн"}
+
+    path, mt, root, inv = _inv_container(world_dir, uid, "stash")
+    if inv is None:
+        return {"ok": False, "error": root}  # root == err-строка
+    items = inv.setdefault("items", [])
+    stack = max(1, int(idef.get("stack") or 1))
+    same = next((e for e in items if e.get("type") == item_id), None)
+    if same:
+        life, dur, ext = same.get("life", 0), same.get("durability", 0.0), same.get("extData", 0)
+    else:
+        life = round(float(idef.get("life") or 0) * LIFE_FACTOR)
+        dur = float(idef.get("durability") or 0) if stack == 1 else 0.0
+        ext = 0
+
+    remaining, new_entries = count, 0
+    for e in items:  # сперва долить неполные стеки того же типа
+        if remaining <= 0:
+            break
+        if e.get("type") == item_id and e.get("extData", 0) == ext:
+            room = stack - int(e.get("count") or 0)
+            if room > 0:
+                add = min(room, remaining)
+                e["count"] = int(e.get("count") or 0) + add
+                remaining -= add
+    while remaining > 0:
+        add = min(stack, remaining)
+        items.append({"type": item_id, "count": add, "durability": dur,
+                      "extData": ext, "life": life, "ext": None})
+        remaining -= add
+        new_entries += 1
+
+    if not _is_offline(world_dir, uid):  # финальная проверка перед записью
+        return {"ok": False, "error": "игрок зашёл в игру — запись отменена"}
+    bak = _game_edit_backup(cfg, path)
+    ok, err = _write_json_compact(path, root, mt)
+    if not ok:
+        return {"ok": False, "error": err}
+    names = load_items(world_dir)
+    return {"ok": True, "op": "give", "where": "stash", "item": item_id,
+            "name": names.get(item_id), "count": count, "new_entries": new_entries,
+            "backup": os.path.basename(os.path.dirname(bak)),
+            "stash": _name_inv(items, names)}
+
+
+def take_items(cfg, uid, where, item, count):
+    """Изъять предмет из склада ('stash') или инвентаря при себе ('carry'). Только оффлайн."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    if where not in ("stash", "carry"):
+        return {"ok": False, "error": "where: stash|carry"}
+    try:
+        uid, count = int(uid), int(count)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверные параметры"}
+    if count < 1:
+        return {"ok": False, "error": "count >= 1"}
+    item_id, _idef = _resolve_item(world_dir, item)
+    if item_id is None:
+        try:
+            item_id = int(str(item))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "предмет не найден: %r" % item}
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок сейчас онлайн — изъятие только для оффлайн"}
+
+    path, mt, root, inv = _inv_container(world_dir, uid, where)
+    if inv is None:
+        return {"ok": False, "error": root}
+    items = inv.get("items") or []
+    have = sum(int(e.get("count") or 0) for e in items if e.get("type") == item_id)
+    if have == 0:
+        return {"ok": False, "error": "у игрока нет этого предмета в %s" % where}
+    to_remove = min(count, have)
+    left, out = to_remove, []
+    for e in items:
+        if e.get("type") == item_id and left > 0:
+            c = int(e.get("count") or 0)
+            if c <= left:
+                left -= c
+                continue
+            e["count"] = c - left
+            left = 0
+        out.append(e)
+    inv["items"] = out
+
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок зашёл в игру — запись отменена"}
+    bak = _game_edit_backup(cfg, path)
+    ok, err = _write_json_compact(path, root, mt)
+    if not ok:
+        return {"ok": False, "error": err}
+    names = load_items(world_dir)
+    return {"ok": True, "op": "take", "where": where, "item": item_id,
+            "name": names.get(item_id), "removed": to_remove, "had": have,
+            "backup": os.path.basename(os.path.dirname(bak)),
+            "items": _name_inv(out, names)}
 
 
 def player_code(cfg, uid):
