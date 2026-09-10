@@ -2252,7 +2252,13 @@ function openMapdt(mapId){
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 function mdtFindCard(maps){
-  var inp=el("input",{placeholder:t("mf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
+  var inp=el("input",{list:"mf-itemlist",placeholder:t("mf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
+  if(!$("#mf-itemlist")){
+    var dl=el("datalist",{id:"mf-itemlist"},[]);
+    document.body.appendChild(dl);
+    api("/api/items").then(function(ij){ if(ij.ok) (ij.items||[]).forEach(function(it){
+      dl.appendChild(el("option",{value:it.name},["#"+it.id])); }); }).catch(function(){});
+  }
   var sel=el("select",{style:"padding:5px 8px"},[el("option",{value:"all"},[t("mf_all")])].concat(
     (maps||[]).filter(function(r){return r.map!=null && !r.space;}).map(function(r){
       return el("option",{value:String(r.map)},["#"+r.map+" ("+(r.size||"?")+")"]); })));
@@ -2392,7 +2398,7 @@ function drawStats(j){
     wbox.innerHTML="";
     if(!w.ok){ wbox.appendChild(el("div",{class:"msg err"},[w.error||"error"])); return; }
     var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
-    wg.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
+    wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
       el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
       ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,60),
         function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories),
