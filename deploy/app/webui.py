@@ -383,10 +383,15 @@ class WebUI:
             if route.startswith("players/"):
                 parts = route.split("/")
                 pid = parts[1] if len(parts) > 1 else ""
+                sub = parts[2] if len(parts) > 2 else ""
                 if len(parts) == 2 and method == "GET":
                     return self._api_player_detail(h, pid, sess)
-                if len(parts) == 3 and parts[2] == "secret" and method == "POST":
+                if sub == "chat" and method == "GET":
+                    return self._api_player_chat(h, pid, q, sess)
+                if sub == "secret" and method == "POST":
                     return self._api_player_secret(h, pid, sess)
+                if sub == "sensitive" and method == "POST":
+                    return self._api_player_sensitive(h, pid, sess)
                 return self._json(h, {"error": "unknown"}, 404)
 
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
@@ -535,25 +540,59 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 404)
 
-    def _api_player_secret(self, h, pid, sess):
-        """Пароль игрока — только после повторного ввода админского пароля панели."""
+    def _api_player_chat(self, h, pid, q, sess):
+        try:
+            n = min(300, max(10, int((q.get("limit") or ["60"])[0])))
+        except ValueError:
+            n = 60
+        try:
+            d = players.player_chat(self.cfg, pid, n)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_chat %s", pid)
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _reauth(self, h, sess, what):
+        """Повторная проверка админ-пароля панели (для чувствительных данных).
+        -> (ok, error_response_or_None)."""
         ip = h.client_address[0]
         ok, wait = self.throttle.check(ip)
         if not ok:
-            return self._json(h, {"error": "throttled", "retry": wait}, 429)
-        b = self._body(h)
-        if not self.auth.verify(sess["user"], b.get("password") or ""):
+            return False, self._json(h, {"error": "throttled", "retry": wait}, 429)
+        if not self.auth.verify(sess["user"], (self._body(h).get("password") or "")):
             self.throttle.fail(ip)
-            self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль при попытке показать код игрока #%s" % pid)
-            return self._json(h, {"error": "bad_password"}, 403)
+            self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль: %s" % what)
+            return False, self._json(h, {"error": "bad_password"}, 403)
         self.throttle.ok(ip)
+        return True, None
+
+    def _api_player_secret(self, h, pid, sess):
+        """Пароль игрока — только после повторного ввода админского пароля панели."""
+        ok, resp = self._reauth(h, sess, "показать код игрока #%s" % pid)
+        if not ok:
+            return resp
         try:
             code = players.player_code(self.cfg, pid)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: player_code %s", pid)
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-        self.audit(ip, sess["user"], "ПОКАЗАН пароль игрока #%s" % pid)
+        self.audit(h.client_address[0], sess["user"], "ПОКАЗАН пароль игрока #%s" % pid)
         return self._json(h, {"ok": True, "code": code})
+
+    def _api_player_sensitive(self, h, pid, sess):
+        """Приватные сообщения игрока + история IP — тоже под админ-паролем."""
+        ok, resp = self._reauth(h, sess, "показать приваты/IP игрока #%s" % pid)
+        if not ok:
+            return resp
+        try:
+            d = players.player_sensitive(self.cfg, pid)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: player_sensitive %s", pid)
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        self.audit(h.client_address[0], sess["user"],
+                   "ПОКАЗАНЫ приваты/IP игрока #%s (%d сообщ., %d IP)"
+                   % (pid, len(d.get("private", [])), len(d.get("distinct_ips", []))))
+        return self._json(h, d)
 
     # --------------------------------------------------------------- screenshot
     def _api_shot(self, h, method, q, sess):
@@ -957,6 +996,11 @@ var T = {
   pd_sess_max:"макс", pd_sess_byhour:"Активность по часам суток", pd_sess_recent:"Последние сессии",
   pd_show_code:"Показать пароль", pd_code_prompt:"Подтвердите своим паролем от панели:",
   pd_code_btn:"Показать", pd_code_bad:"Неверный пароль", pd_min:"мин", pd_h_ago:"ч назад",
+  pd_activity:"История", pd_deaths:"Смерти / сбросы", pd_roles:"Смены ролей",
+  pd_lands:"Снос земель", pd_rewards:"Награды (месяц)", pd_chat:"Чат игрока",
+  pd_chat_none:"нет публичных сообщений", pd_sens_btn:"Приваты и IP",
+  pd_priv:"Приватные сообщения", pd_ips:"История IP", pd_priv_none:"нет приватных сообщений",
+  pd_dev_kill:"смерть", pd_dev_reset_position:"сброс позиции", pd_role_to:"→ роль", pd_role_by:"выдал",
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -1014,6 +1058,11 @@ var T = {
   pd_sess_max:"max", pd_sess_byhour:"Activity by hour of day", pd_sess_recent:"Recent sessions",
   pd_show_code:"Show password", pd_code_prompt:"Confirm with your panel password:",
   pd_code_btn:"Show", pd_code_bad:"Wrong password", pd_min:"min", pd_h_ago:"h ago",
+  pd_activity:"History", pd_deaths:"Deaths / resets", pd_roles:"Role changes",
+  pd_lands:"Land removals", pd_rewards:"Rewards (month)", pd_chat:"Player chat",
+  pd_chat_none:"no public messages", pd_sens_btn:"DMs & IP",
+  pd_priv:"Private messages", pd_ips:"IP history", pd_priv_none:"no private messages",
+  pd_dev_kill:"death", pd_dev_reset_position:"position reset", pd_role_to:"→ role", pd_role_by:"granted by",
   pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -1518,26 +1567,71 @@ function renderPlayerModal(d){
       d.clan_members.map(function(m){ return ["#"+m.id, el("span",{},[plLink(m.id, "#"+m.id), " · r"+(m.rating||0)+" · "+(m.clan_point||0)+"cp"])]; })));
   }
 
+  var ac=d.activity||{};
+  var acRows=[];
+  (ac.role_grants||[]).forEach(function(x){
+    acRows.push([t("pd_roles"), x.as_target
+      ? (t("pd_role_to")+" "+x.role+" ("+t("pd_role_by")+" "+x.by+")")
+      : (x.target+" "+t("pd_role_to")+" "+x.role)]);
+  });
+  if((ac.deaths||[]).length) acRows.push([t("pd_deaths"), el("span",{},[String(ac.deaths.length)+" · "+ac.deaths.slice(0,6).map(function(x){return fshort(x.ts)+" "+(t("pd_dev_"+x.event)||x.event);}).join("  ")])]);
+  if((ac.land_deletions||[]).length) acRows.push([t("pd_lands"), ac.land_deletions.slice(0,8).map(function(x){return "["+x.map+"] "+x.x+","+x.y;}).join("  ")]);
+  if((ac.rewards||[]).length) acRows.push([t("pd_rewards"), ac.rewards.map(function(x){return fshort(x.ts).slice(0,5)+":"+x.reward;}).join("  ")]);
+  if(acRows.length) g.appendChild(kvcard(t("pd_activity"), acRows));
+
+  var chatCard=el("div",{class:"card"},[el("h3",{},[t("pd_chat")]), el("div",{class:"muted small"},["…"])]);
+  g.appendChild(chatCard);
+  api("/api/players/"+d.id+"/chat?limit=80").then(function(cj){
+    chatCard.innerHTML=""; chatCard.appendChild(el("h3",{},[t("pd_chat")+(cj.count!=null? " · "+cj.count : "")]));
+    if(!cj.ok || !cj.messages || !cj.messages.length){ chatCard.appendChild(el("div",{class:"muted small"},[t("pd_chat_none")])); return; }
+    var box=el("div",{class:"small",style:"max-height:220px;overflow:auto"},[]);
+    cj.messages.forEach(function(m){ box.appendChild(el("div",{},[
+      el("span",{class:"lg-t mono"},[fshort(m.ts)+" "]), el("span",{class:"chip"},[m.channel]), " "+m.text ])); });
+    chatCard.appendChild(box);
+  }).catch(function(){ chatCard.querySelector(".muted").textContent=t("err_net"); });
+
   b.appendChild(g);
 
-  // reveal-password block
-  var codeBox=el("div",{class:"card",style:"margin-top:12px"},[]);
-  var showBtn=el("button",{class:"small danger",onclick:function(){
-    codeBox.innerHTML="";
+  // sensitive blocks (each behind admin password)
+  function gate(box, url, promptKey, render){
+    box.innerHTML="";
     var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
     var msg=el("span",{class:"muted small"},[]);
     var go=el("button",{class:"small",onclick:function(){
       msg.textContent="…";
-      api("/api/players/"+d.id+"/secret",{body:{password:pw.value}}).then(function(res){
-        codeBox.innerHTML=""; codeBox.appendChild(el("div",{class:"kv"},[
-          el("span",{},["code"]), el("b",{class:"mono"},[res.code||"—"])]));
-      }).catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
+      api(url,{body:{password:pw.value}}).then(function(res){ box.innerHTML=""; render(box,res); })
+        .catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
     }},[t("pd_code_btn")]);
-    codeBox.appendChild(el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pw, go, msg]));
+    box.appendChild(el("div",{class:"row"},[el("span",{class:"muted small"},[t(promptKey)]), pw, go, msg]));
     pw.focus();
-  }},[t("pd_show_code")]);
-  codeBox.appendChild(showBtn);
-  b.appendChild(codeBox);
+  }
+  var secBox=el("div",{class:"card",style:"margin-top:12px"},[]);
+  var btnRow=el("div",{class:"row"},[
+    el("button",{class:"small danger",onclick:function(){
+      gate(secBox, "/api/players/"+d.id+"/secret", "pd_code_prompt", function(box,res){
+        box.appendChild(el("div",{class:"kv"},[el("span",{},["code"]),el("b",{class:"mono"},[res.code||"—"])]));
+        box.appendChild(btnRow);
+      });
+    }},[t("pd_show_code")]),
+    el("button",{class:"small danger",onclick:function(){
+      gate(secBox, "/api/players/"+d.id+"/sensitive", "pd_code_prompt", function(box,res){
+        box.appendChild(el("h3",{},[t("pd_priv")+" · "+(res.private||[]).length]));
+        if(!(res.private||[]).length) box.appendChild(el("div",{class:"muted small"},[t("pd_priv_none")]));
+        var pb=el("div",{class:"small",style:"max-height:200px;overflow:auto"},[]);
+        (res.private||[]).forEach(function(m){ pb.appendChild(el("div",{},[
+          el("span",{class:"lg-t mono"},[fshort(m.ts)+" "]),
+          el("b",{},[m.outgoing? (d.name+" → "+m.to) : (m.from+" → "+d.name)]), ": "+m.text ])); });
+        box.appendChild(pb);
+        box.appendChild(el("h3",{style:"margin-top:10px"},[t("pd_ips")+" · "+(res.distinct_ips||[]).length]));
+        var ib=el("div",{class:"mono small"},[]);
+        (res.ips||[]).forEach(function(x){ ib.appendChild(el("div",{},[fshort(x.ts)+"  "+x.ip+":"+x.port+(x.new?"  ●":"")])); });
+        box.appendChild(ib);
+        box.appendChild(btnRow);
+      });
+    }},[t("pd_sens_btn")])
+  ]);
+  secBox.appendChild(btnRow);
+  b.appendChild(secBox);
 }
 
 // ---- roles ----

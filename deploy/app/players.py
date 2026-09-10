@@ -231,6 +231,137 @@ def _user_sessions(analytics_path, uid):
 
 ROLE_NAMES = {0: "player", 1: "moderator", 2: "admin", 3: "GM"}
 
+_CHAT_TS_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): (.+)$")
+_PRIV_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): (.+?) > (.+?): (.*)$")
+_NETIP_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): (.+?) = (\S+) = \S+ = (\d+)\s*$")
+_DEAD_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): user = (.+?); (\w+)\s*$")
+_LAND_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): user=(\d+) map=(\d+) p=(\d+),(\d+)")
+_ROLE_RX = re.compile(r"set role user (\d+)\[(.+?)\] admin=(\d+)\[(.+?)\] role=(\w+)")
+_REWARD_RX = re.compile(r"^(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): user=(\d+) ; reward=(\d+)")
+
+_CHAT_CACHE = {}  # world_dir -> (mtimes_tuple, [ {ts, epoch, channel, nick, text} ])
+_CHAT_CHANNELS = {0: "global", 1: "global2", 2: "ru", 3: "clan"}
+
+
+def _all_chat(world_dir):
+    """Все строки chat_0..3.txt: [{ts, epoch, channel, nick, text}] (кэш по mtime)."""
+    paths = [(i, os.path.join(world_dir, "Logs", "chat_%d.txt" % i)) for i in range(4)]
+    mts = tuple(os.path.getmtime(p) if os.path.isfile(p) else 0 for _, p in paths)
+    hit = _CHAT_CACHE.get(world_dir)
+    if hit and hit[0] == mts:
+        return hit[1]
+    rows = []
+    for ch, p in paths:
+        for ln in _read_text(p).splitlines():
+            m = _CHAT_TS_RX.match(ln)
+            if not m:
+                continue
+            rest = m.group(2)
+            if ": " not in rest:
+                continue
+            nick, text = rest.split(": ", 1)
+            rows.append({"ts": m.group(1), "epoch": _to_epoch(m.group(1)),
+                         "channel": _CHAT_CHANNELS.get(ch, str(ch)), "nick": nick, "text": text})
+    rows.sort(key=lambda r: r["epoch"])
+    _CHAT_CACHE[world_dir] = (mts, rows)
+    return rows
+
+
+def player_chat(cfg, uid, limit=60):
+    """Публичные сообщения игрока (chat_0..3) — новые сверху."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    try:
+        nick = names.get(int(uid))
+    except (TypeError, ValueError):
+        nick = None
+    if not nick:
+        return {"ok": False, "error": "игрок не найден"}
+    msgs = [{"ts": r["ts"], "channel": r["channel"], "text": r["text"]}
+            for r in _all_chat(world_dir) if r["nick"] == nick]
+    return {"ok": True, "nick": nick, "count": len(msgs), "messages": msgs[-limit:][::-1]}
+
+
+def _activity(world_dir, uid, nick):
+    logs = os.path.join(world_dir, "Logs")
+    deaths = []
+    for ln in _read_text(os.path.join(logs, "dead_user.txt")).splitlines():
+        m = _DEAD_RX.match(ln)
+        if m and m.group(2) == nick:
+            deaths.append({"ts": m.group(1), "event": m.group(3)})
+    roles = []
+    for ln in _read_text(os.path.join(logs, "user_role.txt")).splitlines():
+        m = _ROLE_RX.search(ln)
+        if not m:
+            continue
+        tgt, tgt_nm, by, by_nm, rname = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4), m.group(5)
+        if tgt == uid or by == uid:
+            roles.append({"target_id": tgt, "target": tgt_nm, "by_id": by, "by": by_nm,
+                          "role": rname, "as_target": tgt == uid})
+    lands = []
+    try:
+        for f in os.listdir(logs):
+            if f.startswith("delete_land") and f.endswith(".txt"):
+                for ln in _read_text(os.path.join(logs, f)).splitlines():
+                    m = _LAND_RX.match(ln)
+                    if m and int(m.group(2)) == uid:
+                        lands.append({"ts": m.group(1), "map": int(m.group(3)),
+                                      "x": int(m.group(4)), "y": int(m.group(5))})
+    except OSError:
+        pass
+    lands.sort(key=lambda x: _to_epoch(x["ts"]))
+    rewards = []
+    for ln in _read_text(os.path.join(logs, "reward_order.txt")).splitlines():
+        m = _REWARD_RX.match(ln)
+        if m and int(m.group(2)) == uid:
+            rewards.append({"ts": m.group(1), "reward": int(m.group(3))})
+    return {
+        "deaths": deaths[-20:][::-1],
+        "role_grants": roles,
+        "land_deletions": lands[-20:][::-1],
+        "rewards": rewards[::-1],
+    }
+
+
+def player_sensitive(cfg, uid):
+    """Приватные сообщения игрока + история IP. ТОЛЬКО после проверки админ-пароля
+    вызывающим эндпоинтом. Аудит — там же."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    try:
+        nick = names.get(int(uid))
+        uid = int(uid)
+    except (TypeError, ValueError):
+        nick = None
+    if not nick:
+        return {"ok": False, "error": "игрок не найден"}
+    logs = os.path.join(world_dir, "Logs")
+
+    priv = []
+    for ln in _read_text(os.path.join(logs, "chat_privat.txt")).splitlines():
+        m = _PRIV_RX.match(ln)
+        if not m:
+            continue
+        frm, to = m.group(2), m.group(3)
+        if frm == nick or to == nick:
+            priv.append({"ts": m.group(1), "from": frm, "to": to, "text": m.group(4),
+                         "outgoing": frm == nick})
+
+    ips = []
+    seen = set()
+    for ln in _read_text(os.path.join(logs, "log_net_ip.txt")).splitlines():
+        m = _NETIP_RX.match(ln)
+        if m and m.group(2) == nick:
+            key = m.group(3)
+            ips.append({"ts": m.group(1), "ip": m.group(3), "port": int(m.group(4)), "new": key not in seen})
+            seen.add(key)
+    return {"ok": True, "nick": nick, "private": priv[-200:][::-1],
+            "ips": ips[-40:][::-1], "distinct_ips": sorted(seen)}
+
 
 def player_detail(cfg, uid):
     """Полная карточка игрока (пароль ``code`` НЕ включается — см. ``player_code``)."""
@@ -340,6 +471,7 @@ def player_detail(cfg, uid):
             "recent": sess["recent"],
         },
         "clan_members": clan["members"] if clan else [],
+        "activity": _activity(world_dir, uid, names.get(uid) or raw.get("name") or ""),
     }
 
 
