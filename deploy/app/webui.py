@@ -790,6 +790,25 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_mapdt_image(self, h, method, q, sess):
+        """PNG-картинка карты: ?map=N&scale=auto&claims=1&owner=<id>."""
+        mp = (q.get("map") or ["1"])[0]
+        scale = (q.get("scale") or ["auto"])[0]
+        claims = (q.get("claims") or ["1"])[0] not in ("0", "false", "no")
+        owner = (q.get("owner") or [""])[0]
+        try:
+            png, fn, meta = players.mapdt_image(self.cfg, mp, scale=scale,
+                                                claims=claims, owner=owner)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt_image")
+            return self._json(h, {"ok": False, "error": str(e)}, 500)
+        if not isinstance(png, (bytes, bytearray)):
+            return self._json(h, png if isinstance(png, dict) else {"ok": False}, 500)
+        return self._send(h, 200, "image/png", bytes(png), {
+            "Cache-Control": "max-age=60",
+            "Content-Disposition": 'inline; filename="%s"' % (fn or "map.png"),
+        })
+
     def _api_player_item_find(self, h, method, q, sess):
         """Кто из игроков держит предмет: ?item=<id|имя|подстрока>."""
         item = (q.get("item") or [""])[0]
@@ -1338,6 +1357,9 @@ var T = {
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
   mf_nomatch:"ничего не найдено", mf_matched:"совпадения по имени",
   mf_owner:"на чьей земле", mf_byowner:"по владельцам земли", mf_nobody:"— ничья —",
+  mi_title:"Картинка карты", mi_wait:"рисую…", mi_claims:"клаймы", mi_owner:"владелец id",
+  mi_show:"показать", mi_water:"вода", mi_land:"суша", mi_grass:"природа", mi_mtn:"горы",
+  mi_ore:"руда", mi_wall:"стены/пол", mi_built:"постройки", mi_claim:"клаймы = цвет по владельцу (галка), либо один владелец по id",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
   st_resh_note:"= сумма стоимости изученных техов (tech.json cost в минутах, 1440 = сутки); исследование идёт и оффлайн, бустеры/мозги ускоряют",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
@@ -1445,6 +1467,9 @@ var T = {
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
   mf_nomatch:"nothing found", mf_matched:"name matches",
   mf_owner:"on whose land", mf_byowner:"by land owner", mf_nobody:"— unclaimed —",
+  mi_title:"Map image", mi_wait:"rendering…", mi_claims:"claims", mi_owner:"owner id",
+  mi_show:"show", mi_water:"water", mi_land:"land", mi_grass:"nature", mi_mtn:"mountains",
+  mi_ore:"ore", mi_wall:"walls/floor", mi_built:"structures", mi_claim:"claims = colour per owner (checkbox), or one owner by id",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
   st_resh_note:"= sum of researched techs' cost (tech.json cost is minutes, 1440 = a day); research runs offline too, boosters/brains speed it up",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
@@ -2272,6 +2297,7 @@ function openMapdt(mapId){
       (d.vehicles)? el("span",{},["транспорт "+d.vehicles+" (юнитов "+d.vehicle_units+")"]) : null
     ].filter(Boolean));
     card.appendChild(meta);
+    card.appendChild(mapImageBlock(mapId));
     var grid=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(260px,1fr))"},[]);
     function tblcard(title, rows, valkey){
       return el("div",{class:"card"},[el("h3",{},[title+" · "+(rows||[]).length]),
@@ -2286,6 +2312,37 @@ function openMapdt(mapId){
         return [String(r.owner), plLink(r.owner, r.name), String(r.blocks8)]; })]));
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+function mapImageBlock(mapId){
+  var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;max-width:100%;border:1px solid var(--line);border-radius:8px;background:var(--panel2)"});
+  var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:110px"});
+  var claimsCb=el("input",{type:"checkbox",checked:"checked"});
+  var stat=el("span",{class:"muted small"},[t("mi_wait")]);
+  function reload(){
+    stat.textContent=t("mi_wait");
+    var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+"&_="+Date.now();
+    img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
+    img.onerror=function(){ stat.textContent=t("err_net"); };
+    img.src=u;
+  }
+  claimsCb.onchange=reload;
+  ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
+  var leg=el("div",{class:"chart-legend",style:"margin-top:6px"},[
+    lgSwatch("38,88,150",t("mi_water")), lgSwatch("176,160,126",t("mi_land")),
+    lgSwatch("86,148,66",t("mi_grass")), lgSwatch("128,128,134",t("mi_mtn")),
+    lgSwatch("122,108,92",t("mi_ore")), lgSwatch("228,202,72",t("mi_wall")),
+    lgSwatch("222,138,46",t("mi_built")),
+    el("span",{class:"muted"},[t("mi_claim")]) ]);
+  setTimeout(reload,0);
+  return el("div",{class:"card wide",style:"margin:8px 0"},[
+    el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px"},[
+      el("b",{},["🗺 "+t("mi_title")]),
+      el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
+      ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
+    img, leg ]);
+}
+function lgSwatch(rgb, label){
+  return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
 }
 function pfFindCard(){
   ensureItemList();

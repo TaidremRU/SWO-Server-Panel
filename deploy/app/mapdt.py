@@ -84,6 +84,89 @@ class _R:
         return self.n - self.p
 
 
+# --------------------------------------------------------------- отрисовка карты
+# базовые цвета (RGB) по категории тайла
+_COL = {
+    "water": (38, 88, 150), "land": (176, 160, 126), "grass": (86, 148, 66),
+    "plant": (44, 104, 48), "mtn": (128, 128, 134), "ore": (122, 108, 92),
+    "wall": (228, 202, 72), "floor": (206, 186, 118), "built": (222, 138, 46),
+    "unknown": (150, 120, 120),
+}
+_CLAIM_HL = (90, 235, 110)       # выделение конкретного владельца
+# палитра для клаймов (по владельцу) — насыщенные различимые оттенки
+_CLAIM_PAL = [
+    (231, 76, 60), (46, 134, 193), (241, 196, 15), (155, 89, 182),
+    (26, 188, 156), (230, 126, 34), (52, 152, 219), (243, 156, 18),
+    (142, 68, 173), (39, 174, 96), (211, 84, 0), (41, 128, 185),
+    (192, 57, 43), (22, 160, 133), (127, 140, 141), (243, 104, 224),
+    (109, 76, 65), (33, 97, 140), (125, 206, 160), (203, 67, 53),
+    (247, 220, 111), (169, 50, 38), (84, 153, 199), (240, 178, 122),
+]
+
+
+def _classify(c, bc):
+    """категория тайла для карты-картинки. bc = {block_type: 'mtn'|'ore'|'wall'|
+    'floor'|'built'|'plant'|''}."""
+    b = c.get("block")
+    if b:
+        k = bc.get(b["type"], "")
+        if k in ("mtn", "ore", "wall", "floor", "built", "plant"):
+            return k
+        return "built"                     # неизвестный блок — скорее постройка
+    if c.get("machine"):
+        return "built"
+    g = c.get("grass")
+    if g:
+        k = bc.get(g["type"], "")
+        if k in ("wall", "floor"):
+            return k
+        if k == "plant":
+            return "plant"
+        return "grass"
+    if c.get("box"):
+        return "built"
+    if not c.get("ground"):
+        return "water"
+    return "land"
+
+
+def _blend(a, b, t):
+    return (int(a[0] + (b[0] - a[0]) * t), int(a[1] + (b[1] - a[1]) * t),
+            int(a[2] + (b[2] - a[2]) * t))
+
+
+def _png_bytes(w, h, rgb, scale=1):
+    """Минимальный кодировщик PNG (RGB8, фильтр 0), только stdlib. ``rgb`` —
+    bytes длиной w*h*3, строки по y. ``scale`` — целочисленный nearest-upscale."""
+    import zlib
+    s = max(1, int(scale))
+    ow, oh = w * s, h * s
+    stride = w * 3
+    raw = bytearray()
+    for y in range(h):
+        line = rgb[y * stride:(y + 1) * stride]
+        if s > 1:
+            wide = bytearray(ow * 3)
+            for x in range(w):
+                px = line[x * 3:x * 3 + 3]
+                base = x * s * 3
+                for k in range(s):
+                    wide[base + k * 3:base + k * 3 + 3] = px
+            line = bytes(wide)
+        for _ in range(s):
+            raw.append(0)
+            raw += line
+    comp = zlib.compress(bytes(raw), 6)
+
+    def _ch(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + _ch(b"IHDR", struct.pack(">IIBBBBB", ow, oh, 8, 2, 0, 0, 0))
+            + _ch(b"IDAT", comp) + _ch(b"IEND", b""))
+
+
 # ------------------------------------------------------------ вложенные структуры
 # ctx (мутируемый, один на разбор): {"want": set|None, "hits": list,
 #   "x": int, "y": int, "where": str, "cap": int} — сбор координат предметов.
@@ -288,11 +371,16 @@ def _load_item_ext(world_dir):
 
 
 # --------------------------------------------------------------------- публичное
-def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
+def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
+          paint=False, block_class=None, claims=True, only_owner=None):
     """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
 
     ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
     ``[{x, y, where, type, count, durability}]`` (не более ``cap`` записей).
+
+    ``paint`` — вернуть ``pixels`` (bytearray w*h*3, строки по y) с цветовой
+    картой (вода/суша/горы/природа/постройки), ``block_class`` = {type: cat}.
+    ``claims`` — тонировать застолблённую землю; ``only_owner`` — выделить одного.
     """
     try:
         with open(path, "rb") as f:
@@ -303,6 +391,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
     item_ext = _load_item_ext(world_dir)
     want = set(want) if want else None
     ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap}
+    bc = block_class or {}
     r = _R(data)
     try:
         version = MAP_VERSION
@@ -324,6 +413,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
         vehicles = 0
         vehicle_units = 0
         grid = [] if keep_grid else None
+        px = bytearray(w * h * 3) if paint else None
 
         for _x in range(w):
             row = [] if keep_grid else None
@@ -334,6 +424,10 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
                     land += 1
                 else:
                     water += 1
+                if paint:
+                    col = _COL.get(_classify(c, bc), _COL["unknown"])
+                    pi = (_y * w + _x) * 3
+                    px[pi] = col[0]; px[pi + 1] = col[1]; px[pi + 2] = col[2]
                 if c["block"]:
                     blocks[c["block"]["type"]] += 1
                     for rr in c["block"]["res"]:
@@ -370,7 +464,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
 
         owner = Counter()
         um_w, um_h = w // 8, h // 8
-        um_flat = [] if want else None
+        um_flat = [] if (want or paint) else None
         # userMap[x, y] = ReadUInt32(), x внешний цикл (0..w/8), y внутренний (0..h/8)
         for _ in range(um_w * um_h):
             uid = r.u32()
@@ -380,11 +474,36 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
                 owner[uid] += 1
 
         # проставить владельца земли (блок 8×8) каждому найденному предмету
-        if um_flat is not None:
+        if um_flat is not None and want:
             for hh in ctx["hits"]:
                 bx, by = hh["x"] // 8, hh["y"] // 8
                 oi = bx * um_h + by
                 hh["owner"] = um_flat[oi] if (bx < um_w and by < um_h and 0 <= oi < len(um_flat)) else 0
+
+        # наложить клаймы на картинку
+        if paint and um_flat and (claims or only_owner):
+            only_owner = int(only_owner) if only_owner else 0
+            nflat = len(um_flat)
+            npal = len(_CLAIM_PAL)
+            # стабильный индекс палитры по id владельца (в порядке появления)
+            pal_of = {}
+            for _y in range(h):
+                byi = _y // 8
+                for _x in range(w):
+                    oi = (_x // 8) * um_h + byi     # userMap[x,y], x-мажор (Map.cs)
+                    o = um_flat[oi] if oi < nflat else 0
+                    if not o:
+                        continue
+                    pi = (_y * w + _x) * 3
+                    cur = (px[pi], px[pi + 1], px[pi + 2])
+                    if only_owner:
+                        nc = _blend(cur, _CLAIM_HL, 0.6) if o == only_owner else _blend(cur, (0, 0, 0), 0.35)
+                    else:
+                        k = pal_of.get(o)
+                        if k is None:
+                            k = pal_of[o] = _CLAIM_PAL[len(pal_of) % npal]
+                        nc = _blend(cur, k, 0.5)
+                    px[pi] = nc[0]; px[pi + 1] = nc[1]; px[pi + 2] = nc[2]
 
         oxygen_map = None
         remain = r.rest()
@@ -424,6 +543,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
             "grid": grid,
             "hits": ctx["hits"] if want else None,
             "hits_capped": bool(want) and len(ctx["hits"]) >= cap,
+            "pixels": px,
         }
     except (EOFError, struct.error) as e:
         return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p,
@@ -431,6 +551,29 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000):
     except Exception as e:  # noqa: BLE001
         logging.exception("mapdt.parse %s", path)
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "at_byte": r.p}
+
+
+def render_png(path, world_dir=None, block_class=None, scale=None,
+               claims=True, only_owner=None):
+    """Картинка карты (PNG bytes) + мета. ``block_class`` = {block_type: cat}
+    (`mtn|ore|wall|floor|built|plant`). ``scale`` = None -> авто (крупная сторона
+    ~640, макс x8). -> ``{ok, w, h, scale, png, legend, owners}``."""
+    d = parse(path, world_dir=world_dir, keep_grid=False, paint=True,
+              block_class=block_class, claims=claims, only_owner=only_owner)
+    if not d.get("ok"):
+        return d
+    w, h = d["w"], d["h"]
+    if scale is None:
+        scale = max(1, min(8, 640 // max(w, h) or 1))
+    scale = max(1, min(16, int(scale)))
+    png = _png_bytes(w, h, bytes(d["pixels"]), scale)
+    return {
+        "ok": True, "w": w, "h": h, "scale": scale, "png": png,
+        "legend": [{"cat": k, "rgb": list(v)} for k, v in _COL.items()
+                   if k != "unknown"],
+        "owners": d.get("land_owners") or [],
+        "land_total_blocks8": d.get("land_total_blocks8"),
+    }
 
 
 def summary(path, world_dir=None, item_names=None):

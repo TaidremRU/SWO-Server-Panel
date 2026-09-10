@@ -922,6 +922,83 @@ def mapdt_index(cfg):
     return {"ok": True, "maps": out}
 
 
+_BLOCKCLASS_CACHE = {}   # world_dir -> (mtime, {block_type: cat})
+_MAPIMG_CACHE = {}       # (path, scale, claims, owner) -> (mtime, png bytes)
+
+
+def _block_class(world_dir):
+    """{block_type(int): 'mtn'|'ore'|'wall'|'floor'|'built'|'plant'} из blocks.json."""
+    p = os.path.join(world_dir, "Data", "blocks.json")
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return {}
+    hit = _BLOCKCLASS_CACHE.get(world_dir)
+    if hit and hit[0] == mt:
+        return hit[1]
+    out = {}
+    for b in (_read_json(p) or {}).get("items", []):
+        bid = b.get("id")
+        if bid is None:
+            continue
+        if b.get("isMountain") and b.get("isOre"):
+            cat = "ore"
+        elif b.get("isMountain"):
+            cat = "mtn"
+        elif b.get("isWall"):
+            cat = "wall"
+        elif b.get("isFloor"):
+            cat = "floor"
+        elif (b.get("growthRnd") or 0) > 0:
+            cat = "plant"
+        elif (b.get("buildTime") or 0) > 0 or b.get("machine") or b.get("container") \
+                or b.get("isCar") or b.get("isRocket") or b.get("isBed") or b.get("isEngine"):
+            cat = "built"
+        else:
+            cat = ""
+        if cat:
+            out[bid] = cat
+    _BLOCKCLASS_CACHE[world_dir] = (mt, out)
+    return out
+
+
+def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None):
+    """PNG-картинка карты: вода/суша/горы/природа/постройки + клаймы.
+    -> ``(png_bytes, filename, meta)`` либо ``({"ok":False,"error":...}, None, None)``."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}, None, None
+    try:
+        map_id = int(map_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}, None, None
+    path = os.path.join(world_dir, "Data", "maps", "map%d.dt" % map_id)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла map%d.dt" % map_id}, None, None
+    try:
+        owner = int(owner) if owner else 0
+    except (TypeError, ValueError):
+        owner = 0
+    sc = None if scale in (None, "", "auto") else max(1, min(16, int(scale)))
+    ck = (path, sc, bool(claims), owner)
+    hit = _MAPIMG_CACHE.get(ck)
+    if hit and hit[0] == mt:
+        return hit[1], "map%d.png" % map_id, {"cached": True}
+    res = mapdt.render_png(path, world_dir=world_dir, block_class=_block_class(world_dir),
+                           scale=sc, claims=claims, only_owner=owner)
+    if not res.get("ok"):
+        return res, None, None
+    png = res["png"]
+    _MAPIMG_CACHE[ck] = (mt, png)
+    if len(_MAPIMG_CACHE) > 24:
+        _MAPIMG_CACHE.pop(next(iter(_MAPIMG_CACHE)))
+    return png, "map%d.png" % map_id, {"w": res["w"], "h": res["h"], "scale": res["scale"]}
+
+
 def _resolve_item_query(world_dir, query):
     """query = id | точное имя | подстрока имени -> (want:set[int], matched:[{id,name}])."""
     by_id, by_name = _items_full(world_dir)
