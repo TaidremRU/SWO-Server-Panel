@@ -606,6 +606,39 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_server_chat(self, h, method, q, sess):
+        """GET — публичный чат сервера; POST {password} — приватные сообщения (gated)."""
+        if method == "POST":
+            b = self._body(h)
+            ok, resp = self._reauth(h, sess, "приватный чат сервера", body=b)
+            if not ok:
+                return resp
+            try:
+                d = players.server_private_chat(self.cfg, b.get("limit") or 300, b.get("q"))
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: server_private_chat")
+                return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+            self.audit(h.client_address[0], sess["user"],
+                       "ПРОСМОТР приватного чата сервера (%d сообщ.)" % len(d.get("messages", [])))
+            return self._json(h, d)
+        try:
+            d = players.server_chat(self.cfg, (q.get("limit") or ["200"])[0],
+                                    (q.get("channel") or [None])[0], (q.get("q") or [None])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: server_chat")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_server_events(self, h, method, q, sess):
+        kinds = (q.get("kinds") or [""])[0]
+        kinds = [k for k in kinds.split(",") if k] or None
+        try:
+            d = players.server_events(self.cfg, (q.get("limit") or ["250"])[0], kinds)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: server_events")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
     def _api_twinks(self, h, method, q, sess):
         """Твинк-детект по IP — под админ-паролем панели (IP + связывание аккаунтов)."""
         b = self._body(h)
@@ -1009,7 +1042,10 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", players:"Игроки", twinks:"Твинки", roles:"Роли", logs:"Логи",
+  sc_server:"Чат сервера", sc_events:"События", sc_private:"Приваты", sc_all:"все каналы",
+  sc_search:"поиск", ev_join:"вошёл", ev_leave:"вышел", ev_register:"регистрация",
+  ev_death:"смерть", ev_land:"снос земли", ev_kind:"тип", sc_priv_note:"Все приватные сообщения сервера — под паролем панели.",
   refresh:"Обновить", live:"Живой опрос", auto:"Авто",
   vm:"VM", steam:"Steam", game:"Игра", wd:"Watchdog", internals:"Внутренности бота", monitor:"Монитор сервера",
   uptime:"Аптайм", cpu:"CPU", ram:"RAM", disk:"Диск C:", session:"Сессия",
@@ -1079,7 +1115,10 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", players:"Players", twinks:"Twinks", roles:"Roles", logs:"Logs",
+  sc_server:"Server chat", sc_events:"Events", sc_private:"DMs", sc_all:"all channels",
+  sc_search:"search", ev_join:"joined", ev_leave:"left", ev_register:"registered",
+  ev_death:"death", ev_land:"land removed", ev_kind:"type", sc_priv_note:"All server private messages — behind the panel password.",
   refresh:"Refresh", live:"Live poll", auto:"Auto",
   vm:"VM", steam:"Steam", game:"Game", wd:"Watchdog", internals:"Bot internals", monitor:"Server monitor",
   uptime:"Uptime", cpu:"CPU", ram:"RAM", disk:"Disk C:", session:"Session",
@@ -1185,7 +1224,7 @@ function pill(ok,txt,warn){ return el("span",{class:"pill "+(ok?"ok":(warn?"warn
 
 // ---- shell ----
 function render(){
-  clearInterval(dashTimer); clearInterval(logTimer); clearInterval(plTimer);
+  clearInterval(dashTimer); clearInterval(logTimer); clearInterval(plTimer); clearInterval(chTimer);
   var app=$("#app"); app.innerHTML="";
   if(!S.authed){ app.appendChild(viewLogin()); return; }
   if(S.must_change){ app.appendChild(viewChpass()); return; }
@@ -1202,14 +1241,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","players","twinks","roles","logs"];
+  var tabs=["dash","act","srv","chat","players","twinks","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,players:tabPlayers,twinks:tabTwinks,roles:tabRoles,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -1765,6 +1804,108 @@ function renderPlayerModal(d){
   ]);
   secBox.appendChild(btnRow);
   b.appendChild(secBox);
+}
+
+// ---- server chat / events ----
+var chTimer=null;
+function tabChat(v){
+  var sub=localStorage.getItem("sw_chatsub")||"server";
+  var bar=el("nav",{style:"padding:0;border:0;background:transparent;margin-bottom:10px"},
+    [["server","sc_server"],["events","sc_events"],["private","sc_private"]].map(function(x){
+      return el("button",{class:sub===x[0]?"active":"",onclick:function(){ localStorage.setItem("sw_chatsub",x[0]); render(); }},[t(x[1])]);
+    }));
+  var body=el("div",{id:"chbody"},[]);
+  v.appendChild(el("div",{},[bar,body]));
+  clearInterval(chTimer);
+  if(sub==="server") chServer(body);
+  else if(sub==="events") chEvents(body);
+  else chPrivate(body);
+}
+function chMsgLine(m){
+  return el("div",{class:"mono small"},[
+    el("span",{class:"lg-t"},[fshort(m.ts)+" "]),
+    el("span",{class:"chip"},[m.channel||"?"]), " ",
+    m.id!=null? plLink(m.id, m.nick) : el("b",{},[m.nick||"?"]),
+    ": "+m.text ]);
+}
+function chServer(body){
+  body.innerHTML="";
+  var ch=el("select",{id:"chch"}, [["","— "+t("sc_all")+" —"],["global","global"],["global2","global2"],["ru","ru"],["clan","clan"]]
+    .map(function(o){return el("option",{value:o[0]},[o[1]]);}));
+  var qq=el("input",{id:"chq",placeholder:t("sc_search"),style:"padding:5px 8px"});
+  var nn=el("select",{id:"chn"},["150","300","600","1500"].map(function(x){return el("option",{value:x},[x]);})); nn.value="300";
+  var auto=el("input",{type:"checkbox",id:"chauto",checked:"checked"});
+  var box=el("pre",{class:"log",id:"chpre"},["…"]);
+  body.appendChild(el("div",{class:"row",style:"margin-bottom:8px"},[
+    ch, qq, el("label",{class:"small"},[t("lines")+" ",nn]),
+    el("label",{class:"small"},[auto," "+t("auto")]),
+    el("button",{class:"small",onclick:pullChat},[t("refresh")])
+  ]));
+  body.appendChild(box);
+  ch.onchange=nn.onchange=pullChat; qq.oninput=function(){ clearTimeout(qq._t); qq._t=setTimeout(pullChat,400); };
+  pullChat();
+  chTimer=setInterval(function(){ if(!document.hidden && $("#chauto") && $("#chauto").checked) pullChat(); },5000);
+}
+function pullChat(){
+  var c=($("#chch")||{}).value||"", q=encodeURIComponent(($("#chq")||{}).value||""), n=($("#chn")||{}).value||"300";
+  api("/api/server-chat?limit="+n+"&channel="+c+"&q="+q).then(function(j){
+    var pre=$("#chpre"); if(!pre) return; pre.innerHTML="";
+    if(!j.ok){ pre.textContent=j.error||"error"; return; }
+    j.messages.slice().reverse().forEach(function(m){ pre.appendChild(chMsgLine(m)); });
+    pre.scrollTop=pre.scrollHeight;
+  }).catch(function(){});
+}
+function chEvents(body){
+  body.innerHTML="";
+  var kinds=["","join","leave","register","death","land"];
+  var ksel=el("select",{id:"evk"}, kinds.map(function(k){return el("option",{value:k},[k? t("ev_"+k) : ("— "+t("ev_kind")+" —")]);}));
+  var out=el("div",{id:"evout"},["…"]);
+  body.appendChild(el("div",{class:"row",style:"margin-bottom:8px"},[ksel, el("button",{class:"small",onclick:pullEvents},[t("refresh")])]));
+  body.appendChild(out);
+  ksel.onchange=pullEvents; pullEvents();
+  chTimer=setInterval(function(){ if(!document.hidden && S.tab==="chat") pullEvents(); },8000);
+}
+function pullEvents(){
+  var k=($("#evk")||{}).value||"";
+  api("/api/server-events?limit=300"+(k?"&kinds="+k:"")).then(function(j){
+    var out=$("#evout"); if(!out) return; out.innerHTML="";
+    if(!j.ok){ out.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
+    var box=el("div",{class:"mono small",style:"max-height:60vh;overflow:auto"},[]);
+    j.events.forEach(function(e){ box.appendChild(el("div",{},[
+      el("span",{class:"lg-t"},[fshort(e.ts)+" "]),
+      el("span",{class:"chip"},[t("ev_"+e.kind)||e.kind]), " ",
+      e.id!=null? plLink(e.id, e.actor) : (e.actor||"?"),
+      e.detail? ("  "+e.detail) : "" ])); });
+    out.appendChild(box);
+    if(j.role_grants && j.role_grants.length){
+      out.appendChild(el("h3",{style:"margin-top:12px"},[t("pd_roles")+" · "+j.role_grants.length]));
+      var rb=el("div",{class:"mono small"},[]);
+      j.role_grants.forEach(function(r){ rb.appendChild(el("div",{},[
+        plLink(r.target_id, r.target), " → "+r.role+"  ("+t("pd_role_by")+" ", plLink(r.by_id, r.by), ")" ])); });
+      out.appendChild(rb);
+    }
+  }).catch(function(){});
+}
+function chPrivate(body){
+  body.innerHTML="";
+  var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
+  var qq=el("input",{placeholder:t("sc_search"),style:"padding:6px 8px"});
+  var out=el("div",{id:"pvout",style:"margin-top:10px"},[]);
+  function run(){
+    out.innerHTML=""; out.appendChild(el("p",{class:"muted"},["…"]));
+    api("/api/server-chat",{body:{password:pw.value, q:qq.value, limit:800}}).then(function(j){
+      out.innerHTML="";
+      var box=el("div",{class:"mono small",style:"max-height:62vh;overflow:auto"},[]);
+      (j.messages||[]).forEach(function(m){ box.appendChild(el("div",{},[
+        el("span",{class:"lg-t"},[fshort(m.ts)+" "]),
+        m.from_id!=null? plLink(m.from_id,m.from):el("b",{},[m.from]), " → ",
+        m.to_id!=null? plLink(m.to_id,m.to):el("b",{},[m.to]), ": "+m.text ])); });
+      out.appendChild(el("p",{class:"muted small"},[String(j.total||0)])); out.appendChild(box);
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e)])); });
+  }
+  body.appendChild(el("p",{class:"muted small"},[t("sc_priv_note")]));
+  body.appendChild(el("div",{class:"row"},[pw, qq, el("button",{class:"small pri",onclick:run},[t("tw_show")])]));
+  body.appendChild(out);
 }
 
 // ---- twinks (same-IP account detector) ----

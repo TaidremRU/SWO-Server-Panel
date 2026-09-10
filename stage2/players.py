@@ -283,6 +283,132 @@ def _all_chat(world_dir):
     return rows
 
 
+def _nick2id(world_dir):
+    out = {}
+    for i, n in load_user_list(world_dir).items():
+        out.setdefault(n, i)
+    return out
+
+
+def server_chat(cfg, limit=200, channel=None, q=None):
+    """Публичный чат сервера (chat_0..3) — все каналы, фильтр по каналу и подстроке."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    n2i = _nick2id(world_dir)
+    rows = _all_chat(world_dir)
+    if channel and channel not in ("all", ""):
+        rows = [r for r in rows if r["channel"] == channel]
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if ql in r["text"].lower() or ql in r["nick"].lower()]
+    try:
+        limit = max(1, min(2000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 200
+    msgs = [{"ts": r["ts"], "channel": r["channel"], "nick": r["nick"],
+             "id": n2i.get(r["nick"]), "text": r["text"]} for r in rows[-limit:][::-1]]
+    return {"ok": True, "total": len(rows), "channels": list(_CHAT_CHANNELS.values()),
+            "messages": msgs}
+
+
+def server_private_chat(cfg, limit=300, q=None):
+    """Все приватные сообщения сервера (chat_privat.txt). Чувствительно — под админ-паролем."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    n2i = _nick2id(world_dir)
+    rows = []
+    for ln in _read_text(os.path.join(world_dir, "Logs", "chat_privat.txt")).splitlines():
+        m = _PRIV_RX.match(ln)
+        if not m:
+            continue
+        frm, to, txt = m.group(2), m.group(3), m.group(4)
+        if q and q.lower() not in (frm + to + txt).lower():
+            continue
+        rows.append({"ts": m.group(1), "from": frm, "to": to, "text": txt,
+                     "from_id": n2i.get(frm), "to_id": n2i.get(to)})
+    try:
+        limit = max(1, min(3000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 300
+    return {"ok": True, "total": len(rows), "messages": rows[-limit:][::-1]}
+
+
+def server_events(cfg, limit=250, kinds=None):
+    """Сводная лента событий сервера: входы/выходы/регистрации/смерти/снос земель.
+
+    Смены ролей (`user_role.txt`) без таймстампа — отдаются отдельным списком.
+    """
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    n2i = _nick2id(world_dir)
+    want = set(kinds) if kinds else None
+    ev = []
+
+    def add(ts, kind, aid, actor, detail=""):
+        if want and kind not in want:
+            return
+        ev.append({"ts": ts, "epoch": _to_epoch(ts), "kind": kind,
+                   "id": aid, "actor": actor, "detail": detail})
+
+    for ln in _read_text(os.path.join(world_dir, "analytics.txt")).splitlines():
+        m = _LINE_RX.match(ln)
+        if not m:
+            continue
+        ts, k, uid, extra = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        nm = names.get(uid, "id %d" % uid)
+        if k == "enter":
+            add(ts, "join", uid, nm)
+        elif k == "exit":
+            add(ts, "leave", uid, nm, _fmt_secs(extra))
+        elif k == "register":
+            add(ts, "register", uid, nm)
+
+    for ln in _read_text(os.path.join(world_dir, "Logs", "dead_user.txt")).splitlines():
+        m = _DEAD_RX.match(ln)
+        if m:
+            add(m.group(1), "death", n2i.get(m.group(2)), m.group(2), m.group(3))
+
+    logs = os.path.join(world_dir, "Logs")
+    try:
+        for f in os.listdir(logs):
+            if f.startswith("delete_land") and f.endswith(".txt"):
+                for ln in _read_text(os.path.join(logs, f)).splitlines():
+                    m = _LAND_RX.match(ln)
+                    if m:
+                        uid = int(m.group(2))
+                        add(m.group(1), "land", uid, names.get(uid, "id %d" % uid),
+                            "map %s @ %s,%s" % (m.group(3), m.group(4), m.group(5)))
+    except OSError:
+        pass
+
+    ev.sort(key=lambda e: e["epoch"])
+    roles = []
+    for ln in _read_text(os.path.join(world_dir, "Logs", "user_role.txt")).splitlines():
+        m = _ROLE_RX.search(ln)
+        if m:
+            roles.append({"target_id": int(m.group(1)), "target": m.group(2),
+                          "by_id": int(m.group(3)), "by": m.group(4), "role": m.group(5)})
+    try:
+        limit = max(1, min(3000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 250
+    return {"ok": True, "total": len(ev), "events": ev[-limit:][::-1], "role_grants": roles}
+
+
+def _fmt_secs(s):
+    try:
+        s = int(s)
+    except (TypeError, ValueError):
+        return ""
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return ("%dч %dм" % (h, m)) if h else ("%dм %dс" % (m, s)) if m else ("%dс" % s)
+
+
 def player_chat(cfg, uid, limit=60):
     """Публичные сообщения игрока (chat_0..3) — новые сверху."""
     world_dir = find_world_dir(cfg)
