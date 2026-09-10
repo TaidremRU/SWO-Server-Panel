@@ -1199,14 +1199,38 @@ function loadSrv(){
 }
 
 // ---- players ----
-var plTimer=null, plData=null;
+var plTimer=null, plData=null, plSort=null;
+try{ plSort=JSON.parse(localStorage.getItem("sw_plsort")||"null"); }catch(e){}
+function tsEpoch(ts){ if(!ts) return -1;
+  var m=ts.match(/^(\d\d?)\.(\d\d?)\.(\d{4}) (\d\d?):(\d\d):(\d\d)/);
+  return m? new Date(+m[3],+m[2]-1,+m[1],+m[4],+m[5],+m[6]).getTime() : -1; }
+var PL_ACC={
+  id:function(u){return u.id;}, name:function(u){return (u.name||"").toLowerCase();},
+  status:function(u){return (u.online?1e13:0)+tsEpoch(u.last_enter);},
+  map:function(u){return u.map==null?-1:u.map;},
+  pos:function(u){return u.x==null?-1:(u.x*100000+(u.y||0));},
+  enter:function(u){return tsEpoch(u.last_enter);}, exit:function(u){return tsEpoch(u.last_exit);},
+  sess:function(u){return u.session_secs==null?-1:u.session_secs;},
+  hours:function(u){return u.playtime_h==null?-1:u.playtime_h;},
+  lvl:function(u){return u.level==null?-1:u.level;}, role:function(u){return u.role||0;},
+  ban:function(u){return u.banned?1:0;}
+};
+function plSetSort(k){
+  if(plSort && plSort.k===k) plSort.d=-plSort.d; else plSort={k:k,d:(k==="name"||k==="map"?1:-1)};
+  try{ localStorage.setItem("sw_plsort",JSON.stringify(plSort)); }catch(e){}
+  renderPlayers();
+}
 function tabPlayers(v){
   var wrap=el("div",{},[
     el("div",{class:"row",style:"margin-bottom:10px"},[
       el("button",{class:"small",onclick:loadPlayers},[t("refresh")]),
       el("label",{class:"small"},[el("input",{type:"checkbox",id:"plauto",checked:"checked"})," "+t("auto")]),
       el("input",{id:"plq",placeholder:t("pl_search"),style:"padding:5px 8px",oninput:renderPlayers}),
-      el("label",{class:"small"},[el("input",{type:"checkbox",id:"plon",oninput:renderPlayers})," "+t("pl_only_online")])
+      el("label",{class:"small"},[el("input",{type:"checkbox",id:"plon",oninput:renderPlayers})," "+t("pl_only_online")]),
+      el("select",{id:"plrole",oninput:renderPlayers,style:"padding:5px 8px"},
+        [["","— "+t("pl_col_role")+" —"],["0",t("pl_role_player")],["1",t("pl_role_mod")],
+         ["2",t("pl_role_admin")],["3",t("pl_role_gm")],["staff",t("pl_role_staff")]]
+        .map(function(o){ return el("option",{value:o[0]},[o[1]]); }))
     ]),
     el("div",{id:"plsum",class:"grid",style:"margin-bottom:12px"},[]),
     el("div",{id:"plbody"},[el("p",{class:"muted"},["…"])]),
@@ -1246,18 +1270,31 @@ function renderPlayers(){
 
   var q=(($("#plq")||{}).value||"").toLowerCase().trim();
   var onlyOn=($("#plon")||{}).checked;
+  var rsel=(($("#plrole")||{}).value||"");
   var rows=(j.users||[]).filter(function(u){
     if(onlyOn && !u.online) return false;
+    if(rsel==="staff"){ if(!(u.role>0)) return false; }
+    else if(rsel!=="" && String(u.role||0)!==rsel) return false;
     if(q && (u.name||"").toLowerCase().indexOf(q)<0 && String(u.id).indexOf(q)<0) return false;
     return true;
-  }).sort(function(a,b){ if(a.online!==b.online) return a.online?-1:1;
-    return (b.last_enter||"").localeCompare(a.last_enter||""); });
+  });
+  if(plSort && PL_ACC[plSort.k]){
+    var acc=PL_ACC[plSort.k], dir=plSort.d;
+    rows.sort(function(a,b){ var x=acc(a),y=acc(b);
+      if(x<y) return -dir; if(x>y) return dir; return a.id-b.id; });
+  } else {
+    rows.sort(function(a,b){ if(a.online!==b.online) return a.online?-1:1;
+      return tsEpoch(b.last_enter)-tsEpoch(a.last_enter); });
+  }
 
   body.innerHTML="";
-  var head=["ID",t("col_name"),t("pl_col_status"),t("pl_col_map"),t("pl_col_pos"),
-            t("pl_col_enter"),t("pl_col_exit"),t("pl_col_sess"),
-            t("pl_col_hours"),t("pl_col_lvl"),t("pl_col_role"),t("pl_col_ban")];
-  var tb=el("table",{},[el("tr",{},head.map(function(x){return el("th",{},[x]);}))]);
+  var cols=[["id","ID"],["name",t("col_name")],["status",t("pl_col_status")],["map",t("pl_col_map")],
+            ["pos",t("pl_col_pos")],["enter",t("pl_col_enter")],["exit",t("pl_col_exit")],["sess",t("pl_col_sess")],
+            ["hours",t("pl_col_hours")],["lvl",t("pl_col_lvl")],["role",t("pl_col_role")],["ban",t("pl_col_ban")]];
+  var tb=el("table",{},[el("tr",{}, cols.map(function(c){
+    var arr=(plSort && plSort.k===c[0])? (plSort.d>0?" ▲":" ▼") : "";
+    return el("th",{style:"cursor:pointer;user-select:none;white-space:nowrap",onclick:function(){ plSetSort(c[0]); }},[c[1]+arr]);
+  }))]);
   rows.forEach(function(u){
     var st = u.online? pill(true,t("running")) : el("span",{class:"muted"},[fshort(u.last_exit)]);
     var roleName = ({0:"pl_role_player",1:"pl_role_mod",2:"pl_role_admin",3:"pl_role_gm"}[u.role]!=null)
