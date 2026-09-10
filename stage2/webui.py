@@ -738,6 +738,15 @@ class WebUI:
         out["cached_age"] = int(now - ts)
         return self._json(h, out, 200 if out.get("ok") else 500)
 
+    def _api_space_units(self, h, method, q, sess):
+        """Позиции кораблей в космосе (снимок из space\\units.dt)."""
+        try:
+            d = players.space_units(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: space_units")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_health(self, h, method, q, sess):
         now = time.time()
         if not self._health_cache or now - self._health_cache[0] > 60:
@@ -1356,6 +1365,8 @@ var T = {
   st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
+  su_title:"Корабли в космосе", su_debris:"обломков", su_vel:"скорость (vx,vy)", su_hp:"HP",
+  su_cargo:"груз", su_moving:"в движении",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
   st_branch:"открывает", st_technote:"названия — что тех открывает в крафте (из craft.json + локализации клиента); ветка/тир — из дерева tech.json",
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
@@ -1466,6 +1477,8 @@ var T = {
   st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
+  su_title:"Ships in space", su_debris:"debris", su_vel:"velocity (vx,vy)", su_hp:"HP",
+  su_cargo:"cargo", su_moving:"moving",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
   st_branch:"unlocks", st_technote:"names = what the tech unlocks in crafting (from craft.json + client localization); branch/tier from the tech.json tree",
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
@@ -2328,16 +2341,19 @@ function mapImageBlock(mapId){
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
   var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
-  var rotCb=el("input",{type:"checkbox"});
+  var rotSel=el("select",{style:"padding:4px 6px"}, [0,45,90,135,180,225,270,315].map(function(d){
+    return el("option",{value:String(d)},[d+"°"]); }));
   var zoom=el("input",{type:"range",min:"100",max:"800",step:"20",value:"100",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var OW=null;   // сетка владения {w,h,um_w,um_h,grid,names}
+  function rotDeg(){ return parseInt(rotSel.value,10)||0; }
   function applyView(){
+    var d=rotDeg();
     img.style.width=zoom.value+"%";
-    img.style.transform=rotCb.checked? "rotate(45deg)" : "";
-    img.style.margin=rotCb.checked? "22% 0" : "0";
+    img.style.transform=d? "rotate("+d+"deg)" : "";
+    img.style.margin=(d%180)? "22% 0" : "0";
   }
-  zoom.oninput=applyView; rotCb.onchange=applyView;
+  zoom.oninput=applyView; rotSel.onchange=applyView;
   function reload(){
     stat.textContent=t("mi_wait");
     var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+"&_="+Date.now();
@@ -2353,7 +2369,8 @@ function mapImageBlock(mapId){
     var r=img.getBoundingClientRect();
     var cx=(r.left+r.right)/2, cy=(r.top+r.bottom)/2;
     var dx=e.clientX-cx, dy=e.clientY-cy;
-    if(rotCb.checked){ var a=-Math.PI/4, cs=Math.cos(a), sn=Math.sin(a);
+    var rd=rotDeg();
+    if(rd){ var a=-rd*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
       var nx=dx*cs-dy*sn, ny=dx*sn+dy*cs; dx=nx; dy=ny; }
     var halfW=img.offsetWidth/2, halfH=img.offsetHeight/2;   // размер БЕЗ transform
     var fx=(dx/halfW+1)/2, fy=(dy/halfH+1)/2;                // 0..1 по картинке
@@ -2379,7 +2396,7 @@ function mapImageBlock(mapId){
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
       el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
-      el("label",{class:"small"},[rotCb," ↻45°"]),
+      el("span",{class:"muted small"},["↻"]), rotSel,
       el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
     wrap, leg ]);
@@ -2650,6 +2667,25 @@ function drawMap(w, sj){
     }
     b.appendChild(sg);
   }
+
+  var subox=el("div",{style:"margin-top:14px"},[]);
+  b.appendChild(subox);
+  api("/api/space-units").then(function(su){
+    subox.innerHTML="";
+    if(!su.ok){ subox.appendChild(el("div",{class:"muted small"},[su.error||"space/units.dt —"])); return; }
+    subox.appendChild(el("div",{class:"card wide"},[
+      el("h3",{},["🚀 "+t("su_title")+" · "+su.ships.length+(su.debris_count? " (+"+su.debris_count+" "+t("su_debris")+")":"")]),
+      su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
+        return [ el("span",{class:"mono"},[String(s.id)]),
+          s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),
+          el("span",{class:"mono"},[Math.round(s.x)+", "+Math.round(s.y)]),
+          el("span",{class:"mono small"},[s.moving? (s.vx+", "+s.vy) : "—"]),
+          String(s.health), String(s.cargo_items),
+          s.moving? el("span",{class:"pill"},[t("su_moving")]) : el("span",{class:"muted small"},["·"]) ]; }))
+        : el("div",{class:"muted small"},["—"]),
+      el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+su.note])
+    ]));
+  }).catch(function(){ subox.innerHTML=""; });
 }
 
 // ---- server chat / events ----

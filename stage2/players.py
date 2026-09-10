@@ -2557,6 +2557,84 @@ def game_state_space_units(world_dir):
     return int(m.group(1)) if m else None
 
 
+_SPACEUNITS_CACHE = {}   # path -> (mtime, result)
+
+
+def space_units(cfg):
+    """Позиции кораблей игроков в космосе из ``Data\\space\\units.dt``
+    (снимок на момент последнего сохранения сервера; порт ``SpaceUnit.Read``).
+
+    -> ``{ok, star_count, ships[{id,user_id,name,x,y,vx,vy,speed,rotate,health,
+    aboard,cargo_items,moving,star_id}], debris_count, total, note}``.
+    ``ships`` = не-мусор (``dead_time == 0``); ``debris`` = дрейфующие ящики/
+    обломки (``dead_time > 0`` — despawn по serverTime)."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    path = os.path.join(world_dir, "Data", "space", "units.dt")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла space\\units.dt", "ships": [],
+                "debris_count": 0, "total": 0}
+    hit = _SPACEUNITS_CACHE.get(path)
+    if hit and hit[0] == mt:
+        return hit[1]
+
+    d = mapdt.parse_space_units(path, world_dir=world_dir)
+    if not d.get("ok"):
+        return d
+    names = load_user_list(world_dir)
+    # владелец космо-юнита: у кого user.spaceUnitId == unit.id
+    su_owner = {}
+    ud = os.path.join(world_dir, "Data", "users")
+    try:
+        for nm in os.listdir(ud):
+            if not _USER_FILE_RX.match(nm):
+                continue
+            raw = _read_json(os.path.join(ud, nm)) or {}
+            sid = raw.get("spaceUnitId") or 0
+            if sid:
+                try:
+                    su_owner[int(sid)] = int(raw.get("id"))
+                except (TypeError, ValueError):
+                    pass
+    except OSError:
+        pass
+
+    ships, debris = [], 0
+    stars = set()
+    for u in d["units"]:
+        stars.add(u.get("star_id"))
+        if u.get("dead_time"):
+            debris += 1
+            continue
+        uid = u["user_id"] or su_owner.get(u["id"]) or 0
+        ships.append({
+            "id": u["id"], "user_id": uid,
+            "name": names.get(uid) or ("id %s" % uid if uid else "—"),
+            "x": round(u["x"], 1), "y": round(u["y"], 1),
+            "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
+            "speed": u["speed"], "rotate": u["rotate"],
+            "health": u["box_health"], "box_type": u["box_type"],
+            "aboard": len(u["aboard"]), "cargo_items": u.get("inv_items", 0),
+            "moving": (abs(u["vx"]) + abs(u["vy"])) > 0.01,
+            "star_id": u.get("star_id"),
+        })
+    ships.sort(key=lambda s: (s["name"] == "—", s["name"].lower()))
+    res = {
+        "ok": True, "total": d["count"], "star_count": len(stars),
+        "ships": ships, "debris_count": debris,
+        "note": ("снимок из space\\units.dt на момент последнего автосохранения "
+                 "сервера (раз в ~12 ч); координаты космоса ±100k, планеты в файле "
+                 "не хранятся — только по живому протоколу"),
+    }
+    _SPACEUNITS_CACHE[path] = (mt, res)
+    return res
+
+
 def space_report(cfg):
     """Аналитика по космосу (карта 0). Из user<N>.json (mapId, spaceUnitId,
     userTerritories) + analytics (реальный онлайн) + game_state (space unit count).

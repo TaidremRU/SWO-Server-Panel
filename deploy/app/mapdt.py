@@ -640,3 +640,69 @@ def find_item(path, want, world_dir=None, item_names=None, cap=20000, user_names
         "hits": hits,
         "capped": d.get("hits_capped", False),
     }
+
+
+# ------------------------------------------------------ Data\space\units.dt (корабли)
+_NOCTX = {"want": None, "hits": [], "x": 0, "y": 0, "where": "", "cap": 0}
+
+
+def _read_space_unit(r, version, item_ext):
+    """Порт ``ZData.SpaceUnit.Read`` (см. исходник игры)."""
+    u = {"id": r.u32(), "user_id": r.u32()}
+    box = _read_block(r, 6 if version == 4 else version, item_ext, dict(_NOCTX))
+    u["box_type"] = box.get("type")
+    u["box_level"] = box.get("level")
+    u["box_health"] = round(box.get("health") or 0.0, 1)
+    u["box_has_transport"] = bool(box.get("transport"))
+    u["x"], u["y"] = r.f64(), r.f64()
+    u["rotate"] = r.i32()
+    u["speed"] = round(r.f64(), 3)
+    u["vx"], u["vy"] = r.f64(), r.f64()
+    aboard = r.i32()
+    u["aboard"] = [r.u64() for _ in range(aboard)]
+    u["star_id"] = 1
+    if version > 0:
+        u["last_x"], u["last_y"] = r.f64(), r.f64()
+        u["inv_items"] = 0
+        if r.boolean():
+            inv = _read_inventory(r, MAP_VERSION, item_ext, dict(_NOCTX))
+            u["inv_items"] = len(inv.get("items") or [])
+        u["dead_time"] = r.f64()
+    if version > 1:
+        u["star_id"] = r.u32()
+    return u
+
+
+def parse_space_units(path, world_dir=None):
+    """Разбор ``Data\\space\\units.dt`` — корабли игроков в космосе.
+
+    Формат: ``int32 version`` (=7) + ``int32 count`` + count × ``SpaceUnit``.
+    -> ``{ok, version, count, units[{id,user_id,x,y,rotate,speed,vx,vy,last_x,
+    last_y,star_id,dead_time,box_type,box_health,aboard(list u64),inv_items}],
+    trailing_bytes}``. Не бросает.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return {"ok": False, "error": "не открыть файл: %s" % e}
+    item_ext = _load_item_ext(world_dir)
+    r = _R(data)
+    try:
+        version = r.i32()
+        if not (0 <= version <= 16):
+            return {"ok": False, "error": "неправдоподобная версия %d" % version}
+        count = r.i32()
+        if not (0 <= count <= 500000):
+            return {"ok": False, "error": "неправдоподобный count %d" % count}
+        units = []
+        for _ in range(count):
+            units.append(_read_space_unit(r, version, item_ext))
+        return {"ok": True, "version": version, "count": count, "units": units,
+                "trailing_bytes": r.rest(), "file_size": len(data)}
+    except (EOFError, struct.error) as e:
+        return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p,
+                "file_size": len(data), "got_units": len(units)}
+    except Exception as e:  # noqa: BLE001
+        logging.exception("mapdt.parse_space_units %s", path)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "at_byte": r.p}
