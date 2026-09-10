@@ -612,6 +612,54 @@ def stats_bundle(cfg):
     }
 
 
+def world_map(cfg):
+    """Карты и территории: онлайн по картам (game_state), число аватаров по
+    `user.mapId`, все `userTerritories` с владельцами. Существа/животные хранятся
+    в бинарных ``map*.dt`` — в JSON их нет."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    gs = {x["map"]: x["count"] for x in parse_game_state(world_dir)}
+    d = os.path.join(world_dir, "Data", "users")
+    terr, avatars_by_map = [], collections.Counter()
+    try:
+        udir = os.listdir(d)
+    except OSError:
+        udir = []
+    for nm in udir:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        try:
+            uid = int(raw.get("id") if raw.get("id") is not None else m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if raw.get("mapId") is not None:
+            avatars_by_map[raw["mapId"]] += 1
+        for tt in (raw.get("userTerritories") or []):
+            p = tt.get("pos") or {}
+            terr.append({"map": tt.get("mapId"), "x": p.get("x"), "y": p.get("y"),
+                         "owner_id": uid, "owner": names.get(uid) or ("id %d" % uid)})
+    terr_by_map = collections.Counter(t["map"] for t in terr)
+    maps = sorted(set(list(gs) + list(avatars_by_map) + list(terr_by_map)), key=lambda x: (x is None, x))
+    rows = [{"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
+             "territories": terr_by_map.get(mp, 0)} for mp in maps]
+    rows.sort(key=lambda r: -(r["online"] * 100 + r["territories"]))
+    terr.sort(key=lambda t: ((t["map"] if t["map"] is not None else 0), (t["owner"] or "").lower()))
+    try:
+        uf = os.listdir(os.path.join(world_dir, "Data", "units"))
+    except OSError:
+        uf = []
+    bots = sum(1 for f in uf if f.startswith("bots") and f.endswith(".json"))
+    avatars = sum(1 for f in uf if re.match(r"unit\d+\.json$", f))
+    return {"ok": True, "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "maps": rows, "territories": terr[:3000],
+            "totals": {"avatars": avatars, "bots": bots, "territories": len(terr),
+                       "maps": len(rows)}}
+
+
 def twink_report(cfg, min_accounts=2):
     """Твинк-детект: какие аккаунты подключались с одного IP (из Logs\\log_net_ip.txt).
 

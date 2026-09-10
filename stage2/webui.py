@@ -262,6 +262,7 @@ class WebUI:
         self._srv_cache = None  # (ts, payload)
         self._players_cache = None  # (ts, payload)
         self._stats_cache = None  # (ts, payload)
+        self._world_cache = None  # (ts, payload)
         self._shot_lock = threading.Lock()
         self._shot_ts = 0.0
         self._shot_meta = ("", (0, 0))
@@ -642,6 +643,20 @@ class WebUI:
                 payload = {"ok": False, "error": str(e)}
             self._stats_cache = (now, payload)
         ts, payload = self._stats_cache
+        out = dict(payload)
+        out["cached_age"] = int(now - ts)
+        return self._json(h, out, 200 if out.get("ok") else 500)
+
+    def _api_world(self, h, method, q, sess):
+        now = time.time()
+        if not self._world_cache or now - self._world_cache[0] > 60:
+            try:
+                payload = players.world_map(self.cfg)
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: world_map")
+                payload = {"ok": False, "error": str(e)}
+            self._world_cache = (now, payload)
+        ts, payload = self._world_cache
         out = dict(payload)
         out["cached_age"] = int(now - ts)
         return self._json(h, out, 200 if out.get("ok") else 500)
@@ -1154,6 +1169,7 @@ var T = {
   st_reg:"рег.", st_dau:"актив/день", st_ret:"retention", st_toplvl:"Топ по уровню",
   st_toptime:"Топ по часам", st_clans:"Кланы", st_month:"Топ месяца", st_bans:"Бан-лист",
   st_staff:"Стафф", st_lvldist:"Уровни", st_countries:"Страны", st_hist:"история ролей",
+  st_world:"Мир · карты", st_terr:"Территории", st_owner:"владелец", st_avatars:"аватары", st_terrfilter:"карта",
   pd_profile:"Профиль", pd_research:"Исследования", pd_missions:"Миссии", pd_position:"Позиция",
   pd_avatar:"Аватар", pd_sessions:"Сессии", pd_clan:"Клан", pd_close:"Закрыть",
   pd_level:"Уровень", pd_country:"Страна", pd_video:"Видеокарта", pd_screen:"Экран",
@@ -1234,6 +1250,7 @@ var T = {
   st_reg:"reg.", st_dau:"active/day", st_ret:"retention", st_toplvl:"Top by level",
   st_toptime:"Top by hours", st_clans:"Clans", st_month:"Month top", st_bans:"Ban list",
   st_staff:"Staff", st_lvldist:"Levels", st_countries:"Countries", st_hist:"role history",
+  st_world:"World · maps", st_terr:"Territories", st_owner:"owner", st_avatars:"avatars", st_terrfilter:"map",
   pd_profile:"Profile", pd_research:"Research", pd_missions:"Missions", pd_position:"Position",
   pd_avatar:"Avatar", pd_sessions:"Sessions", pd_clan:"Clan", pd_close:"Close",
   pd_level:"Level", pd_country:"Country", pd_video:"GPU", pd_screen:"Screen",
@@ -1995,6 +2012,32 @@ function drawStats(j){
   b.appendChild(g);
   b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[
     "рег "+j.totals.registered+" • профилей "+j.totals.with_profile+" • кланов "+j.totals.clans+" • "+(j.cached_age||0)+"s • "+j.generated]));
+
+  var wbox=el("div",{style:"margin-top:14px"},[el("p",{class:"muted"},["…"])]);
+  b.appendChild(wbox);
+  api("/api/world").then(function(w){
+    wbox.innerHTML="";
+    if(!w.ok){ wbox.appendChild(el("div",{class:"msg err"},[w.error||"error"])); return; }
+    var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
+    wg.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
+      el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
+      ltable([t("pl_map"),t("pl_online"),t("st_avatars"),t("st_terr")], (w.maps||[]).slice(0,40),
+        function(r){ return [String(r.map), String(r.online), String(r.avatars), String(r.territories)]; })]));
+    var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
+    var tt=el("div",{id:"terrtab"},[]);
+    function drawTerr(){
+      var f=mf.value.trim();
+      var rows=(w.territories||[]).filter(function(x){ return !f || String(x.map)===f; });
+      tt.innerHTML="";
+      tt.appendChild(ltable([t("pl_map"),t("pd_coords"),t("st_owner")], rows.slice(0,300), function(x){
+        return [String(x.map), x.x+","+x.y, plLink(x.owner_id, x.owner)]; }));
+      tt.appendChild(el("p",{class:"muted small"},[rows.length+" / "+(w.territories||[]).length]));
+    }
+    mf.oninput=drawTerr;
+    var tc=el("div",{class:"card"},[el("h3",{},[t("st_terr")]), el("div",{class:"row",style:"margin-bottom:6px"},[mf]), tt]);
+    wg.appendChild(tc);
+    wbox.appendChild(wg); drawTerr();
+  }).catch(function(){ wbox.innerHTML=""; });
 }
 
 // ---- server chat / events ----
