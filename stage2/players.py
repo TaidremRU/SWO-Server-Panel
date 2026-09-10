@@ -924,10 +924,12 @@ def mapdt_index(cfg):
 
 _BLOCKCLASS_CACHE = {}   # world_dir -> (mtime, {block_type: cat})
 _MAPIMG_CACHE = {}       # (path, scale, claims, owner) -> (mtime, png bytes)
+_MAPOWN_CACHE = {}       # path -> (mtime, {w,h,um_w,um_h,grid,names})
+_AQUA_BLOCKS = {3, 16}   # кувшинка, водоросли — не считать растениями
 
 
 def _block_class(world_dir):
-    """{block_type(int): 'mtn'|'ore'|'wall'|'floor'|'built'|'plant'} из blocks.json."""
+    """{block_type(int): 'mtn'|'ore'|'wall'|'floor'|'built'|'plant'|'aqua'} из blocks.json."""
     p = os.path.join(world_dir, "Data", "blocks.json")
     try:
         mt = os.path.getmtime(p)
@@ -941,7 +943,9 @@ def _block_class(world_dir):
         bid = b.get("id")
         if bid is None:
             continue
-        if b.get("isMountain") and b.get("isOre"):
+        if bid in _AQUA_BLOCKS:
+            cat = "aqua"
+        elif b.get("isMountain") and b.get("isOre"):
             cat = "ore"
         elif b.get("isMountain"):
             cat = "mtn"
@@ -996,7 +1000,52 @@ def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None):
     _MAPIMG_CACHE[ck] = (mt, png)
     if len(_MAPIMG_CACHE) > 24:
         _MAPIMG_CACHE.pop(next(iter(_MAPIMG_CACHE)))
+    if res.get("owner_grid") is not None:
+        _store_owner_grid(path, mt, world_dir, res)
     return png, "map%d.png" % map_id, {"w": res["w"], "h": res["h"], "scale": res["scale"]}
+
+
+def _store_owner_grid(path, mt, world_dir, res):
+    grid = list(res["owner_grid"] or [])
+    names = load_user_list(world_dir)
+    _MAPOWN_CACHE[path] = (mt, {
+        "w": res["w"], "h": res["h"], "um_w": res["um_w"], "um_h": res["um_h"],
+        "grid": grid,
+        "names": {str(o): (names.get(o) or ("id %d" % o)) for o in set(grid) if o},
+    })
+    if len(_MAPOWN_CACHE) > 12:
+        _MAPOWN_CACHE.pop(next(iter(_MAPOWN_CACHE)))
+
+
+def mapdt_owners(cfg, map_id):
+    """Сетка владения землёй (userMap 8×8) для наведения на картинке.
+    -> ``{ok, w, h, um_w, um_h, grid:[owner_id…] (x-мажор), names:{id:name}}``."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        map_id = int(map_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    path = os.path.join(world_dir, "Data", "maps", "map%d.dt" % map_id)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла map%d.dt" % map_id}
+    hit = _MAPOWN_CACHE.get(path)
+    if not (hit and hit[0] == mt):
+        d = mapdt.parse(path, world_dir=world_dir, owners=True)
+        if not d.get("ok"):
+            return d
+        _store_owner_grid(path, mt, world_dir,
+                          {"owner_grid": d.get("owner_grid"), "w": d["w"], "h": d["h"],
+                           "um_w": d["um_w"], "um_h": d["um_h"]})
+        hit = _MAPOWN_CACHE.get(path)
+    out = dict(hit[1])
+    out["ok"] = True
+    return out
 
 
 def _resolve_item_query(world_dir, query):

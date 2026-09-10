@@ -106,10 +106,12 @@ _CLAIM_PAL = [
 
 def _classify(c, bc):
     """категория тайла для карты-картинки. bc = {block_type: 'mtn'|'ore'|'wall'|
-    'floor'|'built'|'plant'|''}."""
+    'floor'|'built'|'plant'|'aqua'|''}. 'aqua' (водоросли/кувшинки) — не растение."""
     b = c.get("block")
     if b:
         k = bc.get(b["type"], "")
+        if k == "aqua":
+            return "water" if not c.get("ground") else "land"
         if k in ("mtn", "ore", "wall", "floor", "built", "plant"):
             return k
         return "built"                     # неизвестный блок — скорее постройка
@@ -122,6 +124,8 @@ def _classify(c, bc):
             return k
         if k == "plant":
             return "plant"
+        if k == "aqua":
+            return "water" if not c.get("ground") else "land"
         return "grass"
     if c.get("box"):
         return "built"
@@ -372,7 +376,7 @@ def _load_item_ext(world_dir):
 
 # --------------------------------------------------------------------- публичное
 def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
-          paint=False, block_class=None, claims=True, only_owner=None):
+          paint=False, block_class=None, claims=True, only_owner=None, owners=False):
     """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
 
     ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
@@ -464,7 +468,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
 
         owner = Counter()
         um_w, um_h = w // 8, h // 8
-        um_flat = [] if (want or paint) else None
+        um_flat = [] if (want or paint or owners) else None
         # userMap[x, y] = ReadUInt32(), x внешний цикл (0..w/8), y внутренний (0..h/8)
         for _ in range(um_w * um_h):
             uid = r.u32()
@@ -544,6 +548,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
             "hits": ctx["hits"] if want else None,
             "hits_capped": bool(want) and len(ctx["hits"]) >= cap,
             "pixels": px,
+            "owner_grid": um_flat if (owners or paint) else None,
+            "um_w": um_w, "um_h": um_h,
         }
     except (EOFError, struct.error) as e:
         return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p,
@@ -573,6 +579,7 @@ def render_png(path, world_dir=None, block_class=None, scale=None,
                    if k != "unknown"],
         "owners": d.get("land_owners") or [],
         "land_total_blocks8": d.get("land_total_blocks8"),
+        "owner_grid": d.get("owner_grid"), "um_w": d.get("um_w"), "um_h": d.get("um_h"),
     }
 
 

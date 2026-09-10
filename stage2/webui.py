@@ -809,6 +809,15 @@ class WebUI:
             "Content-Disposition": 'inline; filename="%s"' % (fn or "map.png"),
         })
 
+    def _api_mapdt_owners(self, h, method, q, sess):
+        """Сетка владения землёй карты для hover-подсказки: ?map=N."""
+        try:
+            d = players.mapdt_owners(self.cfg, (q.get("map") or ["1"])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt_owners")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_player_item_find(self, h, method, q, sess):
         """Кто из игроков держит предмет: ?item=<id|имя|подстрока>."""
         item = (q.get("item") or [""])[0]
@@ -2314,19 +2323,51 @@ function openMapdt(mapId){
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 function mapImageBlock(mapId){
-  var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;max-width:100%;border:1px solid var(--line);border-radius:8px;background:var(--panel2)"});
-  var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:110px"});
+  var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;display:block;border:1px solid var(--line);border-radius:6px;background:var(--panel2);width:100%;transition:transform .1s"});
+  var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
+  var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
+  var rotCb=el("input",{type:"checkbox"});
+  var zoom=el("input",{type:"range",min:"100",max:"800",step:"20",value:"100",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
+  var OW=null;   // сетка владения {w,h,um_w,um_h,grid,names}
+  function applyView(){
+    img.style.width=zoom.value+"%";
+    img.style.transform=rotCb.checked? "rotate(45deg)" : "";
+    img.style.margin=rotCb.checked? "22% 0" : "0";
+  }
+  zoom.oninput=applyView; rotCb.onchange=applyView;
   function reload(){
     stat.textContent=t("mi_wait");
     var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+"&_="+Date.now();
-    img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
+    img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; applyView(); };
     img.onerror=function(){ stat.textContent=t("err_net"); };
     img.src=u;
   }
   claimsCb.onchange=reload;
   ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
+  api("/api/mapdt-owners?map="+mapId).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
+  img.addEventListener("mousemove",function(e){
+    if(!OW || !img.naturalWidth){ tip.style.opacity=0; return; }
+    var r=img.getBoundingClientRect();
+    var cx=(r.left+r.right)/2, cy=(r.top+r.bottom)/2;
+    var dx=e.clientX-cx, dy=e.clientY-cy;
+    if(rotCb.checked){ var a=-Math.PI/4, cs=Math.cos(a), sn=Math.sin(a);
+      var nx=dx*cs-dy*sn, ny=dx*sn+dy*cs; dx=nx; dy=ny; }
+    var halfW=img.offsetWidth/2, halfH=img.offsetHeight/2;   // размер БЕЗ transform
+    var fx=(dx/halfW+1)/2, fy=(dy/halfH+1)/2;                // 0..1 по картинке
+    if(fx<0||fx>1||fy<0||fy>1){ tip.style.opacity=0; return; }
+    var gx=Math.floor(fx*OW.w), gy=Math.floor(fy*OW.h);
+    var bx=Math.floor(gx/8), by=Math.floor(gy/8);
+    var oi=bx*OW.um_h+by, o=(oi>=0&&oi<OW.grid.length)? OW.grid[oi] : 0;
+    if(!o){ tip.style.opacity=0; return; }
+    tip.textContent=(OW.names[o]||("id "+o))+"  ("+gx+","+gy+")";
+    tip.style.left=(e.clientX-wrap.getBoundingClientRect().left+12)+"px";
+    tip.style.top=(e.clientY-wrap.getBoundingClientRect().top+12)+"px";
+    tip.style.transform="none"; tip.style.opacity=1;
+  });
+  img.addEventListener("mouseleave",function(){ tip.style.opacity=0; });
   var leg=el("div",{class:"chart-legend",style:"margin-top:6px"},[
     lgSwatch("38,88,150",t("mi_water")), lgSwatch("176,160,126",t("mi_land")),
     lgSwatch("86,148,66",t("mi_grass")), lgSwatch("128,128,134",t("mi_mtn")),
@@ -2335,11 +2376,13 @@ function mapImageBlock(mapId){
     el("span",{class:"muted"},[t("mi_claim")]) ]);
   setTimeout(reload,0);
   return el("div",{class:"card wide",style:"margin:8px 0"},[
-    el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px"},[
+    el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
       el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
+      el("label",{class:"small"},[rotCb," ↻45°"]),
+      el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
-    img, leg ]);
+    wrap, leg ]);
 }
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
