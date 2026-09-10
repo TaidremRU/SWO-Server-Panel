@@ -34,6 +34,14 @@ import time
 import zipfile
 from datetime import datetime
 
+try:
+    import mapdt
+except Exception:  # noqa: BLE001
+    mapdt = None
+
+_MACHINE_NAMES = ("not", "furnace", "crusher", "extractor", "distiller", "press")
+_MAPDT_CACHE = {}  # path -> (mtime, summary)
+
 _LINE_RX = re.compile(
     r"^\s*(\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}): (register|enter|exit) (\d+)(?: (\d+))?\s*$"
 )
@@ -828,6 +836,84 @@ def map_dim(world_dir, map_id):
         pass
     _MAPDIM_CACHE[key] = res
     return res
+
+
+def _load_blocks(world_dir):
+    return _load_ref(world_dir, "blocks.json", "id", "name")
+
+
+def mapdt_summary(cfg, map_id):
+    """Разбор бинарной карты Data\\maps\\map<N>.dt (см. mapdt.py) с именами
+    блоков/предметов/машин. Кэш по mtime (map1.dt 40 МБ парсится ~12 c)."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        map_id = int(map_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    path = os.path.join(world_dir, "Data", "maps", "map%d.dt" % map_id)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла map%d.dt" % map_id}
+    hit = _MAPDT_CACHE.get(path)
+    if hit and hit[0] == mt:
+        return hit[1]
+
+    t0 = time.time()
+    d = mapdt.parse(path, world_dir=world_dir, keep_grid=False)
+    if d.get("ok"):
+        items = load_items(world_dir)
+        blocks = _load_blocks(world_dir)
+        names = load_user_list(world_dir)
+        for row in d.get("blocks_by_type", []):
+            row["name"] = blocks.get(row["type"]) or ("block#%s" % row["type"])
+        for key in ("res_in_blocks", "container_items"):
+            for row in d.get(key, []):
+                row["name"] = items.get(row["type"]) or ("item#%s" % row["type"])
+        for row in d.get("stone_types", []):  # stonePos.type — не item-id, показываем как есть
+            row["name"] = "тип %s" % row["type"]
+        for row in d.get("machines", []):
+            i = row["type"]
+            row["name"] = _MACHINE_NAMES[i] if 0 <= i < len(_MACHINE_NAMES) else ("machine#%s" % i)
+        for row in d.get("land_owners", []):
+            row["name"] = names.get(row["owner"]) or ("id %s" % row["owner"])
+        d["map"] = map_id
+        d["parse_sec"] = round(time.time() - t0, 2)
+        d["file_mb"] = round(mt and os.path.getsize(path) / 1048576.0, 2)
+    _MAPDT_CACHE[path] = (mt, d)
+    return d
+
+
+def mapdt_index(cfg):
+    """Список карт с базовой инфой + отметкой, разобрана ли уже (в кэше)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    md = os.path.join(world_dir, "Data", "maps")
+    out = []
+    try:
+        files = os.listdir(md)
+    except OSError:
+        files = []
+    for f in files:
+        m = re.match(r"map(\d+)\.dt$", f)
+        if not m:
+            continue
+        fp = os.path.join(md, f)
+        dim = map_dim(world_dir, int(m.group(1)))
+        cached = _MAPDT_CACHE.get(fp)
+        out.append({
+            "map": int(m.group(1)),
+            "size": ("%dx%d" % (dim["w"], dim["h"])) if dim else None,
+            "file_mb": round(os.path.getsize(fp) / 1048576.0, 2),
+            "parsed": bool(cached and cached[0] == os.path.getmtime(fp)),
+        })
+    out.sort(key=lambda x: -x["file_mb"])
+    return {"ok": True, "maps": out}
 
 
 def world_map(cfg):

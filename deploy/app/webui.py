@@ -763,6 +763,22 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_mapdt_index(self, h, method, q, sess):
+        try:
+            d = players.mapdt_index(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt_index")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_mapdt(self, h, method, q, sess):
+        try:
+            d = players.mapdt_summary(self.cfg, (q.get("map") or ["1"])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_server_events(self, h, method, q, sess):
         kinds = (q.get("kinds") or [""])[0]
         kinds = [k for k in kinds.split(",") if k] or None
@@ -1286,6 +1302,9 @@ var T = {
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
+  md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
+  md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
+  md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
   st_resh_note:"= сумма стоимости изученных техов (tech.json cost в минутах, 1440 = сутки); исследование идёт и оффлайн, бустеры/мозги ускоряют",
   hh_ready:"Сервер запущен", hh_startup:"старт, мс", hh_mem:"managed МБ", hh_clusters:"кластеры",
@@ -1381,6 +1400,9 @@ var T = {
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
+  md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
+  md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
+  md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
   st_resh_note:"= sum of researched techs' cost (tech.json cost is minutes, 1440 = a day); research runs offline too, boosters/brains speed it up",
   hh_ready:"Server started", hh_startup:"startup ms", hh_mem:"managed MB", hh_clusters:"clusters",
@@ -2175,6 +2197,41 @@ function ltable(head, rows, mk){
   rows.forEach(function(r){ tb.appendChild(el("tr",{},mk(r).map(function(c){return el("td",{},[c]);}))); });
   return tb;
 }
+function openMapdt(mapId){
+  var card=$("#mdt-card"); if(!card) return;
+  card.style.display=""; card.innerHTML="";
+  card.appendChild(el("h3",{},[t("md_title")+" #"+mapId]));
+  card.appendChild(el("p",{class:"muted"},[t("md_parsing")]));
+  api("/api/mapdt?map="+mapId).then(function(d){
+    card.innerHTML="";
+    if(!d.ok){ card.appendChild(el("h3",{},[t("md_title")+" #"+mapId])); card.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    card.appendChild(el("h3",{},[t("md_title")+" #"+mapId+" · "+d.w+"×"+d.h+" · "+d.file_mb+" МБ · "+d.parse_sec+"s"]));
+    var meta=el("div",{class:"chart-legend"},[
+      el("span",{},[t("md_ground")+": "+d.ground.land+" / "+d.ground.water]),
+      el("span",{},[t("md_blocks")+": "+d.blocks_total]),
+      el("span",{},[t("md_machines")+": "+d.machines_total]),
+      el("span",{},[t("md_containers")+": "+d.containers]),
+      el("span",{},[t("md_ore")+": "+d.stone_points]),
+      el("span",{},[d.oxygen_map? "O₂ map":"—"]),
+      (d.gas_tiles||d.infection_tiles)? el("span",{},["газ "+d.gas_tiles+" · зараж. "+d.infection_tiles]) : null,
+      (d.vehicles)? el("span",{},["транспорт "+d.vehicles+" (юнитов "+d.vehicle_units+")"]) : null
+    ].filter(Boolean));
+    card.appendChild(meta);
+    var grid=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(260px,1fr))"},[]);
+    function tblcard(title, rows, valkey){
+      return el("div",{class:"card"},[el("h3",{},[title+" · "+(rows||[]).length]),
+        ltable([t("col_name"),"n"], (rows||[]).slice(0,20), function(r){ return [r.name||("#"+r.type), String(r[valkey]||r.n)]; })]);
+    }
+    grid.appendChild(tblcard(t("md_blocks"), d.blocks_by_type, "n"));
+    grid.appendChild(tblcard(t("md_ore"), d.stone_types, "n"));
+    grid.appendChild(tblcard(t("md_containers"), d.container_items, "n"));
+    grid.appendChild(tblcard(t("md_machines"), d.machines, "n"));
+    grid.appendChild(el("div",{class:"card"},[el("h3",{},[t("md_landowners")+" · "+d.land_owned_blocks8+" / "+d.land_total_blocks8]),
+      ltable(["#",t("col_name"),"8×8"], (d.land_owners||[]).slice(0,20), function(r){
+        return [String(r.owner), plLink(r.owner, r.name), String(r.blocks8)]; })]));
+    card.appendChild(grid);
+  }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
 function backupDownload(scope, pw, msg){
   msg.textContent=t("ex_wait");
   fetch("/api/world-backup",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify({password:pw,scope:scope})})
@@ -2278,9 +2335,11 @@ function drawStats(j){
     var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
     wg.appendChild(el("div",{class:"card"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
       el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
-      ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr")], (w.maps||[]).slice(0,50),
-        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories)]; })]));
+      ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,60),
+        function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories),
+          r.map!=null && !r.space? el("a",{class:"pl-link",onclick:function(){ openMapdt(r.map); }},[t("md_open")]) : ""]; })]));
     if(w.space_note) wg.lastChild.appendChild(el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]));
+    wg.appendChild(el("div",{class:"card wide",id:"mdt-card",style:"display:none"},[]));
     var mf=el("input",{type:"number",placeholder:t("st_terrfilter"),style:"padding:5px 8px;width:90px"});
     var tt=el("div",{id:"terrtab"},[]);
     function drawTerr(){

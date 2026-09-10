@@ -12,6 +12,7 @@ except Exception:
 import common
 import gamectl
 import i18n
+import mapdt  # noqa: F401
 import players
 import serverlist
 import serverlist_steam  # noqa: F401  (проверка, что модуль импортируется)
@@ -91,6 +92,17 @@ try:
             _tw = players.twink_report(cfg, 2)
             assert _tw.get("ok") and "code_groups" in _tw, "twink_report: нет code_groups"
             assert '"code"' not in json.dumps(_tw, ensure_ascii=False), "twink_report: код в выдаче"
+            # бинарный парсер карт: индекс + разбор самой маленькой карты
+            _mix = players.mapdt_index(cfg)
+            assert _mix.get("ok"), "mapdt_index: %s" % _mix.get("error")
+            if _mix["maps"]:
+                _sm = _mix["maps"][-1]["map"]  # список отсортирован по убыванию размера
+                _md = players.mapdt_summary(cfg, _sm)
+                assert _md.get("ok"), "mapdt map%s: %s" % (_sm, _md.get("error"))
+                assert _md["trailing_bytes"] == 0, "mapdt: %d лишних байт" % _md["trailing_bytes"]
+                print("mapdt OK: %d карт, map%s %dx%d blocks=%d machines=%d trailing=0"
+                      % (len(_mix["maps"]), _sm, _md["w"], _md["h"],
+                         _md["blocks_total"], _md["machines_total"]))
             print("server-wide OK: chat=%d events=%d online_now=%s clans=%d health_lag=%d csv=%dB"
                   % (players.server_chat(cfg)["total"], players.server_events(cfg)["total"],
                      players.stats_bundle(cfg)["online"]["now"],
