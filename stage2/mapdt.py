@@ -430,7 +430,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                     water += 1
                 if paint:
                     col = _COL.get(_classify(c, bc), _COL["unknown"])
-                    pi = (_y * w + _x) * 3
+                    pi = ((h - 1 - _y) * w + _x) * 3   # зеркало по Y (верх/низ)
                     px[pi] = col[0]; px[pi + 1] = col[1]; px[pi + 2] = col[2]
                 if c["block"]:
                     blocks[c["block"]["type"]] += 1
@@ -498,7 +498,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                     o = um_flat[oi] if oi < nflat else 0
                     if not o:
                         continue
-                    pi = (_y * w + _x) * 3
+                    pi = ((h - 1 - _y) * w + _x) * 3   # то же зеркало по Y, что и у базовых пикселей
                     cur = (px[pi], px[pi + 1], px[pi + 2])
                     if only_owner:
                         nc = _blend(cur, _CLAIM_HL, 0.6) if o == only_owner else _blend(cur, (0, 0, 0), 0.35)

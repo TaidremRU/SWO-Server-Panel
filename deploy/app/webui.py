@@ -2716,7 +2716,7 @@ function mapImageBlock(mapId){
     var halfW=img.offsetWidth/2, halfH=img.offsetHeight/2;   // размер БЕЗ transform
     var fx=(dx/halfW+1)/2, fy=(dy/halfH+1)/2;                // 0..1 по картинке
     if(fx<0||fx>1||fy<0||fy>1){ tip.style.opacity=0; return; }
-    var gx=Math.floor(fx*OW.w), gy=Math.floor(fy*OW.h);
+    var gx=Math.floor(fx*OW.w), gy=OW.h-1-Math.floor(fy*OW.h);   // картинка зеркалена по Y
     var bx=Math.floor(gx/8), by=Math.floor(gy/8);
     var oi=bx*OW.um_h+by, o=(oi>=0&&oi<OW.grid.length)? OW.grid[oi] : 0;
     if(!o){ tip.style.opacity=0; return; }
