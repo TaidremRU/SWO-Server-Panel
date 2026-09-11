@@ -865,10 +865,11 @@ class WebUI:
         return self._json(h, d, 200 if d.get("ok") else 500)
 
     def _api_space_map_image(self, h, method, q, sess):
-        """PNG-диаграмма звёздной системы (метеориты/поды/корабли из units.dt)."""
+        """PNG-диаграмма звёздной системы (планеты/метеориты/поды/корабли)."""
         size = (q.get("size") or ["760"])[0]
+        star = (q.get("star") or ["1"])[0]
         try:
-            png, fn, meta = players.space_map_image(self.cfg, size=size)
+            png, fn, meta = players.space_map_image(self.cfg, size=size, star_id=star)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: space_map_image")
             return self._json(h, {"ok": False, "error": str(e)}, 500)
@@ -881,10 +882,22 @@ class WebUI:
 
     def _api_space_map_data(self, h, method, q, sess):
         """Точки звёздной системы для наведения (id/координаты/детали)."""
+        star = (q.get("star") or ["1"])[0]
         try:
-            d = players.space_map_points(self.cfg)
+            d = players.space_map_points(self.cfg, star_id=star)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: space_map_points")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_space_object_find(self, h, method, q, sess):
+        """Поиск объекта (планеты/астероида) по имени в звёздной системе."""
+        query = (q.get("q") or [""])[0]
+        star = (q.get("star") or ["1"])[0]
+        try:
+            d = players.space_object_search(self.cfg, query, star_id=star)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: space_object_search")
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
@@ -1628,7 +1641,10 @@ var T = {
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
   md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; координат в космосе для неё нет, только для кораблей/метеоритов",
-  su_starmap:"Схема системы", su_star:"звезда", su_scatter_note:"координаты только у кораблей/метеоритов/подов — у планет их нет ни в одном файле (см. заметку ниже)",
+  su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
+  su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
+  su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
+  su_find_hits:"найдено",
   mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
@@ -1742,7 +1758,10 @@ var T = {
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
   md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; no space coordinates for it, only for ships/meteorites",
-  su_starmap:"System map", su_star:"star", su_scatter_note:"coordinates exist only for ships/meteorites/pods — planets have none in any file (see note below)",
+  su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
+  su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
+  su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
+  su_find_hits:"found",
   mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
@@ -2676,8 +2695,8 @@ function spaceMapBlock(){
   img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
   img.onerror=function(){ stat.textContent=t("err_net"); };
   img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
-  api("/api/space-map-data").then(function(d){ if(d.ok) DATA=d; }).catch(function(){});
-  function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦"}[k]||"?"; }
+  api("/api/space-map-data").then(function(d){ if(d.ok){ DATA=d; pcount.textContent="🪐 "+t("su_planets")+": "+d.planet_count; } }).catch(function(){});
+  function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
   function toPx(bd,pad,x,y){
     var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
     return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
@@ -2695,12 +2714,12 @@ function spaceMapBlock(){
       if(d<bestD){ bestD=d; best=p; }
     });
     if(!best){ tip.style.opacity=0; return; }
-    var lines=[kindIcon(best.kind)+" #"+best.id+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
+    var lines=[kindIcon(best.kind)+(best.kind==="planet"?" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
     if(best.kind==="ship"){
       lines.push(best.name||"?");
       lines.push("HP "+best.health+" · "+t("su_cargo")+" "+best.cargo_items);
       lines.push(best.moving? "v=("+best.vx+", "+best.vy+")" : t("su_stopped"));
-    } else if(best.kind!=="star"){
+    } else if(best.kind==="meteorite"||best.kind==="pod"){
       lines.push(t("su_cargo")+" "+best.cargo_items);
       lines.push(best.moving? "v=("+best.vx+", "+best.vy+")" : t("su_stopped"));
     }
@@ -2710,12 +2729,34 @@ function spaceMapBlock(){
     tip.style.transform="none"; tip.style.opacity=1;
   });
   img.addEventListener("mouseleave", function(){ tip.style.opacity=0; });
+  var pcount=el("span",{class:"muted small"},["🪐 …"]);
   var legend=el("div",{class:"chart-legend",style:"margin-top:6px"},[
-    lgSwatch("255,225,140",t("su_star")), lgSwatch("90,200,255",t("su_ships")),
+    lgSwatch("255,225,140",t("su_star")), lgSwatch("190,175,230",t("su_planets")),
+    lgSwatch("90,200,255",t("su_ships")),
     lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")) ]);
+  // поиск объекта по имени (Data/world/star<N>.json)
+  var findIn=el("input",{placeholder:t("su_find_ph"),style:"padding:5px 8px;flex:1;min-width:140px"});
+  var findOut=el("div",{class:"muted small",style:"margin-top:4px"},[]);
+  function runFind(){
+    var qv=findIn.value.trim(); if(!qv) return;
+    findOut.innerHTML=""; findOut.appendChild(el("span",{},[t("mi_wait")]));
+    api("/api/space-object-find?star=1&q="+encodeURIComponent(qv)).then(function(d){
+      findOut.innerHTML="";
+      if(!d.ok){ findOut.appendChild(el("span",{},[d.error||"error"])); return; }
+      if(!d.matches.length){ findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
+      findOut.appendChild(el("span",{},[t("su_find_hits")+" ("+d.total_in_star+" "+t("su_planets")+"): "]));
+      d.matches.forEach(function(m){ findOut.appendChild(el("span",{class:"pill",style:"margin:2px 4px 2px 0"},[
+        "🪐 "+m.name+"  ("+m.x+", "+m.y+")"])); });
+      findOut.appendChild(el("div",{class:"muted small",style:"margin-top:4px"},[d.note]));
+    }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
+  }
+  findIn.addEventListener("keydown",function(e){ if(e.key==="Enter") runFind(); });
   return el("div",{},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
-      el("span",{class:"muted small"},["🔍"]), zoom, stat ]),
+      el("span",{class:"muted small"},["🔍"]), zoom, stat, pcount ]),
+    el("div",{class:"row",style:"gap:6px;flex-wrap:wrap;margin-bottom:6px"},[
+      findIn, el("button",{class:"small",onclick:runFind},[t("mf_go")]) ]),
+    findOut,
     wrap, legend,
     el("div",{class:"muted small",style:"margin-top:4px"},[t("su_scatter_note")]) ]);
 }

@@ -27,9 +27,11 @@ import glob
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
+import struct
 import time
 import zipfile
 from datetime import datetime
@@ -2659,15 +2661,125 @@ _SPACE_POD_COL = (230, 195, 60)
 _SPACE_PAD_FRAC = 0.05
 
 
-def _space_bounds(su):
-    """Границы системы, гарантированно включающие звезду (0,0) — как в картинке."""
+def _space_bounds(su, extra=None):
+    """Границы системы, гарантированно включающие звезду (0,0) — как в картинке.
+    ``extra`` — доп. список (x,y) для учёта в границах (напр. именованные объекты)."""
     bd = su["bounds"]
     minx, maxx = min(bd["minx"], 0), max(bd["maxx"], 0)
     miny, maxy = min(bd["miny"], 0), max(bd["maxy"], 0)
+    for x, y in (extra or ()):
+        minx, maxx = min(minx, x), max(maxx, x)
+        miny, maxy = min(miny, y), max(maxy, y)
     return minx, maxx, miny, maxy
 
 
-def space_map_points(cfg):
+# --- Data\world\star<N>.json — именованные объекты системы (планеты/астероиды) ---
+# Формат реверс-инжинерен без исходника (сервер-генератор мира не в _src), по
+# статистике байт: массив записей переменной длины, для каждой:
+#   uint32 <хвост предыдущей записи, НЕ id — пропускаем>
+#   int32 nameLen; utf8 name (nameLen байт)
+#   int32 type (0|1|2 — судя по частоте, категория объекта)
+#   7 байт тегов/флагов (не расшифрованы)
+#   float64 x; float64 y            <- позиция (ПРОВЕРЕНО: 433/433 валидны на
+#                                       star1.json, диапазон разумный ±40k;
+#                                       кросс-совпадение с позицией кораблей
+#                                       в units.dt на той же планете)
+#   … (растровый «хвост» ~314 байт после имени: доп. поля + список ресурсов
+#     переменной длины — не распакован, не нужен для имени/позиции)
+# Границы записи находятся по соседним строкам: gap между position(name_i) и
+# position(name_{i+1}) лежит в 300..340 (= 322+len(name)); это отсекает
+# случайные "похожие на строку" байты внутри числовых хвостов.
+# ВАЖНО: имена НЕ уникальны — один и тот же пул имён переиспользуется в разных
+# звёздных системах с разными координатами (Ryk Xive есть минимум в star1,
+# star1029, star1481— с разными x,y). Поиск должен указывать star_id.
+_STAROBJ_CACHE = {}   # path -> (mtime, [{"name","x","y"}])
+
+
+def _is_star_obj_name(s):
+    if not (1 <= len(s) <= 40):
+        return False
+    try:
+        s2 = s.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return all(32 <= ord(c) < 127 for c in s2) and any(c.isalpha() for c in s2)
+
+
+def _parse_star_file(path):
+    with open(path, "rb") as f:
+        b = f.read()
+    n = len(b)
+    found = []
+    i = 0
+    while i < n - 4:
+        ln = struct.unpack_from("<i", b, i)[0]
+        if 1 <= ln <= 40 and i + 4 + ln <= n:
+            chunk = b[i + 4:i + 4 + ln]
+            if _is_star_obj_name(chunk):
+                found.append((i, ln, chunk))
+        i += 1
+    out = []
+    for k in range(len(found) - 1):
+        namepos, ln, chunk = found[k]
+        if not (300 <= found[k + 1][0] - namepos <= 340):
+            continue          # не настоящая граница записи — соседняя случайная "строка"
+        end = namepos + 4 + ln
+        try:
+            x, y = struct.unpack_from("<d", b, end + 11)[0], struct.unpack_from("<d", b, end + 19)[0]
+        except struct.error:
+            continue
+        if not (math.isfinite(x) and math.isfinite(y) and abs(x) < 1_000_000 and abs(y) < 1_000_000):
+            continue
+        out.append({"name": chunk.decode("utf-8"), "x": round(x, 1), "y": round(y, 1)})
+    return out
+
+
+def space_objects(cfg, star_id=1):
+    """Именованные объекты (планеты/астероиды) звёздной системы ``star_id`` из
+    ``Data\\world\\star<star_id>.json`` — реверс-инженерный разбор (нет в
+    исходнике), см. комментарий выше. -> ``{ok, star_id, count, objects[{name,x,y}]}``."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        star_id = int(star_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad star_id"}
+    path = os.path.join(world_dir, "Data", "world", "star%d.json" % star_id)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла world\\star%d.json" % star_id}
+    hit = _STAROBJ_CACHE.get(path)
+    if hit and hit[0] == mt:
+        objs = hit[1]
+    else:
+        objs = _parse_star_file(path)
+        _STAROBJ_CACHE[path] = (mt, objs)
+        if len(_STAROBJ_CACHE) > 8:
+            _STAROBJ_CACHE.pop(next(iter(_STAROBJ_CACHE)))
+    return {"ok": True, "star_id": star_id, "count": len(objs), "objects": objs,
+            "note": "разбор бинарного формата без исходника — координаты x,y проверены "
+                    "(валидны на 100% образцов, совпадают с позицией кораблей на той же "
+                    "точке); имена НЕ уникальны между звёздными системами"}
+
+
+def space_object_search(cfg, query, star_id=1):
+    """Поиск объекта по (под)имени в звёздной системе ``star_id``.
+    -> ``{ok, query, star_id, matches[{name,x,y}], total_in_star, note}``."""
+    d = space_objects(cfg, star_id)
+    if not d.get("ok"):
+        return d
+    q = str(query or "").strip().lower()
+    if not q:
+        return {"ok": False, "error": "пустой запрос"}
+    matches = [o for o in d["objects"] if q in o["name"].lower()]
+    matches.sort(key=lambda o: (o["name"].lower() != q, len(o["name"]), o["name"]))
+    return {"ok": True, "query": query, "star_id": star_id, "matches": matches[:100],
+            "total_in_star": d["count"], "note": d["note"]}
+
+
+def space_map_points(cfg, star_id=1):
     """Данные для интерактивной схемы системы (id/координаты/детали каждой
     точки) — картинка рисуется отдельно (``space_map_image``), тут только
     метаданные для наведения. Клиент считает пиксель сам: ``pad = size*pad_frac``,
@@ -2677,8 +2789,12 @@ def space_map_points(cfg):
     su = space_units(cfg)
     if not su.get("ok"):
         return su
-    minx, maxx, miny, maxy = _space_bounds(su)
+    so = space_objects(cfg, star_id)
+    objs = so.get("objects") or [] if so.get("ok") else []
+    minx, maxx, miny, maxy = _space_bounds(su, [(o["x"], o["y"]) for o in objs])
     points = [{"kind": "star", "id": 0, "x": 0, "y": 0, "name": "★"}]
+    for i, o in enumerate(objs):
+        points.append({"kind": "planet", "id": i + 1, "x": o["x"], "y": o["y"], "name": o["name"]})
     for s in su["ships"]:
         points.append({"kind": "ship", "id": s["id"], "x": s["x"], "y": s["y"],
                        "name": s["name"], "user_id": s["user_id"], "health": s["health"],
@@ -2694,14 +2810,19 @@ def space_map_points(cfg):
                        "vx": p["vx"], "vy": p["vy"], "cargo_items": p["cargo_items"],
                        "moving": p["moving"]})
     return {"ok": True, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
-            "pad_frac": _SPACE_PAD_FRAC, "points": points, "total": len(points)}
+            "pad_frac": _SPACE_PAD_FRAC, "points": points, "total": len(points),
+            "planet_count": len(objs)}
 
 
-def space_map_image(cfg, size=760):
-    """Рассеянная диаграмма звёздной системы (PNG) из ``space_units``: звезда в
-    (0,0), метеориты/поды/корабли по их координатам. Не карта местности —
-    просто визуализация того, что реально известно (координат планет в файлах
-    нет, см. ``space_units.note``). -> ``(png_bytes, fname, meta)``."""
+_SPACE_PLANET_COL = (190, 175, 230)
+
+
+def space_map_image(cfg, size=760, star_id=1):
+    """Рассеянная диаграмма звёздной системы (PNG): звезда в (0,0), именованные
+    объекты (планеты/астероиды из ``Data\\world\\star<N>.json``) лавандовым,
+    метеориты/поды/корабли (из ``space_units``) по их координатам. Не карта
+    местности — просто визуализация того, что реально известно.
+    -> ``(png_bytes, fname, meta)``."""
     if mapdt is None:
         return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
     world_dir = find_world_dir(cfg)
@@ -2713,16 +2834,27 @@ def space_map_image(cfg, size=760):
     except OSError:
         return {"ok": False, "error": "нет файла space\\units.dt"}, None, None
     size = max(200, min(2000, int(size)))
-    ck = (path, size)
+    try:
+        star_id = int(star_id)
+    except (TypeError, ValueError):
+        star_id = 1
+    star_path = os.path.join(world_dir, "Data", "world", "star%d.json" % star_id)
+    try:
+        star_mt = os.path.getmtime(star_path)
+    except OSError:
+        star_mt = 0
+    ck = (path, size, star_id)
     hit = _SPACEIMG_CACHE.get(ck)
-    if hit and hit[0] == mt:
+    if hit and hit[0] == (mt, star_mt):
         return hit[1], "space_map.png", {"cached": True}
 
     su = space_units(cfg)
     if not su.get("ok"):
         return su, None, None
+    so = space_objects(cfg, star_id)
+    objs = so.get("objects") or [] if so.get("ok") else []
     bd = su["bounds"]
-    minx, maxx, miny, maxy = _space_bounds(su)
+    minx, maxx, miny, maxy = _space_bounds(su, [(o["x"], o["y"]) for o in objs])
     spanx = max(maxx - minx, 1)
     spany = max(maxy - miny, 1)
     w = h = size
@@ -2745,6 +2877,9 @@ def space_map_image(cfg, size=760):
                     i = (y * w + x) * 3
                     rgb[i], rgb[i + 1], rgb[i + 2] = color
 
+    for o in objs:
+        x, y = to_px(o["x"], o["y"])
+        dot(x, y, _SPACE_PLANET_COL, 1)
     for m in su["meteorites"]:
         x, y = to_px(m["x"], m["y"])
         dot(x, y, _SPACE_MET_COL, 1 if m["cargo_items"] < 12 else 2)
@@ -2758,8 +2893,8 @@ def space_map_image(cfg, size=760):
     dot(sx, sy, _SPACE_STAR_COL, 5)
 
     png = mapdt.png_bytes(w, h, bytes(rgb), 1)
-    _SPACEIMG_CACHE[ck] = (mt, png)
-    return png, "space_map.png", {"w": w, "h": h, "bounds": bd,
+    _SPACEIMG_CACHE[ck] = ((mt, star_mt), png)
+    return png, "space_map.png", {"w": w, "h": h, "bounds": bd, "planets": len(objs),
                                   "ships": len(su["ships"]), "meteorites": su["meteorite_count"],
                                   "pods": su["pod_count"]}
 
