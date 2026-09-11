@@ -864,6 +864,21 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_space_map_image(self, h, method, q, sess):
+        """PNG-диаграмма звёздной системы (метеориты/поды/корабли из units.dt)."""
+        size = (q.get("size") or ["760"])[0]
+        try:
+            png, fn, meta = players.space_map_image(self.cfg, size=size)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: space_map_image")
+            return self._json(h, {"ok": False, "error": str(e)}, 500)
+        if not isinstance(png, (bytes, bytearray)):
+            return self._json(h, png if isinstance(png, dict) else {"ok": False}, 500)
+        return self._send(h, 200, "image/png", bytes(png), {
+            "Cache-Control": "max-age=60",
+            "Content-Disposition": 'inline; filename="%s"' % (fn or "space_map.png"),
+        })
+
     def _api_health(self, h, method, q, sess):
         now = time.time()
         if not self._health_cache or now - self._health_cache[0] > 60:
@@ -1603,6 +1618,8 @@ var T = {
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
+  md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; координат в космосе для неё нет, только для кораблей/метеоритов",
+  su_starmap:"Схема системы", su_star:"звезда", su_scatter_note:"координаты только у кораблей/метеоритов/подов — у планет их нет ни в одном файле (см. заметку ниже)",
   mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
@@ -1715,6 +1732,8 @@ var T = {
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
+  md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; no space coordinates for it, only for ships/meteorites",
+  su_starmap:"System map", su_star:"star", su_scatter_note:"coordinates exist only for ships/meteorites/pods — planets have none in any file (see note below)",
   mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
@@ -2858,7 +2877,10 @@ function drawMap(w, sj){
   wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
     el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
     scT(ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,80),
-      function(r){ return [r.space? "0 · космос ⚠" : String(r.map), r.size||"—", String(r.online), String(r.avatars), String(r.territories),
+      function(r){ return [
+        el("span",{},[r.space? "0 · космос ⚠" : String(r.map),
+          r.is_offworld? el("span",{class:"pill",title:t("md_offworld_hint"),style:"margin-left:6px"},["🪐"]) : ""]),
+        r.size||"—", String(r.online), String(r.avatars), String(r.territories),
         r.map!=null && !r.space? el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(r.map)},[t("md_open")]) : ""]; })),
     w.space_note? el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]) : null
   ].filter(Boolean)));
@@ -2912,6 +2934,14 @@ function drawMap(w, sj){
         el("span",{},["☄ "+t("su_meteorites")+": "+su.meteorite_count]),
         el("span",{},["📦 "+t("su_pods")+": "+su.pod_count]),
         el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
+      el("h3",{style:"margin-top:10px"},[t("su_starmap")]),
+      el("div",{style:"display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start"},[
+        el("img",{src:"/api/space-map-image?size=560&_="+Date.now(), alt:"star system",
+          style:"image-rendering:pixelated;border:1px solid var(--line);border-radius:8px;background:#08090f;max-width:100%"}),
+        el("div",{class:"chart-legend",style:"flex-direction:column;gap:6px;align-items:flex-start"},[
+          lgSwatch("255,225,140",t("su_star")), lgSwatch("90,200,255",t("su_ships")),
+          lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")),
+          el("div",{class:"muted small",style:"max-width:220px;margin-top:4px"},[t("su_scatter_note")]) ]) ]),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),

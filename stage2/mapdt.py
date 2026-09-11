@@ -559,6 +559,13 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e), "at_byte": r.p}
 
 
+def png_bytes(w, h, rgb, scale=1):
+    """Публичная обёртка над ``_png_bytes`` — кодирует произвольный RGB8-буфер
+    (bytes/bytearray длиной w*h*3, строки по y) в PNG. Для картинок, собранных
+    не из ``parse(paint=True)`` (напр. рассеянная диаграмма звёздной системы)."""
+    return _png_bytes(w, h, rgb, scale)
+
+
 def render_png(path, world_dir=None, block_class=None, scale=None,
                claims=True, only_owner=None):
     """Картинка карты (PNG bytes) + мета. ``block_class`` = {block_type: cat}

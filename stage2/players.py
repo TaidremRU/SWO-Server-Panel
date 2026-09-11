@@ -1589,6 +1589,7 @@ def world_map(cfg):
         dim = map_dim(world_dir, mp) if mp not in (None, 0) else None
         rows.append({"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
                      "territories": terr_by_map.get(mp, 0), "space": mp == 0,
+                     "is_offworld": mp is not None and mp not in (0, 1),
                      "size": ("%dx%d" % (dim["w"], dim["h"])) if dim else None})
     rows.sort(key=lambda r: -(r["online"] * 100 + r["territories"]))
     terr.sort(key=lambda t: ((t["map"] if t["map"] is not None else 0), (t["owner"] or "").lower()))
@@ -2648,6 +2649,84 @@ def space_units(cfg):
     }
     _SPACEUNITS_CACHE[path] = (mt, res)
     return res
+
+
+_SPACEIMG_CACHE = {}   # path -> (mtime, png)
+_SPACE_STAR_COL = (255, 225, 140)
+_SPACE_SHIP_COL = (90, 200, 255)
+_SPACE_MET_COL = (150, 140, 128)
+_SPACE_POD_COL = (230, 195, 60)
+
+
+def space_map_image(cfg, size=760):
+    """Рассеянная диаграмма звёздной системы (PNG) из ``space_units``: звезда в
+    (0,0), метеориты/поды/корабли по их координатам. Не карта местности —
+    просто визуализация того, что реально известно (координат планет в файлах
+    нет, см. ``space_units.note``). -> ``(png_bytes, fname, meta)``."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}, None, None
+    path = os.path.join(world_dir, "Data", "space", "units.dt")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла space\\units.dt"}, None, None
+    size = max(200, min(2000, int(size)))
+    ck = (path, size)
+    hit = _SPACEIMG_CACHE.get(ck)
+    if hit and hit[0] == mt:
+        return hit[1], "space_map.png", {"cached": True}
+
+    su = space_units(cfg)
+    if not su.get("ok"):
+        return su, None, None
+    bd = su["bounds"]
+    minx, maxx = bd["minx"], bd["maxx"]
+    miny, maxy = bd["miny"], bd["maxy"]
+    # система всегда центрирована на звезде (0,0) — гарантируем, что она в кадре
+    minx, maxx = min(minx, 0), max(maxx, 0)
+    miny, maxy = min(miny, 0), max(maxy, 0)
+    spanx = max(maxx - minx, 1)
+    spany = max(maxy - miny, 1)
+    w = h = size
+    pad = int(size * 0.05)
+
+    def to_px(x, y):
+        px = pad + (x - minx) / spanx * (w - 2 * pad)
+        py = pad + (maxy - y) / spany * (h - 2 * pad)   # y вниз на экране
+        return int(px), int(py)
+
+    rgb = bytearray((8, 10, 22) * (w * h))
+
+    def dot(cx, cy, color, r):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy > r * r + 1:
+                    continue
+                x, y = cx + dx, cy + dy
+                if 0 <= x < w and 0 <= y < h:
+                    i = (y * w + x) * 3
+                    rgb[i], rgb[i + 1], rgb[i + 2] = color
+
+    for m in su["meteorites"]:
+        x, y = to_px(m["x"], m["y"])
+        dot(x, y, _SPACE_MET_COL, 1 if m["cargo_items"] < 12 else 2)
+    for p in su["pods"]:
+        x, y = to_px(p["x"], p["y"])
+        dot(x, y, _SPACE_POD_COL, 1)
+    for s in su["ships"]:
+        x, y = to_px(s["x"], s["y"])
+        dot(x, y, _SPACE_SHIP_COL, 3)
+    sx, sy = to_px(0, 0)
+    dot(sx, sy, _SPACE_STAR_COL, 5)
+
+    png = mapdt.png_bytes(w, h, bytes(rgb), 1)
+    _SPACEIMG_CACHE[ck] = (mt, png)
+    return png, "space_map.png", {"w": w, "h": h, "bounds": bd,
+                                  "ships": len(su["ships"]), "meteorites": su["meteorite_count"],
+                                  "pods": su["pod_count"]}
 
 
 def space_report(cfg):
