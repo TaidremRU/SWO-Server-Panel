@@ -1482,6 +1482,12 @@ PAGE = r"""<!doctype html>
   --mut:#5b6670; --acc:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --err:#cf222e;
 }
 *{box-sizing:border-box}
+html{scrollbar-color:var(--line) var(--panel);scrollbar-width:thin}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-track{background:var(--panel)}
+::-webkit-scrollbar-corner{background:var(--panel)}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px;border:2px solid var(--panel);background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--mut);background-clip:padding-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
 a{color:var(--acc)}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
@@ -1557,6 +1563,7 @@ a.pl-link:hover{text-decoration:underline}
 .chart .cax{fill:var(--mut);font-size:9px;font-family:system-ui,sans-serif}
 .chart .cguide{stroke:var(--acc);stroke-width:.7;stroke-dasharray:3 3;opacity:0}
 .chart .ctip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--acc);border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;opacity:0;transform:translate(-50%,-118%);transition:opacity .08s;z-index:2}
+.ctip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--acc);border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;opacity:0;z-index:2}
 .chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin:2px 0 6px}
 .chart-legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 .card.wide{grid-column:1 / -1}
@@ -1646,7 +1653,7 @@ var T = {
   su_hidden:"скрыто (нет тел рядом):",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
   su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
-  su_find_hits:"найдено",
+  su_find_hits:"найдено", su_find_click:"показать на схеме",
   mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
@@ -1766,7 +1773,7 @@ var T = {
   su_hidden:"hidden (no bodies nearby):",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
   su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
-  su_find_hits:"found",
+  su_find_hits:"found", su_find_click:"show on map",
   mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
@@ -2619,6 +2626,34 @@ function openMapdt(mapId){
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
+function attachDragPan(wrap, tip){
+  // тащим карту зажатой ЛКМ (как рукой), не только скроллбарами
+  var img=wrap.querySelector("img");
+  if(img){ img.draggable=false; img.style.userSelect="none"; }
+  wrap.style.cursor="grab";
+  var sx=0, sy=0, sl=0, st=0;
+  function onMove(e){
+    wrap._panning=true;
+    if(tip) tip.style.opacity=0;
+    wrap.scrollLeft=sl-(e.clientX-sx);
+    wrap.scrollTop=st-(e.clientY-sy);
+  }
+  function onUp(){
+    wrap._panning=false;
+    document.removeEventListener("mousemove",onMove);
+    document.removeEventListener("mouseup",onUp);
+    wrap.style.cursor="grab";
+  }
+  wrap.addEventListener("mousedown",function(e){
+    if(e.button!==0) return;
+    sx=e.clientX; sy=e.clientY; sl=wrap.scrollLeft; st=wrap.scrollTop;
+    wrap.style.cursor="grabbing";
+    if(tip) tip.style.opacity=0;
+    document.addEventListener("mousemove",onMove);
+    document.addEventListener("mouseup",onUp);
+    e.preventDefault();
+  });
+}
 function mapImageBlock(mapId){
   var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;display:block;border:1px solid var(--line);border-radius:6px;background:var(--panel2);width:100%;transition:transform .1s"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
@@ -2653,7 +2688,7 @@ function mapImageBlock(mapId){
   ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
   api("/api/mapdt-owners?map="+mapId).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
   img.addEventListener("mousemove",function(e){
-    if(!OW || !img.naturalWidth){ tip.style.opacity=0; return; }
+    if(wrap._panning || !OW || !img.naturalWidth){ tip.style.opacity=0; return; }
     var r=img.getBoundingClientRect();
     var cx=(r.left+r.right)/2, cy=(r.top+r.bottom)/2;
     var dx=e.clientX-cx, dy=e.clientY-cy;
@@ -2680,6 +2715,7 @@ function mapImageBlock(mapId){
     lgSwatch("222,138,46",t("mi_built")),
     el("span",{class:"muted"},[t("mi_claim")]) ]);
   setTimeout(reload,0);
+  attachDragPan(wrap, tip);
   return el("div",{class:"card wide",style:"margin:8px 0"},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
@@ -2697,13 +2733,30 @@ function spaceMapBlock(){
   var sz=SPACE_MAP_SIZE;
   var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;border:0;background:#08090f"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
-  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
+  var hl=el("div",{style:"position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid #ff3b6f;box-shadow:0 0 10px 2px rgba(255,59,111,.65);pointer-events:none;opacity:0;transform:translate(-50%,-50%);transition:opacity .2s"},[]);
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip,hl]);
   var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
-  var DATA=null;
-  zoom.oninput=function(){ img.style.width=zoom.value+"%"; };
+  var DATA=null, hlFrac=null;
+  function updateHl(){
+    if(!hlFrac || !img.naturalWidth){ hl.style.opacity=0; return; }
+    hl.style.left=(img.offsetLeft+hlFrac.fx*img.offsetWidth)+"px";
+    hl.style.top=(img.offsetTop+hlFrac.fy*img.offsetHeight)+"px";
+    hl.style.opacity=1;
+  }
+  function highlightAt(x,y){
+    if(!DATA || !img.naturalWidth) return;
+    var pad=sz*DATA.pad_frac;
+    var xy=toPx(DATA.bounds,pad,x,y);
+    hlFrac={fx:xy[0]/sz, fy:xy[1]/sz};
+    updateHl();
+    var left=img.offsetLeft+hlFrac.fx*img.offsetWidth, top=img.offsetTop+hlFrac.fy*img.offsetHeight;
+    wrap.scrollLeft=left-wrap.clientWidth/2;
+    wrap.scrollTop=top-wrap.clientHeight/2;
+  }
+  zoom.oninput=function(){ img.style.width=zoom.value+"%"; updateHl(); };
   zoom.oninput();
-  img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
+  img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; updateHl(); };
   img.onerror=function(){ stat.textContent=t("err_net"); };
   img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
   api("/api/space-map-data").then(function(d){ if(d.ok){ DATA=d;
@@ -2715,7 +2768,7 @@ function spaceMapBlock(){
     return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
   }
   img.addEventListener("mousemove", function(e){
-    if(!DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
+    if(wrap._panning || !DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
     var r=img.getBoundingClientRect();
     var sx=img.naturalWidth/r.width, sy=img.naturalHeight/r.height;
     var ix=(e.clientX-r.left)*sx, iy=(e.clientY-r.top)*sy;
@@ -2756,14 +2809,17 @@ function spaceMapBlock(){
     api("/api/space-object-find?star=1&q="+encodeURIComponent(qv)).then(function(d){
       findOut.innerHTML="";
       if(!d.ok){ findOut.appendChild(el("span",{},[d.error||"error"])); return; }
-      if(!d.matches.length){ findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
+      if(!d.matches.length){ hlFrac=null; updateHl(); findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
       findOut.appendChild(el("span",{},[t("su_find_hits")+" ("+d.total_in_star+" "+t("su_planets")+"): "]));
-      d.matches.forEach(function(m){ findOut.appendChild(el("span",{class:"pill",style:"margin:2px 4px 2px 0"},[
+      d.matches.forEach(function(m){ findOut.appendChild(el("span",{class:"pill",style:"margin:2px 4px 2px 0;cursor:pointer",
+        title:t("su_find_click"), onclick:(function(mm){ return function(){ highlightAt(mm.x,mm.y); }; })(m)},[
         "🪐 #"+m.id+" "+m.name+"  ("+m.x+", "+m.y+")"])); });
       findOut.appendChild(el("div",{class:"muted small",style:"margin-top:4px"},[d.note]));
+      highlightAt(d.matches[0].x, d.matches[0].y);
     }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
   }
   findIn.addEventListener("keydown",function(e){ if(e.key==="Enter") runFind(); });
+  attachDragPan(wrap, tip);
   return el("div",{},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("span",{class:"muted small"},["🔍"]), zoom, stat, pcount ]),
