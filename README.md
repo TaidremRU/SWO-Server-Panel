@@ -1,4 +1,4 @@
-<!-- SPDX note: private project — TaidremRU/sigmabot_win -->
+<!-- SPDX note: private project — TaidremRU/SWO-Server-Panel (ex sigmabot_win) -->
 
 # SigmaSteamBot
 
