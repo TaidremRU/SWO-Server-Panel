@@ -2783,7 +2783,7 @@ function spaceMapBlock(){
   function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
   function toPx(bd,pad,x,y){
     var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
-    return [ pad+(bd.maxx-x)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];   // X отзеркален как на картинке
+    return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
   }
   img.addEventListener("mousemove", function(e){
     if(wrap._panning || !DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
