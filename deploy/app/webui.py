@@ -1575,8 +1575,8 @@ a.pl-link:hover{text-decoration:underline}
 .chart .cax{fill:var(--mut);font-size:9px;font-family:system-ui,sans-serif}
 .chart .cguide{stroke:var(--acc);stroke-width:.7;stroke-dasharray:3 3;opacity:0}
 .chart .ctip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--acc);border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;opacity:0;transform:translate(-50%,-118%);transition:opacity .08s;z-index:2}
-.ctip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--acc);border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;opacity:0;z-index:2}
 .chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin:2px 0 6px}
+.mapinfo{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12.5px;margin-bottom:6px;min-height:18px;display:flex;flex-direction:column;justify-content:center;gap:2px}
 .chart-legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 .card.wide{grid-column:1 / -1}
 .sc{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px}
@@ -1665,6 +1665,7 @@ var T = {
   su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
   su_hidden:"скрыто (нет тел рядом):",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
+  su_hover_hint:"наведите курсор на карту",
   su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
   su_find_ph2:"имя планеты/астероида —", su_cluster:"кластер", su_system:"система",
   su_clusters:"кластеров", su_systems:"систем всего",
@@ -1675,6 +1676,7 @@ var T = {
   mf_nomatch:"ничего не найдено", mf_matched:"совпадения по имени",
   mf_owner:"на чьей земле", mf_byowner:"по владельцам земли", mf_nobody:"— ничья —",
   mi_title:"Картинка карты", mi_wait:"рисую…", mi_claims:"клаймы", mi_owner:"владелец id",
+  mi_hover_hint:"наведите курсор на карту", mi_free:"свободно",
   mi_rot_ccw:"повернуть против часовой на 45°", mi_rot_cw:"повернуть по часовой на 45°",
   mi_show:"показать", mi_water:"вода", mi_land:"суша", mi_grass:"природа", mi_mtn:"горы",
   mi_ore:"руда", mi_wall:"стены/пол", mi_built:"постройки", mi_claim:"клаймы = цвет по владельцу (галка), либо один владелец по id",
@@ -1788,6 +1790,7 @@ var T = {
   su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
   su_hidden:"hidden (no bodies nearby):",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
+  su_hover_hint:"hover over the map",
   su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
   su_find_ph2:"planet/asteroid name —", su_cluster:"cluster", su_system:"system",
   su_clusters:"clusters", su_systems:"systems total",
@@ -1798,6 +1801,7 @@ var T = {
   mf_nomatch:"nothing found", mf_matched:"name matches",
   mf_owner:"on whose land", mf_byowner:"by land owner", mf_nobody:"— unclaimed —",
   mi_title:"Map image", mi_wait:"rendering…", mi_claims:"claims", mi_owner:"owner id",
+  mi_hover_hint:"hover over the map", mi_free:"free",
   mi_rot_ccw:"rotate 45° counter-clockwise", mi_rot_cw:"rotate 45° clockwise",
   mi_show:"show", mi_water:"water", mi_land:"land", mi_grass:"nature", mi_mtn:"mountains",
   mi_ore:"ore", mi_wall:"walls/floor", mi_built:"structures", mi_claim:"claims = colour per owner (checkbox), or one owner by id",
@@ -2646,7 +2650,7 @@ function openMapdt(mapId){
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
-function attachDragPan(wrap, tip, zoom){
+function attachDragPan(wrap, info, zoom){
   // тащим карту зажатой ЛКМ (как рукой), не только скроллбарами
   var img=wrap.querySelector("img");
   if(img){ img.draggable=false; img.style.userSelect="none"; }
@@ -2661,7 +2665,7 @@ function attachDragPan(wrap, tip, zoom){
   function onMove(e){
     if(e.buttons===0){ onUp(); return; }   // кнопку отпустили вне окна — самовосстановление
     wrap._panning=true;
-    if(tip) tip.style.opacity=0;
+    if(info) info.clear();
     wrap.scrollLeft=sl-(e.clientX-sx);
     wrap.scrollTop=st-(e.clientY-sy);
   }
@@ -2670,7 +2674,7 @@ function attachDragPan(wrap, tip, zoom){
     sx=e.clientX; sy=e.clientY; sl=wrap.scrollLeft; st=wrap.scrollTop;
     wrap.style.cursor="grabbing";
     wrap._panning=true;
-    if(tip) tip.style.opacity=0;
+    if(info) info.clear();
     document.addEventListener("mousemove",onMove);
     document.addEventListener("mouseup",onUp);
     e.preventDefault();
@@ -2692,11 +2696,27 @@ function attachDragPan(wrap, tip, zoom){
     }, {passive:false});
   }
 }
+// Зафиксированная (не бегущая за курсором) панель с инфо о наведении на карту —
+// в отличие от плавающей подсказки внутри скроллируемого wrap, её позиция не
+// зависит от scrollLeft/scrollTop (панорамирование/зум) и её не обрезает край
+// экрана — раньше именно это и делало подсказку "непонятно где".
+function mapInfoBar(placeholder){
+  var box=el("div",{class:"mapinfo muted"},[placeholder]);
+  return {
+    el: box,
+    show: function(lines){
+      box.className="mapinfo";
+      box.innerHTML="";
+      (Array.isArray(lines)?lines:[lines]).forEach(function(l){ box.appendChild(el("div",{},[l])); });
+    },
+    clear: function(){ box.className="mapinfo muted"; box.textContent=placeholder; }
+  };
+}
 function mapImageBlock(mapId){
   var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;display:block;border:1px solid var(--line);border-radius:6px;background:var(--panel2);width:100%;transition:transform .1s"});
   var stage=el("div",{style:"display:flex;align-items:center;justify-content:center;margin:0 auto"},[img]);
-  var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
-  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[stage,tip]);
+  var info=mapInfoBar(t("mi_hover_hint"));
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[stage]);
   var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
   var rot=315;
@@ -2737,7 +2757,7 @@ function mapImageBlock(mapId){
   ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
   api("/api/mapdt-owners?map="+mapId).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
   img.addEventListener("mousemove",function(e){
-    if(wrap._panning || !OW || !img.naturalWidth){ tip.style.opacity=0; return; }
+    if(wrap._panning || !img.naturalWidth){ info.clear(); return; }
     var r=img.getBoundingClientRect();
     var cx=(r.left+r.right)/2, cy=(r.top+r.bottom)/2;
     var dx=e.clientX-cx, dy=e.clientY-cy;
@@ -2746,17 +2766,13 @@ function mapImageBlock(mapId){
       var nx=dx*cs-dy*sn, ny=dx*sn+dy*cs; dx=nx; dy=ny; }
     var halfW=img.offsetWidth/2, halfH=img.offsetHeight/2;   // размер БЕЗ transform
     var fx=(dx/halfW+1)/2, fy=(dy/halfH+1)/2;                // 0..1 по картинке
-    if(fx<0||fx>1||fy<0||fy>1){ tip.style.opacity=0; return; }
+    if(fx<0||fx>1||fy<0||fy>1||!OW){ info.clear(); return; }
     var gx=Math.floor(fx*OW.w), gy=OW.h-1-Math.floor(fy*OW.h);   // картинка зеркалена по Y
     var bx=Math.floor(gx/8), by=Math.floor(gy/8);
     var oi=bx*OW.um_h+by, o=(oi>=0&&oi<OW.grid.length)? OW.grid[oi] : 0;
-    if(!o){ tip.style.opacity=0; return; }
-    tip.textContent=(OW.names[o]||("id "+o))+"  ("+gx+","+gy+")";
-    tip.style.left=(e.clientX-wrap.getBoundingClientRect().left+12)+"px";
-    tip.style.top=(e.clientY-wrap.getBoundingClientRect().top+12)+"px";
-    tip.style.transform="none"; tip.style.opacity=1;
+    info.show((o? "👤 "+(OW.names[o]||("id "+o)) : t("mi_free"))+"  ("+gx+","+gy+")");
   });
-  img.addEventListener("mouseleave",function(){ tip.style.opacity=0; });
+  img.addEventListener("mouseleave",function(){ info.clear(); });
   var leg=el("div",{class:"chart-legend",style:"margin-top:6px"},[
     lgSwatch("38,88,150",t("mi_water")), lgSwatch("176,160,126",t("mi_land")),
     lgSwatch("86,148,66",t("mi_grass")), lgSwatch("128,128,134",t("mi_mtn")),
@@ -2764,7 +2780,7 @@ function mapImageBlock(mapId){
     lgSwatch("222,138,46",t("mi_built")),
     el("span",{class:"muted"},[t("mi_claim")]) ]);
   setTimeout(reload,0);
-  attachDragPan(wrap, tip, zoom);
+  attachDragPan(wrap, info, zoom);
   return el("div",{class:"card wide",style:"margin:8px 0"},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
@@ -2772,7 +2788,7 @@ function mapImageBlock(mapId){
       rotCcw, rotLbl, rotCw,
       el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
-    wrap, leg ]);
+    info.el, wrap, leg ]);
 }
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
@@ -2782,9 +2798,9 @@ function spaceMapBlock(starId){
   starId=starId||1;
   var sz=SPACE_MAP_SIZE;
   var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;margin:0 auto;border:0;background:#08090f"});
-  var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
+  var info=mapInfoBar(t("su_hover_hint"));
   var hl=el("div",{style:"position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid #ff3b6f;box-shadow:0 0 10px 2px rgba(255,59,111,.65);pointer-events:none;opacity:0;transform:translate(-50%,-50%);transition:opacity .2s"},[]);
-  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip,hl]);
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,hl]);
   var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var DATA=null, hlFrac=null;
@@ -2818,7 +2834,7 @@ function spaceMapBlock(starId){
     return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
   }
   img.addEventListener("mousemove", function(e){
-    if(wrap._panning || !DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
+    if(wrap._panning || !DATA || !img.naturalWidth){ info.clear(); return; }
     var r=img.getBoundingClientRect();
     var sx=img.naturalWidth/r.width, sy=img.naturalHeight/r.height;
     var ix=(e.clientX-r.left)*sx, iy=(e.clientY-r.top)*sy;
@@ -2829,7 +2845,7 @@ function spaceMapBlock(starId){
       var d=Math.hypot(xy[0]-ix, xy[1]-iy);
       if(d<bestD){ bestD=d; best=p; }
     });
-    if(!best){ tip.style.opacity=0; return; }
+    if(!best){ info.clear(); return; }
     var lines=[kindIcon(best.kind)+(best.kind==="planet"?" #"+best.id+" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
     if(best.kind==="ship"){
       lines.push(best.name||"?");
@@ -2839,12 +2855,9 @@ function spaceMapBlock(starId){
       lines.push(t("su_cargo")+" "+best.cargo_items);
       lines.push(best.moving? "v=("+best.vx+", "+best.vy+")" : t("su_stopped"));
     }
-    tip.innerHTML=""; lines.forEach(function(l){ tip.appendChild(el("div",{},[l])); });
-    tip.style.left=(e.clientX-wrap.getBoundingClientRect().left+12)+"px";
-    tip.style.top=(e.clientY-wrap.getBoundingClientRect().top+12)+"px";
-    tip.style.transform="none"; tip.style.opacity=1;
+    info.show(lines);
   });
-  img.addEventListener("mouseleave", function(){ tip.style.opacity=0; });
+  img.addEventListener("mouseleave", function(){ info.clear(); });
   var pcount=el("span",{class:"muted small"},["🪐 …"]);
   var legend=el("div",{class:"chart-legend",style:"margin-top:6px"},[
     lgSwatch("255,225,140",t("su_star")), lgSwatch("190,175,230",t("su_planets")),
@@ -2869,14 +2882,14 @@ function spaceMapBlock(starId){
     }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
   }
   findIn.addEventListener("keydown",function(e){ if(e.key==="Enter") runFind(); });
-  attachDragPan(wrap, tip, zoom);
+  attachDragPan(wrap, info, zoom);
   return el("div",{},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("span",{class:"muted small"},["🔍"]), zoom, stat, pcount ]),
     el("div",{class:"row",style:"gap:6px;flex-wrap:wrap;margin-bottom:6px"},[
       findIn, el("button",{class:"small",onclick:runFind},[t("mf_go")]) ]),
     findOut,
-    wrap, legend,
+    info.el, wrap, legend,
     el("div",{class:"muted small",style:"margin-top:4px"},[t("su_scatter_note")]) ]);
 }
 function pfFindCard(){
