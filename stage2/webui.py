@@ -1631,6 +1631,7 @@ var T = {
   err_auth:"Сессия истекла — войдите заново", err_net:"Нет связи с сервером",
   pl_head:"Игроки локального сервера", pl_world:"Мир", pl_registered:"зарегистрировано",
   pl_online:"онлайн (по аналитике)", pl_online_gs:"онлайн (game_state)", pl_bymap:"По картам",
+  pl_stale:"исправлено", pl_stale_hint:"столько игроков висели «онлайн» с прошлого запуска сервера (не было exit после падения/рестарта) — панель сама сверила их последний вход со временем последнего Server ready и убрала из счёта",
   pl_space_note:"карта 0 = космос: игра считает игроков онлайн, фактически могут быть оффлайн",
   pl_only_online:"Только онлайн", pl_search:"поиск по имени",
   pl_col_status:"Статус", pl_col_map:"Карта", pl_col_pos:"Коорд.",
@@ -1753,6 +1754,7 @@ var T = {
   err_auth:"Session expired — log in again", err_net:"No connection to server",
   pl_head:"Local server players", pl_world:"World", pl_registered:"registered",
   pl_online:"online (analytics)", pl_online_gs:"online (game_state)", pl_bymap:"By map",
+  pl_stale:"corrected", pl_stale_hint:"this many players were stuck \"online\" since before the last server start (no exit after a crash/restart) — the panel compared their last login to the last Server ready time and cleared them",
   pl_space_note:"map 0 = space: the game counts these players online, they may actually be offline",
   pl_only_online:"Online only", pl_search:"search by name",
   pl_col_status:"Status", pl_col_map:"Map", pl_col_pos:"Coords",
@@ -2175,7 +2177,9 @@ function renderPlayers(){
   sum.appendChild(card(t("pl_world"),[
     ["", j.world||"?"],
     [t("pl_registered"), String(tt.registered||0)],
-    [t("pl_online"), pill(true,String(tt.online_analytics||0))],
+    [t("pl_online"), el("span",{},[pill(true,String(tt.online_analytics||0)),
+      tt.stale_online? el("span",{class:"muted small",style:"margin-left:6px",
+        title:t("pl_stale_hint")},["("+t("pl_stale")+" "+tt.stale_online+")"]) : null].filter(Boolean))],
     [t("pl_online_gs"), el("span",{title:tt.online_space? t("pl_space_note"):null},[String(tt.online_game_state||0)+(tt.online_space? "  (космос "+tt.online_space+" ⚠)":"")])]
   ]));
   var bm=(j.by_map||[]);

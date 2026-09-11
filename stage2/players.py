@@ -15,8 +15,13 @@
 * ``Logs\\game_state.txt`` — авторитетные счётчики онлайна по картам (без имён).
 
 Онлайн игрока = его последнее событие в ``analytics.txt`` — ``enter``. После
-перезапуска сервера ``exit`` может потеряться, поэтому рядом отдаём и разбивку из
-``game_state.txt``.
+падения/перезапуска сервера ``exit`` не пишется, и такой игрок обычным способом
+«висел» бы онлайн навсегда — поэтому ``parse_analytics()`` сверяет время
+последнего ``enter`` с последним ``Server ready`` из ``Logs\\world_performance.txt``
+(см. ``_last_restart_epoch``): ``enter`` раньше последнего рестарта сервера в
+счёт не идёт, это точно оборванная старым процессом сессия. Плюс рядом всегда
+отдаём авторитетную сумму из ``game_state.txt`` (сервер переписывает его живым
+снапшотом каждые несколько секунд) — для сверки.
 
 ``snapshot(cfg)`` -> dict (см. конец файла). Пароли (``code`` / ``Code``) в выдачу
 не попадают ни в каком виде.
@@ -1934,17 +1939,10 @@ def _resolve_item(world_dir, item):
     return None, None
 
 
-def _last_event(world_dir, uid):
-    last = None
-    for ln in _read_text(os.path.join(world_dir, "analytics.txt")).splitlines():
-        m = _LINE_RX.match(ln)
-        if m and int(m.group(3)) == uid:
-            last = m.group(2)
-    return last  # "enter" | "exit" | "register" | None
-
-
 def _is_offline(world_dir, uid):
-    return _last_event(world_dir, uid) != "enter"
+    """Офлайн ли игрок ПРЯМО СЕЙЧАС (см. ``_online_now`` — с поправкой на
+    рестарт сервера). Используется как гейт перед правкой инвентаря/модерацией."""
+    return not _online_now(world_dir).get(uid, False)
 
 
 def _game_edit_backup(cfg, path):
@@ -2447,8 +2445,44 @@ def player_code(cfg, uid):
     return None
 
 
+_RESTART_CACHE = {}  # world_dir -> (mtime_of_world_performance.txt, epoch|None)
+
+
+def _last_restart_epoch(world_dir):
+    """Эпоха последнего 'Server ready' в Logs\\world_performance.txt — момент,
+    когда текущий процесс сервера поднялся. None, если файла/строки нет.
+
+    Нужна, чтобы отличить реально онлайн-игрока от «зависшего»: после
+    падения/принудительного рестарта сервер не успевает дописать ``exit`` в
+    ``analytics.txt``, и последний ``enter`` такого игрока иначе остался бы
+    «онлайн» до его следующего живого входа."""
+    p = os.path.join(world_dir, "Logs", "world_performance.txt")
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return None
+    cached = _RESTART_CACHE.get(world_dir)
+    if cached and cached[0] == mt:
+        return cached[1]
+    epoch = None
+    for ln in _read_text(p, tail_bytes=300_000).splitlines():
+        if "Server ready" in ln and len(ln) >= 19:
+            ep = _to_epoch(ln[:19])
+            if ep:
+                epoch = ep  # берём последнюю строку с "Server ready" в файле
+    _RESTART_CACHE[world_dir] = (mt, epoch)
+    return epoch
+
+
 def parse_analytics(path):
-    """-> (per_user: {id: {...}}, events: [ {ts, epoch, kind, id, secs} ] в порядке файла)."""
+    """-> (per_user: {id: {...}}, events: [ {ts, epoch, kind, id, secs} ] в порядке файла).
+
+    ``per[uid]["online"]`` учитывает поправку на последний рестарт сервера
+    (см. ``_last_restart_epoch``): если последний ``enter`` игрока случился ДО
+    того, как текущий процесс сервера поднялся, это точно оборванная старым
+    процессом сессия — считаем офлайн (и ставим ``stale_online=True``, чтобы
+    было видно, что поправка сработала), а не «висим онлайн» до следующего
+    захода игрока."""
     per = {}
     events = []
     for ln in _read_text(path).splitlines():
@@ -2473,7 +2507,21 @@ def parse_analytics(path):
             u["last_exit"] = ts
             u["session_secs"] = int(extra) if extra else 0
         u["last_epoch"] = ep
+
+    cutoff = _last_restart_epoch(os.path.dirname(path))
+    if cutoff:
+        for u in per.values():
+            if u["online"] and u["last_epoch"] and u["last_epoch"] < cutoff:
+                u["online"] = False
+                u["stale_online"] = True
     return per, events
+
+
+def _online_now(world_dir):
+    """{uid: bool} — кто сейчас online по ``analytics.txt`` (с поправкой на
+    последний рестарт сервера, см. ``parse_analytics``)."""
+    per, _ = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+    return {uid: u["online"] for uid, u in per.items()}
 
 
 def load_user_list(world_dir):
@@ -3040,11 +3088,7 @@ def space_report(cfg):
     if not world_dir:
         return {"ok": False, "error": "каталог мира не найден"}
     names = load_user_list(world_dir)
-    last = {}
-    for ln in _read_text(os.path.join(world_dir, "analytics.txt")).splitlines():
-        m = _LINE_RX.match(ln)
-        if m:
-            last[int(m.group(3))] = m.group(2)
+    online_now = _online_now(world_dir)
 
     d = os.path.join(world_dir, "Data", "users")
     try:
@@ -3065,7 +3109,7 @@ def space_report(cfg):
         if raw.get("spaceUnitId"):
             has_ship += 1
         if raw.get("mapId") == 0:
-            online = last.get(uid) == "enter"
+            online = online_now.get(uid, False)
             in_space.append({"id": uid, "name": names.get(uid) or ("id %d" % uid),
                              "level": raw.get("unitLevel"), "online": online,
                              "space_unit": raw.get("spaceUnitId"),
@@ -3121,6 +3165,7 @@ def snapshot(cfg, recent_limit=40):
             "id": uid,
             "name": names.get(uid) or a.get("name") or ("id %s" % uid),
             "online": bool(a.get("online")),
+            "stale_online": bool(a.get("stale_online")),
             "first_seen": a.get("first_seen"),
             "last_enter": a.get("last_enter"),
             "last_exit": a.get("last_exit"),
@@ -3138,11 +3183,13 @@ def snapshot(cfg, recent_limit=40):
         })
 
     online_ids = [u["id"] for u in users if u["online"]]
+    stale_n = sum(1 for u in users if u["stale_online"])
     recent = []
     for e in events[-recent_limit:][::-1]:
         recent.append({"ts": e["ts"], "kind": e["kind"], "id": e["id"],
                        "name": names.get(e["id"], "id %s" % e["id"]), "secs": e["secs"]})
 
+    restart_ep = _last_restart_epoch(world_dir)
     return {
         "ok": True,
         "world": os.path.basename(world_dir.rstrip("\\/")),
@@ -3154,6 +3201,9 @@ def snapshot(cfg, recent_limit=40):
             "online_analytics": len(online_ids),
             "online_game_state": sum(x["count"] for x in by_map),
             "online_space": next((x["count"] for x in by_map if x["map"] == 0), 0),
+            "stale_online": stale_n,
+            "last_restart": (datetime.fromtimestamp(restart_ep).strftime("%Y-%m-%d %H:%M:%S")
+                              if restart_ep else None),
         },
         "by_map": by_map,
         "users": users,
