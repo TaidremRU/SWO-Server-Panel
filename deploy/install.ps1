@@ -108,7 +108,25 @@ New-NetFirewallRule -DisplayName 'SigmaSteamBot Web UI' -Direction Inbound -Acti
 Write-Output "[ok] фаервол: входящий TCP $WebPort разрешён (веб-панель) -> http://<ip-vm>:$WebPort/  (вход admin/admin, смените при первом входе)"
 
 Get-ScheduledTask -TaskName 'SigmaSteamBot','SigmaNav','SigmaConsoleGuard' | Select-Object TaskName, State | Format-Table -AutoSize
+
+# --- запуск сейчас, чтобы после setup.bat панель уже работала без ручных шагов ---
+try {
+  Start-ScheduledTask -TaskName 'SigmaSteamBot'
+  Write-Output "[ok] задача SigmaSteamBot запущена"
+  Start-Sleep -Seconds 5
+  try {
+    $r = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$WebPort/" -TimeoutSec 5
+    Write-Output "[ok] веб-панель отвечает: http://127.0.0.1:$WebPort/  (HTTP $($r.StatusCode))"
+  } catch {
+    Write-Output "[--] веб-панель пока не отвечает на порту $WebPort — это нормально в первые 10-15 сек (запуск Python), либо смотрите $BaseDir\logs\supervisor.log"
+  }
+} catch {
+  Write-Output "[--] не удалось запустить задачу SigmaSteamBot автоматически: $_"
+  Write-Output "     Запустите вручную:  Start-ScheduledTask -TaskName SigmaSteamBot"
+}
+
 Write-Output ""
-Write-Output "Готово. Запустить сейчас:  Start-ScheduledTask -TaskName SigmaSteamBot"
-Write-Output "Либо двойной клик по ярлыку 'Запустить SigmaSteamBot' на рабочем столе."
+Write-Output "Готово. Панель: http://<ip-этой-машины>:$WebPort/  (вход admin/admin, панель попросит сменить пароль)."
+Write-Output "Telegram-токен, пути к игре и всё остальное — во вкладке «Настройки» самой панели, редактировать config.json руками не обязательно."
+Write-Output "Ярлык 'Запустить SigmaSteamBot' на рабочем столе — если задачу когда-нибудь остановят (/stopbot), включить обратно можно им."
 Write-Output "Логи: $BaseDir\logs\supervisor.log"

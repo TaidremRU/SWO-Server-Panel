@@ -56,20 +56,28 @@ copy /Y "%SRC%app\*.ps1" "%BASE%\" >nul
 copy /Y "%SRC%install.ps1" "%BASE%\" >nul
 if not exist "%BASE%\config.json" (
   copy /Y "%SRC%app\config.example.json" "%BASE%\config.json" >nul
-  echo [ok] создан %BASE%\config.json  — ОТРЕДАКТИРУЙТЕ его (token, allowed_user_ids, proxy, пути, base_dir)
+  REM base_dir в шаблоне — плейсхолдер C:\Users\USERNAME\sigmabot; подставляем реальный путь
+  REM установки, чтобы дальше НЕ требовалось руками редактировать config.json.
+  "%BASE%\venv\Scripts\python.exe" -c "import json,sys; p=sys.argv[1]; b=sys.argv[2]; d=json.load(open(p,encoding='utf-8')); d['base_dir']=b; json.dump(d, open(p,'w',encoding='utf-8'), ensure_ascii=False, indent=2)" "%BASE%\config.json" "%BASE%"
+  echo [ok] создан %BASE%\config.json (base_dir подставлен автоматически)
 ) else (
   echo [--] config.json уже есть, не трогаю
 )
 
-REM --- задачи планировщика / автологон ---
+REM --- задачи планировщика / автологон / автозапуск ---
 set "PSARGS=-BaseDir "%BASE%""
 if defined AUTO set "PSARGS=%PSARGS% -Autologon -User "%AUSER%" -Password "%APASS%""
 powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%\install.ps1" %PSARGS%
 
 echo.
-echo === Дальше вручную ===
-echo  1) Отредактируйте %BASE%\config.json
-echo  2) Проверьте: "%BASE%\venv\Scripts\python.exe" "%BASE%\selftest.py"
-echo  3) Запуск:   powershell Start-ScheduledTask -TaskName SigmaSteamBot
+echo === Готово ===
+echo  Веб-панель уже должна работать (install.ps1 сам запустил задачу SigmaSteamBot).
+echo  Откройте её и войдите (admin / admin, панель попросит сменить пароль при первом входе).
+echo  Всё остальное (Telegram-токен, пути к игре, список игроков и т.п.) настраивается
+echo  прямо в панели, вкладка «Настройки» — редактировать config.json руками не нужно.
+echo.
+echo  Если панель не открылась сразу, подождите 10-15 сек или проверьте:
+echo    "%BASE%\venv\Scripts\python.exe" "%BASE%\selftest.py"
+echo    %BASE%\logs\supervisor.log
 echo.
 endlocal

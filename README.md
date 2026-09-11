@@ -1,10 +1,12 @@
 <!-- SPDX note: private project — TaidremRU/SWO-Server-Panel (ex sigmabot_win) -->
 
-# SigmaSteamBot
+# SWO Server Panel
 
-**RU:** Автозапуск, авто-вход и Telegram-управление игрой **Sigma World Online** (Steam AppID `1690980`) на выделенной Windows-VM. Держит Steam и игру запущенными, сам проходит вход в мир, отдаёт статус/скриншоты и список публичных серверов в Telegram, следит за присутствием нужного сервера в списке Steam-лобби.
+*(ex `SigmaSteamBot` — проект перерос простой лаунчер-бот и стал полноценной серверной панелью; история и репозиторий те же, см. [«Переименование»](#переименование--renaming))*
 
-**EN:** Auto-start, auto-login and Telegram control for the game **Sigma World Online** (Steam AppID `1690980`) on a dedicated Windows VM. Keeps Steam and the game running, walks the in-game login itself, serves status / screenshots / the public server list over Telegram, and watches whether a specific server stays present in the Steam lobby list.
+**RU:** Автозапуск, авто-вход и веб-панель + Telegram-бот для управления сервером **Sigma World Online** (Steam AppID `1690980`) на выделенной Windows-VM. Держит Steam и игру запущенными, сам проходит вход в мир, отдаёт статус/скриншоты и список публичных серверов. Плюс — инструментарий аналитики и реверс-инжиниринга игровых данных: карта мира и бинарных `.dt`-карт (террейн, машины, контейнеры, владение землёй), карта космоса и звёздных систем/кластеров, поиск предметов по всему миру и у всех игроков, детект твинков, трекинг исследований, карточки игроков, бэкапы, безопасная правка инвентаря — всё через один браузер, без доступа к серверу.
+
+**EN:** Auto-start, auto-login and a web panel + Telegram bot for running a **Sigma World Online** (Steam AppID `1690980`) server on a dedicated Windows VM. Keeps Steam and the game running, walks the in-game login itself, serves status / screenshots / the public server list. Plus an analytics and reverse-engineering toolkit for the game's own data: a world map and binary `.dt`-map viewer (terrain, machines, containers, land ownership), a space/star-system/cluster map, world- and player-wide item search, twink detection, research tracking, player cards, backups, and safe inventory editing — all from one browser tab, no server shell access needed.
 
 **Языки / Languages:** [Русский](#русский) · [English](#english)
 
@@ -122,9 +124,10 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Дашборд** — карты VM / Steam / игра / watchdog / внутренности бота (аптайм процесса, потоки, очередь отправки, возраст снапшота) / монитор сервера, плюс живой скриншот экрана VM. Автообновление раз в 5 c только при активной вкладке; статус берётся из `last_snapshot`, который пишет watchdog, — нагрузки на супервизор почти нет. Кнопка «Обновить (живой опрос)» дёргает `sysinfo.collect()` по требованию.
 - **Действия** — то же, что у бота: `startgame` / `stopgame` / `restartgame` (перезапуск + вход) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (с подтверждением) + `restarttask` (чистый перезапуск задачи `SigmaSteamBot` отдельным процессом) и `testalert` (тестовое сообщение админам через `bot.push_alert`). Длинные операции идут заданием, панель опрашивает результат.
 - **Серверы** — тот же список Steam-лобби (`serverlist.fetch`, кэш 45 c), AstralSigma наверху.
-- **Роли** — правка `telegram.allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`. Сохранение пишет `config.json` в чистом UTF-8 (`common.save_config`, без BOM) и **применяет роли на лету** (`Bot.apply_roles`) — перезапуск не нужен. Координаты `login_flow` из веба не редактируются намеренно.
+- **Настройки** — полноценный редактор `config.json` прямо из браузера (см. ниже), плюс роли (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) применяются на лету (`Bot.apply_roles`) без перезапуска.
 - **Логи** — хвост `supervisor.log` (фильтр по уровню, автообновление, скачивание), аудит панели (`webui_audit.log` — кто/когда/что нажал, отдельно от Telegram-аудита) и галерея скринов последовательности входа (`logs/nav/*.png`).
-- **Игроки** — список и онлайн-статус игроков локального сервера (см. ниже).
+- **Игроки** — список и онлайн-статус игроков локального сервера + поиск предмета у всех игроков (см. ниже).
+- **Карта** — карта мира, разбор бинарных `.dt`-карт и карта космоса/звёздных систем (см. ниже).
 
 Интерфейс двуязычный (ru/en, тумблер в шапке, выбор в `localStorage` браузера), тёмная/светлая тема. Отключить панель целиком — `webui.enabled = false` в `config.json`.
 
@@ -144,9 +147,24 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Онлайн (7 дней)** — реконструкция числа онлайн по времени из `enter`/`exit`, пик за 7 д, сейчас.
 - **Рост** — регистрации и DAU по дням, retention D1 / D7.
 - **Топы** — по уровню, по часам; **кланы** (`clans.json` по рейтингу); **бан-лист**; **стафф** + история ролей; **помесячный топ** (`reward_order.txt`); распределения по уровням и странам.
-- **Мир · карты** — онлайн / аватары / территории по картам (**карта 0 = космос**: игра считает таких игроков онлайн, фактически могут быть оффлайн); **территории** — все `userTerritories` 286 игроков с владельцами (фильтр по карте). Ссылка **«разобрать .dt»** у каждой карты → полный разбор бинарного `Data\maps\map<N>.dt` (`stage2/mapdt.py` — точный порт сериализации из исходника игры, `Map.Load`/`MapCell.Read`/…): гистограмма блоков/растительности, машины (печь/дробилка/…), точки руды, содержимое всех наземных/подземных контейнеров мира, сетка владения землёй (8×8-блоки → владелец), газ/заражение, кислородная карта. Основная карта — 512×512, ~13 c на первый разбор, дальше из кэша. Живых животных в файле нет.
-- **Поиск предмета в мире** (карточка «🔎 Поиск предмета в мире» на вкладке «Статистика») — ввести id или имя предмета (можно подстроку, напр. `tech_booster`), выбрать карту или «весь мир» → для каждого совпадения выводятся координаты `(x, y)`, контейнер (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), количество и прочность. Скан всего мира — до ~2 мин (72 карты), результат кэшируется по mtime каждой карты. Бэкенд: `players.mapdt_find(cfg, map|all, item)` / `mapdt.find_item()`, эндпоинт `GET /api/mapdt-find?map=N|all&item=<id|имя>`.
 - **Здоровье сервера** — последний `Server ready` (`world_performance.txt`: `startupMs`, кластеры, `managedMb`) + медленные фазы старта; **лаг-события** (медленные тики из `time_shedule*.txt` — всего, по дням, топ функций); ошибки коннекта (`error_game*.txt`). `memory_log.txt` игрой не заполняется.
+
+Онлайн/аватары/территории по картам и поиск предметов вынесены в отдельную вкладку **«Карта»** — ниже.
+
+### Карта
+
+Вкладка **«Карта»** — вся работа с картами и бинарными данными мира, реверс-инжиниренными без исходников игры (см. `stage2/mapdt.py`, `stage2/players.py`):
+
+- **Таблица мира** — по каждой карте: онлайн, аватары, территории, размер. **Карта 0 = космос** — игра считает таких игроков онлайн, хотя фактически они могут быть оффлайн. Внемировые (космические) карты подписаны именем и координатами звёздной системы (`🪐 Ryk Xive (x, y)`), которые находятся сопоставлением ID карты с объектом в `Data\world\star<N>.json` — это соответствие подтверждено на всех 26 внемировых картах прод-сервера.
+- **Разбор `.dt`** — ссылка «разобрать .dt» у каждой карты → полный разбор бинарного `Data\maps\map<N>.dt` (точный порт сериализации `Map.Load`/`MapCell.Read`/… из исходника игры): гистограмма блоков/растительности, машины (печь/дробилка/…), точки руды, содержимое всех наземных/подземных контейнеров, сетка владения землёй (8×8-блоки → владелец), газ/заражение, кислородная карта. Основная карта — 512×512, ~13 c на первый разбор, дальше из кэша.
+  - **Просмотрщик карты** — PNG-рендер (свой энкодер, без Pillow) с наведением (блок/владелец под курсором), приближением колёсиком мыши (25–400 %) с зумом к курсору, перетаскиванием («рука»), свободным вращением (по умолчанию 315°, центрируется в любом повороте) и наложением сетки владения землёй.
+- **Территории** — все `userTerritories` игроков с владельцами, фильтр по карте.
+- **Поиск предмета в мире** — id или имя предмета (можно подстроку, напр. `tech_booster`), выбрать карту или «весь мир» → для каждого совпадения координаты `(x, y)`, контейнер (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), количество и прочность. Скан всего мира — до ~2 мин (72 карты), кэш по mtime каждой карты. Эндпоинт `GET /api/mapdt-find?map=N|all&item=<id|имя>`.
+- **Космос** — звёздные системы и галактика, распарсенные из `Data\space\units.dt` (корабли/метеориты/капсулы — порт `ZData.SpaceUnit.Read`) и `Data\world\star<N>.json`/`cluster<N>.json` (реверс-инжиниринг без исходников, ID объекта = порядковый номер в файле, подтверждён совпадением с игровым ID):
+  - переключатель **кластер → звёздная система** (в игре несколько кластеров, в каждом — несколько систем);
+  - точечная карта системы (планеты/астероиды/корабли/метеориты/капсулы), приближение и перетаскивание как у `.dt`-карты, координаты под курсором;
+  - **поиск объекта по имени/подстроке** в системе — совпадение подсвечивается на карте кольцом;
+  - корабли без единого тела (планеты/метеорита) ближе 10000 единиц скрываются из списка и со шкалы — не растягивают масштаб карты «убежавшими» кораблями.
 
 ### Твинки
 
@@ -175,6 +193,8 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 Каталог мира — `config.json → players`: `localserver_root` (пусто = путь по умолчанию выше), `world` / `world_dir` (пусто = мир с самым свежим `analytics.txt`). Данные кэшируются в панели на 15 c. Пароли (`code` / `Code`) вырезаются на сервере и в выдачу карточки/списка не попадают. Отключить — `players.enabled = false`.
 
+**Поиск предмета у игроков** (карточка «🔎 Поиск предмета у игроков» на этой же вкладке) — id или имя предмета → по каждому игроку количество на складе, при себе и всего, онлайн-статус. В отличие от поиска по картам (вкладка «Карта»), здесь ищется по инвентарям всех аккаунтов, а не по объектам на местности. Эндпоинт `GET /api/player-item-find?item=<id|имя>`.
+
 **Карточка игрока** (клик по нику в таблице или ленте) — модальное окно:
 
 - **Профиль:** уровень, рейтинг, страна, видеокарта, разрешение экрана, всего часов, «последняя сессия N ч назад», бан + когда снят
@@ -188,30 +208,40 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Под своим паролем панели** (повторная проверка `auth.verify` + throttle + аудит): кнопка **«Показать пароль»** игрока (`code`) и кнопка **«Приваты и IP»** — приватные сообщения игрока (`chat_privat.txt`) и история IP (`log_net_ip.txt`). Каждый показ пишется в `webui_audit.log`.
 - **Правка инвентаря — только для оффлайн-игрока** (последнее событие в `analytics.txt` = `exit`; повторная проверка прямо перед записью; при входе игрока запись отменяется). Тоже под своим паролем панели. **Выдать на склад** (`user<N>.json → Inventory.items`): предмет по имени/id из `Data\items.json` + количество, с разбивкой по `stack`, `life` = `items.life × 90000` (или копируется у уже имеющейся записи того же типа), инструментам ставится полная `durability`. **Изъять** со склада или из инвентаря при себе (`unit<id>.json → Inventory.items`): уменьшает `count`, не больше, чем есть. Перед каждой записью — бэкап файла в `logs\game_edits\<ts>\`; правится только `Inventory.items`; атомарная запись; guard по `mtime` (если файл изменился между чтением и записью — отмена). Всё пишется в `webui_audit.log` («ИНВЕНТАРЬ игрока #N: give/take …»).
 
-### Установка
+### Установка одним скриптом
 
-Подробный гайд — [`deploy/README.md`](deploy/README.md). Кратко: скопировать `deploy\` на VM → `setup.bat [BASE] [/autologon USER PASS]` → заполнить `%BASE%\config.json` → `selftest.py` → `Start-ScheduledTask -TaskName SigmaSteamBot`. Шаблон конфига — [`deploy/app/config.example.json`](deploy/app/config.example.json).
+На чистой Windows-VM, из cmd **от администратора**:
 
-### Ключевые поля `config.json`
+```bat
+cd deploy
+setup.bat
+```
+
+Скрипт сам: находит Python, ставит venv и зависимости, копирует файлы, создаёт `config.json` из шаблона (с уже подставленным `base_dir`), регистрирует все 3 задачи планировщика, ставит правило фаервола на порт панели — и **сам запускает** задачу `SigmaSteamBot`. Веб-панель без Telegram-токена, реального пути к игре и т.п. **уже поднимается и открывается** (`bot.py` переживает пустой/плейсхолдерный токен — просто не сможет слать сообщения, пока его не заполнят). В конце скрипт печатает адрес панели.
+
+Дальше — зайти в браузере на `http://<ip-vm>:8080/`, войти (**`admin` / `admin`**, панель тут же попросит сменить пароль) и донастроить всё во вкладке **«Настройки»**: Telegram-токен и ID админов, прокси, монитор сервера, источник данных «Игроков», игровые аккаунты для авто-входа. Руками редактировать `config.json` для этого не нужно.
+
+Необязательные параметры: `setup.bat [BASE_DIR] [/autologon USER PASSWORD]` — свой путь установки и/или автологон Windows под указанным пользователем (нужен, чтобы задачи `AtLogon` вообще стартовали без физического входа в сессию). Путь к игре (`game_exe` / `steam_exe` / `game_install_dir`) и разрешение окна логина — вне схемы настроек панели (см. «Ограничения» ниже); их правит либо `config.json` вручную, либо (для `login_flow`) продвинутый JSON-редактор во вкладке «Настройки». Подробный гайд с ручными шагами и диагностикой — [`deploy/README.md`](deploy/README.md); шаблон конфига — [`deploy/app/config.example.json`](deploy/app/config.example.json).
+
+### Настройки из панели
+
+Вкладка **«Настройки»** — редактор `config.json` без ручной правки файла: общие параметры, веб-панель, watchdog, монитор сервера, источник данных «Игроков», Telegram (токен полем `secret` — один раз введённый не показывается повторно), Steam/список серверов. Плюс:
+
+- **Игровые аккаунты** — список логин/пароль с выбором активного (для авто-входа несколькими аккаунтами на одной VM);
+- **`login_flow` (продвинутое)** — сырой JSON координат клика входа, для нестандартного разрешения окна;
+- сохранение пишет `config.json` в чистом UTF-8 без BOM; если правка требует перезапуска — панель предлагает кнопку «Перезапустить задачу» сразу же.
+
+### Ключевые поля `config.json`, которые остаются вне UI
 
 | Поле | Назначение |
 |---|---|
 | `game_appid` | `1690980` |
-| `base_dir` | папка установки (с `\\`) |
+| `steam_exe` / `game_exe` / `game_install_dir` | пути Steam и игры — стандартные по умолчанию, менять только если игра стоит не туда |
 | `steam_api_dll` | путь к `steam_api64.dll` **игры** (для `/servers` и монитора) |
-| `steam_web_api_key` | ключ Steam Web API — запасной путь списка серверов |
-| `python_exe` | python для дочерних скриптов; пусто → авто (`sys.executable`, `pythonw`→`python`) |
-| `monitor` | `{ enabled, server_name, interval_seconds, misses_before_alert, repeat_alert_seconds }` |
-| `webui` | `{ enabled, host, port }` — веб-панель; `0.0.0.0:8080` по умолчанию. Креды — в `webui_auth.json` (не в конфиге) |
-| `players` | `{ enabled, localserver_root, world, world_dir }` — вкладка «Игроки»; всё пусто = автоопределение каталога мира |
-| `telegram.token` | токен @BotFather |
-| `telegram.allowed_user_ids` / `moderator_user_ids` / `super_admin_id` | роли (правятся и из веб-панели) |
-| `telegram.default_lang` | `ru` \| `en` |
-| `telegram.proxy` | `socks5h://HOST:PORT` — клиент всегда идёт через SOCKS5 |
-| `game_window_size` / `login_flow` | координаты кликов входа (жёстко под 1024×768) |
-| `watchdog.*` | авто-поддержание, лимит перезапусков, тайминги авто-входа |
+| `game_window_size` | размер окна для координат `login_flow` (по умолчанию под 1024×768) |
+| `base_dir` | папка установки — подставляется автоматически `setup.bat` |
 
-`config.json` и `key.txt` — в `.gitignore` (секреты). Шаблон — `deploy/app/config.example.json`.
+Всё остальное (роли, Telegram, монитор, watchdog, источник данных игроков, Steam Web API ключ, игровые аккаунты, `login_flow`) — во вкладке «Настройки», см. выше. `config.json` и `key.txt` — в `.gitignore` (секреты). Шаблон — `deploy/app/config.example.json`.
 
 ### Эксплуатация
 
@@ -346,9 +376,10 @@ An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webu
 - **Dashboard** — VM / Steam / game / watchdog / bot-internals (process uptime, threads, send queue, snapshot age) / server-monitor cards, plus a live VM screenshot. Auto-refresh every 5 s only while the tab is visible; status comes from the `last_snapshot` the watchdog already writes — near-zero extra load on the supervisor. The “Refresh (live poll)” button calls `sysinfo.collect()` on demand.
 - **Actions** — same as the bot: `startgame` / `stopgame` / `restartgame` (restart + login) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (confirmed) plus `restarttask` (clean restart of the `SigmaSteamBot` task from a detached process) and `testalert` (a test message to admins via `bot.push_alert`). Long operations run as a job the panel polls.
 - **Servers** — the same Steam-lobby list (`serverlist.fetch`, 45 s cache), AstralSigma pinned to the top.
-- **Roles** — editing `telegram.allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`. Saving writes `config.json` as plain UTF-8 (`common.save_config`, no BOM) and **applies the roles live** (`Bot.apply_roles`) — no restart needed. `login_flow` coordinates are intentionally not editable from the web.
+- **Settings** — a full `config.json` editor right in the browser (see below), plus roles (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) applied live (`Bot.apply_roles`) with no restart needed.
 - **Logs** — tail of `supervisor.log` (level filter, auto-refresh, download), the panel audit (`webui_audit.log` — who/when/what, separate from the Telegram audit) and a gallery of login-sequence screenshots (`logs/nav/*.png`).
-- **Players** — local-server player list and online status (see below).
+- **Players** — local-server player list and online status, plus an item search across all players' inventories (see below).
+- **Map** — the world map, binary `.dt`-map viewer, and the space/star-system map (see below).
 
 The interface is bilingual (ru/en, header toggle, choice in the browser `localStorage`), with a dark/light theme. Disable the panel entirely with `webui.enabled = false` in `config.json`.
 
@@ -368,9 +399,24 @@ The **"Stats"** tab — server-wide analytics:
 - **Online (7 days)** — online count reconstructed over time from `enter`/`exit`, 7-day peak, now.
 - **Growth** — registrations and DAU per day, retention D1 / D7.
 - **Tops** — by level, by hours; **clans** (`clans.json` by rating); **ban list**; **staff** + role history; **monthly top** (`reward_order.txt`); level and country distributions.
-- **World · maps** — online / avatars / territories per map (**map 0 = space**: the game counts these players as online though they may be offline); **territories** — every `userTerritories` of the 286 players with owners (map filter). A **"parse .dt"** link per map → full decode of the binary `Data\maps\map<N>.dt` (`stage2/mapdt.py` — an exact port of the game's serialization, `Map.Load`/`MapCell.Read`/…): histograms of blocks/vegetation, machines (furnace/crusher/…), ore points, the contents of every world ground/underground container, the land-ownership grid (8×8 blocks → owner), gas/infection, oxygen map. The main map is 512×512, ~13 s for the first parse, cached afterwards. There are no live animals in the file.
-- **Find an item in the world** ("🔎 Find an item in the world" card on the Stats tab) — type an item id or name (a substring works, e.g. `tech_booster`), pick a map or "whole world" → every match lists its `(x, y)`, the container (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), the count and durability. A whole-world scan takes up to ~2 min (72 maps); results are cached per map mtime. Backend: `players.mapdt_find(cfg, map|all, item)` / `mapdt.find_item()`, endpoint `GET /api/mapdt-find?map=N|all&item=<id|name>`.
 - **Server health** — last `Server ready` (`world_performance.txt`: `startupMs`, clusters, `managedMb`) + slow startup phases; **lag events** (slow ticks from `time_shedule*.txt` — total, per day, top functions); connection errors (`error_game*.txt`). `memory_log.txt` isn't populated by the game.
+
+Per-map online/avatars/territories and item search moved to their own **"Map"** tab — below.
+
+### Map
+
+The **"Map"** tab — everything about maps and the game's binary world data, reverse-engineered without access to the game's source (see `stage2/mapdt.py`, `stage2/players.py`):
+
+- **World table** — per map: online, avatars, territories, size. **Map 0 = space** — the game counts these players as online even though they may actually be offline. Off-world (space) maps are labeled with the name and coordinates of their star system (`🪐 Ryk Xive (x, y)`), found by matching the map ID to an object in `Data\world\star<N>.json` — this mapping was verified against all 26 off-world maps on the production server.
+- **`.dt` decoding** — a "parse .dt" link per map → full decode of the binary `Data\maps\map<N>.dt` (an exact port of the game's own `Map.Load`/`MapCell.Read`/… serialization): histograms of blocks/vegetation, machines (furnace/crusher/…), ore points, the contents of every ground/underground container, the land-ownership grid (8×8 blocks → owner), gas/infection, oxygen map. The main map is 512×512, ~13 s for the first parse, cached afterwards.
+  - **Map viewer** — a PNG render (own encoder, no Pillow) with hover info (block/owner under the cursor), mouse-wheel zoom-to-cursor (25–400%), drag-to-pan, free rotation (315° by default, stays centered at any angle), and a land-ownership overlay.
+- **Territories** — every player's `userTerritories` with owners, filterable by map.
+- **Find an item in the world** — type an item id or name (a substring works, e.g. `tech_booster`), pick a map or "whole world" → every match lists its `(x, y)`, the container (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), the count and durability. A whole-world scan takes up to ~2 min (72 maps); cached per map mtime. Endpoint `GET /api/mapdt-find?map=N|all&item=<id|name>`.
+- **Space** — star systems and the galaxy, parsed from `Data\space\units.dt` (ships/meteorites/pods — a port of `ZData.SpaceUnit.Read`) and `Data\world\star<N>.json`/`cluster<N>.json` (reverse-engineered without source; an object's ID is its sequential position in the file, verified to match the in-game ID):
+  - a **cluster → star system** picker (the game has several clusters, each with several systems);
+  - a scatter map of the system (planets/asteroids/ships/meteorites/pods) with the same zoom/pan as the `.dt` viewer, coordinates under the cursor;
+  - **search by name/substring** within a system — a match is highlighted on the map with a ring;
+  - ships with no body (planet or meteorite) within 10,000 units are hidden from the list and the scale, so a stray ship doesn't stretch the whole map.
 
 ### Twinks
 
@@ -389,6 +435,8 @@ The panel's "Players" tab (`players.py`). Reads the files the game's local serve
 
 The world folder is set via `config.json → players`: `localserver_root` (empty = the default path above), `world` / `world_dir` (empty = the world with the freshest `analytics.txt`). The panel caches this for 15 s. Passwords (`code` / `Code`) are stripped server-side and never reach the list/card. Disable with `players.enabled = false`.
 
+**Find an item on players** ("🔎 Find an item on players" card on this same tab) — an item id or name → per player, count in stash, carried, and total, plus online status. Unlike the map-based search (the "Map" tab), this searches every account's inventory rather than objects placed in the world. Endpoint `GET /api/player-item-find?item=<id|name>`.
+
 **Player card** (click a nickname in the table or feed) — a modal with:
 
 - **Profile:** level, rating, country, GPU, screen resolution, total hours, "last session N h ago", ban + when it lifts
@@ -402,30 +450,40 @@ The world folder is set via `config.json → players`: `localserver_root` (empty
 - **Behind the panel admin's own password** (re-checked via `auth.verify` + throttle + audit): a **"Show password"** button for the player's `code`, and a **"DMs & IP"** button — the player's private messages (`chat_privat.txt`) and IP history (`log_net_ip.txt`). Every reveal is written to `webui_audit.log`.
 - **Inventory editing — offline players only** (last `analytics.txt` event is `exit`; re-checked right before the write; if the player logs in the write is aborted). Also behind the panel admin's password. **Give to stash** (`user<N>.json → Inventory.items`): item by name/id from `Data\items.json` + quantity, split by `stack`, `life` = `items.life × 90000` (or copied from an existing entry of the same type), tools get full `durability`. **Take** from stash or from the carried inventory (`unit<id>.json → Inventory.items`): decrements `count`, never more than present. Before every write — a backup of the file to `logs\game_edits\<ts>\`; only `Inventory.items` is touched; atomic write; `mtime` guard (aborts if the file changed between read and write). Everything is written to `webui_audit.log` ("ИНВЕНТАРЬ игрока #N: give/take …").
 
-### Install
+### One-script install
 
-Full guide — [`deploy/README.md`](deploy/README.md). In short: copy `deploy\` to the VM → `setup.bat [BASE] [/autologon USER PASS]` → fill in `%BASE%\config.json` → `selftest.py` → `Start-ScheduledTask -TaskName SigmaSteamBot`. Config template — [`deploy/app/config.example.json`](deploy/app/config.example.json).
+On a clean Windows VM, from an **elevated** cmd prompt:
 
-### Key `config.json` fields
+```bat
+cd deploy
+setup.bat
+```
+
+The script finds Python, creates a venv and installs dependencies, copies the files, creates `config.json` from the template (with `base_dir` already filled in), registers all 3 scheduled tasks, opens a firewall rule for the panel port — and **starts** the `SigmaSteamBot` task itself. The web panel comes up and is reachable **without** a Telegram token, a real game path, etc. already set (`bot.py` tolerates an empty/placeholder token just fine — it simply can't send messages until one is configured). The script prints the panel's address at the end.
+
+From there, open `http://<vm-ip>:8080/` in a browser, log in (**`admin` / `admin`**, the panel immediately asks for a new password) and finish setup in the **"Settings"** tab: the Telegram token and admin IDs, the proxy, the server monitor, the "Players" data source, the game accounts for auto-login. No manual `config.json` editing needed for any of that.
+
+Optional arguments: `setup.bat [BASE_DIR] [/autologon USER PASSWORD]` — a custom install path and/or Windows auto-logon as the given user (needed for the `AtLogon` tasks to actually start without someone physically logging into the session). The game paths (`game_exe` / `steam_exe` / `game_install_dir`) and the login window resolution sit outside the settings schema (see "Limitations" below) — edit `config.json` by hand for those, or use the advanced JSON editor in "Settings" for `login_flow`. Full guide with manual steps and troubleshooting — [`deploy/README.md`](deploy/README.md); config template — [`deploy/app/config.example.json`](deploy/app/config.example.json).
+
+### Settings from the panel
+
+The **"Settings"** tab is a `config.json` editor with no manual file editing: general options, web panel, watchdog, server monitor, the "Players" data source, Telegram (the token is a `secret` field — once set, it's never shown again), Steam/server list. Plus:
+
+- **Game accounts** — a list of login/password pairs with an active one selected (for auto-login with several accounts on one VM);
+- **`login_flow` (advanced)** — the raw JSON of login click coordinates, for a non-standard window resolution;
+- saving writes `config.json` as plain UTF-8 with no BOM; when a change needs a restart, the panel immediately offers a "Restart task" button.
+
+### Key `config.json` fields left outside the UI
 
 | Field | Purpose |
 |---|---|
 | `game_appid` | `1690980` |
-| `base_dir` | install folder (with `\\`) |
-| `steam_api_dll` | path to the **game’s** `steam_api64.dll` (for `/servers` and the monitor) |
-| `steam_web_api_key` | Steam Web API key — fallback path for the server list |
-| `python_exe` | python for child scripts; empty → auto (`sys.executable`, `pythonw`→`python`) |
-| `monitor` | `{ enabled, server_name, interval_seconds, misses_before_alert, repeat_alert_seconds }` |
-| `webui` | `{ enabled, host, port }` — web panel; `0.0.0.0:8080` by default. Credentials live in `webui_auth.json`, not in the config |
-| `players` | `{ enabled, localserver_root, world, world_dir }` — "Players" tab; all empty = auto-detect the world folder |
-| `telegram.token` | @BotFather token |
-| `telegram.allowed_user_ids` / `moderator_user_ids` / `super_admin_id` | roles (also editable from the web panel) |
-| `telegram.default_lang` | `ru` \| `en` |
-| `telegram.proxy` | `socks5h://HOST:PORT` — the client always goes through SOCKS5 |
-| `game_window_size` / `login_flow` | login click coordinates (hard-tuned for 1024×768) |
-| `watchdog.*` | keep-alive, restart cap, auto-login timings |
+| `steam_exe` / `game_exe` / `game_install_dir` | Steam and game paths — standard defaults, change only if the game is installed elsewhere |
+| `steam_api_dll` | path to the **game's** `steam_api64.dll` (for `/servers` and the monitor) |
+| `game_window_size` | window size the `login_flow` coordinates were measured for (default matches 1024×768) |
+| `base_dir` | install folder — filled in automatically by `setup.bat` |
 
-`config.json` and `key.txt` are in `.gitignore` (secrets). Template — `deploy/app/config.example.json`.
+Everything else (roles, Telegram, monitor, watchdog, the players data source, the Steam Web API key, game accounts, `login_flow`) lives in the "Settings" tab, see above. `config.json` and `key.txt` are in `.gitignore` (secrets). Template — `deploy/app/config.example.json`.
 
 ### Operations
 
@@ -446,3 +504,17 @@ After `/stopbot` (task disabled, Telegram won’t help): the **“Запусти
 - The SOCKS5 proxy must be reachable; if it isn’t, the bot retries silently and the watchdog keeps the game up locally.
 - The public lobby list usually has a single entry (niche game) — the multi-entry `/servers` view is tested on synthetic data.
 - The game’s language occasionally flips to Polski by itself (a click on the language arrow) — it does not affect coordinates.
+
+---
+
+### Переименование / Renaming
+
+**RU:** Проект стартовал как `sigmabot_win` — простой авто-логин + Telegram-бот. По мере роста (веб-панель, аналитика, реверс-инжиниринг игровых форматов, карта космоса) он перерос исходный масштаб, и репозиторий был переименован в **`SWO-Server-Panel`** прямо на GitHub — вся история и коммиты сохранены, ссылки со старого имени редиректят на новое.
+
+**EN:** The project started as `sigmabot_win` — a simple auto-login + Telegram bot. As it grew (web panel, analytics, reverse-engineered game formats, the space map) it outgrew that scope, and the GitHub repository was renamed to **`SWO-Server-Panel`** in place — full history and commits are preserved, and links to the old name redirect to the new one.
+
+### Скриншоты / Screenshots
+
+**RU:** Пока не добавлены — появятся, когда панель будет отлажена на тестовом сервере, а не на проде с реальными данными игроков.
+
+**EN:** Not included yet — will be added once the panel is tested on a non-production server, rather than against live player data.
