@@ -2578,12 +2578,87 @@ def game_state_space_units(world_dir):
     return int(m.group(1)) if m else None
 
 
-_SPACEUNITS_CACHE = {}   # path -> (mtime, result)
+_SPACEUNITS_CACHE = {}   # (path, star_id) -> (mtime, result)
+_CLUSTERS_CACHE = {}     # world_dir -> (ts, [{cluster_id,x,y,star_count,stars}])
+_CLUSTERS_TTL = 3600     # статичная генерация галактики — файлы не меняются
 
 
-def space_units(cfg):
+def galaxy_clusters(cfg):
+    """Кластеры звёздных систем из ``Data\\world\\cluster<N>.json`` (обычный
+    JSON, не бинарь: ``{clusterId, starPos{x,y}, starSystems[id…]}``).
+    starPos — позиция кластера на карте галактики (др. масштаб, чем позиции
+    внутри системы в star<N>.json). Кэш 1 ч.
+    -> ``{ok, clusters[{cluster_id,x,y,star_count,stars}], star_count}``."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    now = time.time()
+    hit = _CLUSTERS_CACHE.get(world_dir)
+    if hit and now - hit[0] < _CLUSTERS_TTL:
+        clusters = hit[1]
+    else:
+        d = os.path.join(world_dir, "Data", "world")
+        clusters = []
+        try:
+            files = os.listdir(d)
+        except OSError:
+            files = []
+        for fn in files:
+            m = re.match(r"cluster(\d+)\.json$", fn)
+            if not m:
+                continue
+            try:
+                obj = json.loads(_read_text(os.path.join(d, fn)) or "{}")
+            except ValueError:
+                continue
+            stars = obj.get("starSystems") or []
+            pos = obj.get("starPos") or {}
+            clusters.append({"cluster_id": obj.get("clusterId", int(m.group(1))),
+                             "x": pos.get("x"), "y": pos.get("y"),
+                             "star_count": len(stars), "stars": stars})
+        clusters.sort(key=lambda c: c["cluster_id"])
+        _CLUSTERS_CACHE[world_dir] = (now, clusters)
+    return {"ok": True, "clusters": clusters,
+            "star_count": sum(c["star_count"] for c in clusters)}
+
+
+def find_cluster_of_star(cfg, star_id):
+    """Кластер, которому принадлежит звёздная система ``star_id`` (или None)."""
+    g = galaxy_clusters(cfg)
+    if not g.get("ok"):
+        return None
+    try:
+        star_id = int(star_id)
+    except (TypeError, ValueError):
+        return None
+    for c in g["clusters"]:
+        if star_id in c["stars"]:
+            return c
+    return None
+
+
+_SPACEUNITS_RAW_CACHE = {}   # path -> (mtime, parse_space_units result)
+
+
+def _space_units_raw(path, world_dir):
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return None, None
+    hit = _SPACEUNITS_RAW_CACHE.get(path)
+    if hit and hit[0] == mt:
+        return mt, hit[1]
+    d = mapdt.parse_space_units(path, world_dir=world_dir)
+    _SPACEUNITS_RAW_CACHE[path] = (mt, d)
+    return mt, d
+
+
+def space_units(cfg, star_id=None):
     """Позиции кораблей игроков в космосе из ``Data\\space\\units.dt``
     (снимок на момент последнего сохранения сервера; порт ``SpaceUnit.Read``).
+    ``star_id`` (если задан) — оставить только объекты этой звёздной системы
+    (в игре несколько систем/кластеров — см. ``galaxy_clusters``); ``None`` —
+    все системы разом (как раньше).
 
     -> ``{ok, star_count, ships[{id,user_id,name,x,y,vx,vy,speed,rotate,health,
     aboard,cargo_items,moving,star_id}], debris_count, total, note}``.
@@ -2595,18 +2670,24 @@ def space_units(cfg):
     if not world_dir:
         return {"ok": False, "error": "каталог мира не найден"}
     path = os.path.join(world_dir, "Data", "space", "units.dt")
-    try:
-        mt = os.path.getmtime(path)
-    except OSError:
+    sid = None
+    if star_id is not None:
+        try:
+            sid = int(star_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad star_id"}
+    ck = (path, sid)
+    mt, d = _space_units_raw(path, world_dir)
+    if mt is None:
         return {"ok": False, "error": "нет файла space\\units.dt", "ships": [],
                 "debris_count": 0, "total": 0}
-    hit = _SPACEUNITS_CACHE.get(path)
+    hit = _SPACEUNITS_CACHE.get(ck)
     if hit and hit[0] == mt:
         return hit[1]
-
-    d = mapdt.parse_space_units(path, world_dir=world_dir)
     if not d.get("ok"):
         return d
+    if sid is not None:
+        d = dict(d, units=[u for u in d["units"] if u.get("star_id") == sid])
     names = load_user_list(world_dir)
     # владелец космо-юнита: у кого user.spaceUnitId == unit.id
     su_owner = {}
@@ -2616,10 +2697,10 @@ def space_units(cfg):
             if not _USER_FILE_RX.match(nm):
                 continue
             raw = _read_json(os.path.join(ud, nm)) or {}
-            sid = raw.get("spaceUnitId") or 0
-            if sid:
+            suid = raw.get("spaceUnitId") or 0
+            if suid:
                 try:
-                    su_owner[int(sid)] = int(raw.get("id"))
+                    su_owner[int(suid)] = int(raw.get("id"))
                 except (TypeError, ValueError):
                     pass
     except OSError:
@@ -2655,7 +2736,7 @@ def space_units(cfg):
     ships.sort(key=lambda s: (s["name"] == "—", s["name"].lower()))
     meteorites.sort(key=lambda m: -m["cargo_items"])
     res = {
-        "ok": True, "total": d["count"], "star_count": len(stars),
+        "ok": True, "total": len(d["units"]), "star_count": len(stars), "star_id": sid,
         "ships": ships,
         "meteorite_count": len(meteorites), "meteorites": meteorites[:800],
         "pod_count": len(pods), "pods": pods[:400],
@@ -2667,7 +2748,9 @@ def space_units(cfg):
                  "метеориты (руда) и космо-предметы с координатами и скоростью. "
                  "Планеты (SpaceObject) в файле НЕ хранятся — только по протоколу :45879."),
     }
-    _SPACEUNITS_CACHE[path] = (mt, res)
+    _SPACEUNITS_CACHE[ck] = (mt, res)
+    if len(_SPACEUNITS_CACHE) > 16:
+        _SPACEUNITS_CACHE.pop(next(iter(_SPACEUNITS_CACHE)))
     return res
 
 
@@ -2830,7 +2913,7 @@ def space_map_points(cfg, star_id=1):
     ``px = pad + (x-minx)/(maxx-minx)*(size-2*pad)``,
     ``py = pad + (maxy-y)/(maxy-miny)*(size-2*pad)``.
     -> ``{ok, bounds{minx,maxx,miny,maxy}, pad_frac, points[{kind,id,x,y,...}]}``."""
-    su = space_units(cfg)
+    su = space_units(cfg, star_id=star_id)
     if not su.get("ok"):
         return su
     so = space_objects(cfg, star_id)
@@ -2895,7 +2978,7 @@ def space_map_image(cfg, size=760, star_id=1):
     if hit and hit[0] == (mt, star_mt):
         return hit[1], "space_map.png", {"cached": True}
 
-    su = space_units(cfg)
+    su = space_units(cfg, star_id=star_id)
     if not su.get("ok"):
         return su, None, None
     so = space_objects(cfg, star_id)

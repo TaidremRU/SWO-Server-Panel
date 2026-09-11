@@ -856,11 +856,23 @@ class WebUI:
         return self._json(h, out, 200 if out.get("ok") else 500)
 
     def _api_space_units(self, h, method, q, sess):
-        """Позиции кораблей в космосе (снимок из space\\units.dt)."""
+        """Позиции кораблей в космосе (снимок из space\\units.dt). ?star=N —
+        только эта звёздная система (пусто/all = все разом)."""
+        star = (q.get("star") or [""])[0]
+        star = None if star in ("", "all", "*") else star
         try:
-            d = players.space_units(self.cfg)
+            d = players.space_units(self.cfg, star_id=star)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: space_units")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_space_clusters(self, h, method, q, sess):
+        """Кластеры и звёздные системы галактики (Data\\world\\cluster<N>.json)."""
+        try:
+            d = players.galaxy_clusters(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: galaxy_clusters")
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
@@ -1653,6 +1665,8 @@ var T = {
   su_hidden:"скрыто (нет тел рядом):",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
   su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
+  su_find_ph2:"имя планеты/астероида —", su_cluster:"кластер", su_system:"система",
+  su_clusters:"кластеров", su_systems:"систем всего",
   su_find_hits:"найдено", su_find_click:"показать на схеме",
   mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
@@ -1773,6 +1787,8 @@ var T = {
   su_hidden:"hidden (no bodies nearby):",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
   su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
+  su_find_ph2:"planet/asteroid name —", su_cluster:"cluster", su_system:"system",
+  su_clusters:"clusters", su_systems:"systems total",
   su_find_hits:"found", su_find_click:"show on map",
   mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
@@ -2758,7 +2774,8 @@ function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
 }
 var SPACE_MAP_SIZE=760;
-function spaceMapBlock(){
+function spaceMapBlock(starId){
+  starId=starId||1;
   var sz=SPACE_MAP_SIZE;
   var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;margin:0 auto;border:0;background:#08090f"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
@@ -2787,8 +2804,8 @@ function spaceMapBlock(){
   zoom.oninput();
   img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; updateHl(); };
   img.onerror=function(){ stat.textContent=t("err_net"); };
-  img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
-  api("/api/space-map-data").then(function(d){ if(d.ok){ DATA=d;
+  img.src="/api/space-map-image?size="+sz+"&star="+starId+"&_="+Date.now();
+  api("/api/space-map-data?star="+starId).then(function(d){ if(d.ok){ DATA=d;
     pcount.textContent="🪐 "+t("su_planets")+": "+d.planet_count+(d.ships_hidden? " · "+t("su_hidden")+" "+d.ships_hidden+" 🚀":"");
   } }).catch(function(){});
   function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
@@ -2830,12 +2847,12 @@ function spaceMapBlock(){
     lgSwatch("90,200,255",t("su_ships")),
     lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")) ]);
   // поиск объекта по имени (Data/world/star<N>.json)
-  var findIn=el("input",{placeholder:t("su_find_ph"),style:"padding:5px 8px;flex:1;min-width:140px"});
+  var findIn=el("input",{placeholder:t("su_find_ph2")+" star"+starId,style:"padding:5px 8px;flex:1;min-width:140px"});
   var findOut=el("div",{class:"muted small",style:"margin-top:4px"},[]);
   function runFind(){
     var qv=findIn.value.trim(); if(!qv) return;
     findOut.innerHTML=""; findOut.appendChild(el("span",{},[t("mi_wait")]));
-    api("/api/space-object-find?star=1&q="+encodeURIComponent(qv)).then(function(d){
+    api("/api/space-object-find?star="+starId+"&q="+encodeURIComponent(qv)).then(function(d){
       findOut.innerHTML="";
       if(!d.ok){ findOut.appendChild(el("span",{},[d.error||"error"])); return; }
       if(!d.matches.length){ hlFrac=null; updateHl(); findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
@@ -3128,19 +3145,48 @@ function drawMap(w, sj){
 
   var subox=el("div",{style:"margin-top:14px"},[]);
   b.appendChild(subox);
-  api("/api/space-units").then(function(su){
+  loadSystem(subox, 1);
+}
+var GALAXY=null;   // {clusters[{cluster_id,x,y,star_count,stars}]} — грузится один раз
+function loadSystem(subox, starId){
+  subox.innerHTML=""; subox.appendChild(el("p",{class:"muted"},["…"]));
+  Promise.all([
+    api("/api/space-units?star="+starId),
+    GALAXY? Promise.resolve(GALAXY) : api("/api/space-clusters").then(function(g){ if(g.ok) GALAXY=g; return g; }).catch(function(){ return {ok:false}; })
+  ]).then(function(res){ drawSystem(subox, starId, res[0], res[1]); })
+   .catch(function(e){ subox.innerHTML=""; subox.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+function drawSystem(subox, starId, su, gal){
     subox.innerHTML="";
-    if(!su.ok){ subox.appendChild(el("div",{class:"muted small"},[su.error||"space/units.dt —"])); return; }
+    if(!su.ok){ subox.appendChild(el("div",{class:"msg err"},[su.error||"space/units.dt —"])); return; }
     var bd=su.bounds||{};
+    var cur=(gal&&gal.ok)? gal.clusters.filter(function(c){return c.stars.indexOf(starId)>=0;})[0] : null;
+    var clSel=el("select",{style:"padding:4px 6px"}, ((gal&&gal.ok)? gal.clusters:[]).map(function(c){
+      return el("option",{value:String(c.cluster_id),selected:(cur&&c.cluster_id===cur.cluster_id)?"selected":null},
+        ["#"+c.cluster_id+" ("+c.star_count+")"]); }));
+    var stSel=el("select",{style:"padding:4px 6px"}, (cur?cur.stars:[starId]).map(function(sid){
+      return el("option",{value:String(sid),selected:sid===starId?"selected":null},["star"+sid]); }));
+    function fillStars(clusterId){
+      var c=(gal&&gal.ok)? gal.clusters.filter(function(x){return x.cluster_id===clusterId;})[0] : null;
+      stSel.innerHTML="";
+      (c?c.stars:[starId]).forEach(function(sid){ stSel.appendChild(el("option",{value:String(sid)},["star"+sid])); });
+    }
+    clSel.onchange=function(){ fillStars(parseInt(clSel.value,10)); };
+    stSel.onchange=function(){ loadSystem(subox, parseInt(stSel.value,10)); };
     subox.appendChild(el("div",{class:"card wide"},[
-      el("h3",{},["🚀 "+t("su_title")]),
+      el("h3",{},["🚀 "+t("su_title")+" · star"+starId+(cur? " · "+t("su_cluster")+" #"+cur.cluster_id:"")]),
+      (gal&&gal.ok)? el("div",{class:"row",style:"gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center"},[
+        el("span",{class:"muted small"},[t("su_cluster")+":"]), clSel,
+        el("span",{class:"muted small"},[t("su_system")+":"]), stSel,
+        el("span",{class:"muted small"},["("+gal.clusters.length+" "+t("su_clusters")+" · "+gal.star_count+" "+t("su_systems")+")"]) ])
+        : null,
       el("div",{class:"chart-legend"},[
         el("span",{},[t("su_ships")+": "+su.ships.length]),
         el("span",{},["☄ "+t("su_meteorites")+": "+su.meteorite_count]),
         el("span",{},["📦 "+t("su_pods")+": "+su.pod_count]),
         el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
       el("h3",{style:"margin-top:10px"},[t("su_starmap")]),
-      spaceMapBlock(),
+      spaceMapBlock(starId),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),
@@ -3156,7 +3202,6 @@ function drawMap(w, sj){
             el("span",{class:"mono small"},[m.moving? (m.vx+", "+m.vy):"—"]), String(m.cargo_items) ]; })) ]) : null,
       el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+su.note])
     ].filter(Boolean)));
-  }).catch(function(){ subox.innerHTML=""; });
 }
 
 // ---- server chat / events ----
