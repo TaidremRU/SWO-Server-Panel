@@ -1576,7 +1576,7 @@ a.pl-link:hover{text-decoration:underline}
 .chart .cguide{stroke:var(--acc);stroke-width:.7;stroke-dasharray:3 3;opacity:0}
 .chart .ctip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--acc);border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;opacity:0;transform:translate(-50%,-118%);transition:opacity .08s;z-index:2}
 .chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin:2px 0 6px}
-.mapinfo{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12.5px;margin-bottom:6px;min-height:18px;display:flex;flex-direction:column;justify-content:center;gap:2px}
+.mapinfo{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12.5px;margin:6px 0;min-height:18px;display:flex;flex-direction:column;justify-content:center;gap:2px}
 .chart-legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 .card.wide{grid-column:1 / -1}
 .sc{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px}
@@ -2788,7 +2788,7 @@ function mapImageBlock(mapId){
       rotCcw, rotLbl, rotCw,
       el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
-    info.el, wrap, leg ]);
+    wrap, info.el, leg ]);
 }
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
@@ -2889,7 +2889,7 @@ function spaceMapBlock(starId){
     el("div",{class:"row",style:"gap:6px;flex-wrap:wrap;margin-bottom:6px"},[
       findIn, el("button",{class:"small",onclick:runFind},[t("mf_go")]) ]),
     findOut,
-    info.el, wrap, legend,
+    wrap, info.el, legend,
     el("div",{class:"muted small",style:"margin-top:4px"},[t("su_scatter_note")]) ]);
 }
 function pfFindCard(){
