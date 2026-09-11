@@ -2674,12 +2674,13 @@ function attachDragPan(wrap, tip, zoom){
 }
 function mapImageBlock(mapId){
   var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;display:block;border:1px solid var(--line);border-radius:6px;background:var(--panel2);width:100%;transition:transform .1s"});
+  var stage=el("div",{style:"display:flex;align-items:center;justify-content:center;margin:0 auto"},[img]);
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
-  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[stage,tip]);
   var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
-  var rot=0;
-  var rotLbl=el("span",{class:"muted small",style:"min-width:34px;display:inline-block;text-align:center"},["0°"]);
+  var rot=315;
+  var rotLbl=el("span",{class:"muted small",style:"min-width:34px;display:inline-block;text-align:center"},["315°"]);
   var rotCcw=el("button",{class:"small",title:t("mi_rot_ccw"),onclick:function(){ rot-=45; applyView(); }},["↺"]);
   var rotCw=el("button",{class:"small",title:t("mi_rot_cw"),onclick:function(){ rot+=45; applyView(); }},["↻"]);
   var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
@@ -2687,11 +2688,21 @@ function mapImageBlock(mapId){
   var OW=null;   // сетка владения {w,h,um_w,um_h,grid,names}
   function rotDeg(){ return rot; }
   function applyView(){
+    // картинка позиционируется в px (не в % от контейнера) и центрируется в
+    // «сцене» размером с диагональ — иначе повёрнутый угол обрезается/
+    // прилипает к краю контейнера с overflow:auto
     var d=rotDeg();
-    img.style.width=zoom.value+"%";
-    img.style.transform=d? "rotate("+d+"deg)" : "";
-    img.style.margin=(((d%180)+180)%180)? "22% 0" : "0";
+    var zPct=parseFloat(zoom.value)||100;
     rotLbl.textContent=(((d%360)+360)%360)+"°";
+    img.style.transform=d? "rotate("+d+"deg)" : "";
+    if(img.naturalWidth){
+      var rw=img.naturalWidth*zPct/100, rh=img.naturalHeight*zPct/100;
+      img.style.width=rw+"px"; img.style.height=rh+"px";
+      var diag=Math.ceil(Math.sqrt(rw*rw+rh*rh));
+      stage.style.width=diag+"px"; stage.style.height=diag+"px";
+    } else {
+      img.style.width=zPct+"%";
+    }
   }
   zoom.oninput=applyView;
   applyView();
