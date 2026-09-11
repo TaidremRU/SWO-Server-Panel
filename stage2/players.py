@@ -2731,6 +2731,13 @@ def _parse_star_file(path):
         if not (math.isfinite(x) and math.isfinite(y) and abs(x) < 1_000_000 and abs(y) < 1_000_000):
             continue
         out.append({"name": chunk.decode("utf-8"), "x": round(x, 1), "y": round(y, 1)})
+    # id = порядковый номер в файле (1-based) — ПОДТВЕРЖДЕНО пользователем:
+    # запрошенное имя нашлось под тем же номером, что игра показывает как ID
+    # (Ryk Xive = 5-я запись в star1.json = ID5 в игре). Хрупко: если фильтр
+    # где-то ошибочно пропустит/добавит запись ДО этой точки — номера после
+    # неё съедут; пока подтверждений достаточно только для первых записей.
+    for idx, o in enumerate(out, 1):
+        o["id"] = idx
     return out
 
 
@@ -2766,7 +2773,7 @@ def space_objects(cfg, star_id=1):
 
 def space_object_search(cfg, query, star_id=1):
     """Поиск объекта по (под)имени в звёздной системе ``star_id``.
-    -> ``{ok, query, star_id, matches[{name,x,y}], total_in_star, note}``."""
+    -> ``{ok, query, star_id, matches[{id,name,x,y}], total_in_star, note}``."""
     d = space_objects(cfg, star_id)
     if not d.get("ok"):
         return d
@@ -2793,8 +2800,8 @@ def space_map_points(cfg, star_id=1):
     objs = so.get("objects") or [] if so.get("ok") else []
     minx, maxx, miny, maxy = _space_bounds(su, [(o["x"], o["y"]) for o in objs])
     points = [{"kind": "star", "id": 0, "x": 0, "y": 0, "name": "★"}]
-    for i, o in enumerate(objs):
-        points.append({"kind": "planet", "id": i + 1, "x": o["x"], "y": o["y"], "name": o["name"]})
+    for o in objs:
+        points.append({"kind": "planet", "id": o["id"], "x": o["x"], "y": o["y"], "name": o["name"]})
     for s in su["ships"]:
         points.append({"kind": "ship", "id": s["id"], "x": s["x"], "y": s["y"],
                        "name": s["name"], "user_id": s["user_id"], "health": s["health"],

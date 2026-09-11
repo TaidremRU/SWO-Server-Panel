@@ -1651,6 +1651,7 @@ var T = {
   mf_nomatch:"ничего не найдено", mf_matched:"совпадения по имени",
   mf_owner:"на чьей земле", mf_byowner:"по владельцам земли", mf_nobody:"— ничья —",
   mi_title:"Картинка карты", mi_wait:"рисую…", mi_claims:"клаймы", mi_owner:"владелец id",
+  mi_rot_ccw:"повернуть против часовой на 45°", mi_rot_cw:"повернуть по часовой на 45°",
   mi_show:"показать", mi_water:"вода", mi_land:"суша", mi_grass:"природа", mi_mtn:"горы",
   mi_ore:"руда", mi_wall:"стены/пол", mi_built:"постройки", mi_claim:"клаймы = цвет по владельцу (галка), либо один владелец по id",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
@@ -1768,6 +1769,7 @@ var T = {
   mf_nomatch:"nothing found", mf_matched:"name matches",
   mf_owner:"on whose land", mf_byowner:"by land owner", mf_nobody:"— unclaimed —",
   mi_title:"Map image", mi_wait:"rendering…", mi_claims:"claims", mi_owner:"owner id",
+  mi_rot_ccw:"rotate 45° counter-clockwise", mi_rot_cw:"rotate 45° clockwise",
   mi_show:"show", mi_water:"water", mi_land:"land", mi_grass:"nature", mi_mtn:"mountains",
   mi_ore:"ore", mi_wall:"walls/floor", mi_built:"structures", mi_claim:"claims = colour per owner (checkbox), or one owner by id",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
@@ -2619,19 +2621,23 @@ function mapImageBlock(mapId){
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
   var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
-  var rotSel=el("select",{style:"padding:4px 6px"}, [0,45,90,135,180,225,270,315].map(function(d){
-    return el("option",{value:String(d)},[d+"°"]); }));
-  var zoom=el("input",{type:"range",min:"100",max:"800",step:"20",value:"100",style:"width:150px"});
+  var rot=0;
+  var rotLbl=el("span",{class:"muted small",style:"min-width:34px;display:inline-block;text-align:center"},["0°"]);
+  var rotCcw=el("button",{class:"small",title:t("mi_rot_ccw"),onclick:function(){ rot-=45; applyView(); }},["↺"]);
+  var rotCw=el("button",{class:"small",title:t("mi_rot_cw"),onclick:function(){ rot+=45; applyView(); }},["↻"]);
+  var zoom=el("input",{type:"range",min:"200",max:"800",step:"20",value:"200",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var OW=null;   // сетка владения {w,h,um_w,um_h,grid,names}
-  function rotDeg(){ return parseInt(rotSel.value,10)||0; }
+  function rotDeg(){ return rot; }
   function applyView(){
     var d=rotDeg();
     img.style.width=zoom.value+"%";
     img.style.transform=d? "rotate("+d+"deg)" : "";
-    img.style.margin=(d%180)? "22% 0" : "0";
+    img.style.margin=(((d%180)+180)%180)? "22% 0" : "0";
+    rotLbl.textContent=(((d%360)+360)%360)+"°";
   }
-  zoom.oninput=applyView; rotSel.onchange=applyView;
+  zoom.oninput=applyView;
+  applyView();
   function reload(){
     stat.textContent=t("mi_wait");
     var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+"&_="+Date.now();
@@ -2674,7 +2680,7 @@ function mapImageBlock(mapId){
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
       el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
-      el("span",{class:"muted small"},["↻"]), rotSel,
+      rotCcw, rotLbl, rotCw,
       el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
     wrap, leg ]);
@@ -2688,10 +2694,11 @@ function spaceMapBlock(){
   var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;border:0;background:#08090f"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
-  var zoom=el("input",{type:"range",min:"100",max:"700",step:"20",value:"100",style:"width:150px"});
+  var zoom=el("input",{type:"range",min:"200",max:"800",step:"20",value:"200",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var DATA=null;
   zoom.oninput=function(){ img.style.width=zoom.value+"%"; };
+  zoom.oninput();
   img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
   img.onerror=function(){ stat.textContent=t("err_net"); };
   img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
@@ -2714,7 +2721,7 @@ function spaceMapBlock(){
       if(d<bestD){ bestD=d; best=p; }
     });
     if(!best){ tip.style.opacity=0; return; }
-    var lines=[kindIcon(best.kind)+(best.kind==="planet"?" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
+    var lines=[kindIcon(best.kind)+(best.kind==="planet"?" #"+best.id+" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
     if(best.kind==="ship"){
       lines.push(best.name||"?");
       lines.push("HP "+best.health+" · "+t("su_cargo")+" "+best.cargo_items);
@@ -2746,7 +2753,7 @@ function spaceMapBlock(){
       if(!d.matches.length){ findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
       findOut.appendChild(el("span",{},[t("su_find_hits")+" ("+d.total_in_star+" "+t("su_planets")+"): "]));
       d.matches.forEach(function(m){ findOut.appendChild(el("span",{class:"pill",style:"margin:2px 4px 2px 0"},[
-        "🪐 "+m.name+"  ("+m.x+", "+m.y+")"])); });
+        "🪐 #"+m.id+" "+m.name+"  ("+m.x+", "+m.y+")"])); });
       findOut.appendChild(el("div",{class:"muted small",style:"margin-top:4px"},[d.note]));
     }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
   }
