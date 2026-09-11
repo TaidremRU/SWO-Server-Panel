@@ -2760,7 +2760,7 @@ function lgSwatch(rgb, label){
 var SPACE_MAP_SIZE=760;
 function spaceMapBlock(){
   var sz=SPACE_MAP_SIZE;
-  var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;border:0;background:#08090f"});
+  var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;margin:0 auto;border:0;background:#08090f"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
   var hl=el("div",{style:"position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid #ff3b6f;box-shadow:0 0 10px 2px rgba(255,59,111,.65);pointer-events:none;opacity:0;transform:translate(-50%,-50%);transition:opacity .2s"},[]);
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip,hl]);
