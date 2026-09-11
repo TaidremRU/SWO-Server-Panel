@@ -1586,12 +1586,30 @@ def world_map(cfg):
                          "owner_id": uid, "owner": names.get(uid) or ("id %d" % uid)})
     terr_by_map = collections.Counter(t["map"] for t in terr)
     maps = sorted(set(list(gs) + list(avatars_by_map) + list(terr_by_map)), key=lambda x: (x is None, x))
+
+    # id внесистемной карты (map<N>.dt) == id записи в Data\world\star1.json —
+    # ПОДТВЕРЖДЕНО: все 26 внесистемных карт на проде совпали 1:1 по id с
+    # осмысленными соседними координатами (см. sigma-steam-stage2-bot.md,
+    # коммит после e8aa465). Даёт имя и позицию в звёздной системе для планет.
+    star_by_id = {}
+    try:
+        so = space_objects(cfg, 1)
+        if so.get("ok"):
+            star_by_id = {o["id"]: o for o in so["objects"]}
+    except Exception:  # noqa: BLE001
+        pass
+
     rows = []
     for mp in maps:
         dim = map_dim(world_dir, mp) if mp not in (None, 0) else None
+        is_offworld = mp is not None and mp not in (0, 1)
+        so_obj = star_by_id.get(mp) if is_offworld else None
         rows.append({"map": mp, "online": gs.get(mp, 0), "avatars": avatars_by_map.get(mp, 0),
                      "territories": terr_by_map.get(mp, 0), "space": mp == 0,
-                     "is_offworld": mp is not None and mp not in (0, 1),
+                     "is_offworld": is_offworld,
+                     "space_name": so_obj["name"] if so_obj else None,
+                     "space_x": so_obj["x"] if so_obj else None,
+                     "space_y": so_obj["y"] if so_obj else None,
                      "size": ("%dx%d" % (dim["w"], dim["h"])) if dim else None})
     rows.sort(key=lambda r: -(r["online"] * 100 + r["territories"]))
     terr.sort(key=lambda t: ((t["map"] if t["map"] is not None else 0), (t["owner"] or "").lower()))

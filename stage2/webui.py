@@ -1640,7 +1640,8 @@ var T = {
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
-  md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; координат в космосе для неё нет, только для кораблей/метеоритов",
+  md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; имя и координаты в звёздной системе (Data\\world\\star1.json, id карты = id записи, реверс-инжиниринг — см. схему системы)",
+  md_spacename:"имя в космосе (коорд.)",
   su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
   su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
@@ -1758,7 +1759,8 @@ var T = {
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
-  md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; no space coordinates for it, only for ships/meteorites",
+  md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; name and coordinates in the star system (Data\\world\\star1.json, map id = record id, reverse-engineered — see the system map)",
+  md_spacename:"space name (coord.)",
   su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
   su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
@@ -2989,10 +2991,11 @@ function drawMap(w, sj){
   var wg=el("div",{class:"grid",style:"grid-template-columns:repeat(auto-fit,minmax(300px,1fr))"},[]);
   wg.appendChild(el("div",{class:"card wide"},[el("h3",{},[t("st_world")+" · "+w.totals.maps]),
     el("div",{class:"muted small",style:"margin-bottom:6px"},[t("st_avatars")+" "+w.totals.avatars+" • bots "+w.totals.bots+" • "+t("st_terr")+" "+w.totals.territories]),
-    scT(ltable([t("pl_map"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,80),
+    scT(ltable([t("pl_map"),t("md_spacename"),t("st_size"),t("pl_online"),t("st_avatars"),t("st_terr"),""], (w.maps||[]).slice(0,80),
       function(r){ return [
-        el("span",{},[r.space? "0 · космос ⚠" : String(r.map),
-          r.is_offworld? el("span",{class:"pill",title:t("md_offworld_hint"),style:"margin-left:6px"},["🪐"]) : ""]),
+        r.space? "0 · космос ⚠" : String(r.map),
+        r.space_name? el("span",{class:"small",title:t("md_offworld_hint")},["🪐 "+r.space_name+"  ("+r.space_x+", "+r.space_y+")"])
+          : (r.is_offworld? el("span",{class:"muted small",title:t("md_offworld_hint")},["🪐 —"]) : "—"),
         r.size||"—", String(r.online), String(r.avatars), String(r.territories),
         r.map!=null && !r.space? el("a",{class:"pl-link",onclick:(function(m){return function(){ openMapdt(m); };})(r.map)},[t("md_open")]) : ""]; })),
     w.space_note? el("div",{class:"muted small",style:"margin-top:6px"},["⚠ "+w.space_note]) : null
