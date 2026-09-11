@@ -2909,7 +2909,7 @@ def space_map_image(cfg, size=760, star_id=1):
     pad = int(size * _SPACE_PAD_FRAC)
 
     def to_px(x, y):
-        px = pad + (x - minx) / spanx * (w - 2 * pad)
+        px = pad + (maxx - x) / spanx * (w - 2 * pad)   # X отзеркален (см. toPx в SPA)
         py = pad + (maxy - y) / spany * (h - 2 * pad)   # y вниз на экране
         return int(px), int(py)
 

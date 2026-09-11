@@ -2626,33 +2626,51 @@ function openMapdt(mapId){
     card.appendChild(grid);
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
-function attachDragPan(wrap, tip){
+function attachDragPan(wrap, tip, zoom){
   // тащим карту зажатой ЛКМ (как рукой), не только скроллбарами
   var img=wrap.querySelector("img");
   if(img){ img.draggable=false; img.style.userSelect="none"; }
   wrap.style.cursor="grab";
   var sx=0, sy=0, sl=0, st=0;
-  function onMove(e){
-    wrap._panning=true;
-    if(tip) tip.style.opacity=0;
-    wrap.scrollLeft=sl-(e.clientX-sx);
-    wrap.scrollTop=st-(e.clientY-sy);
-  }
   function onUp(){
     wrap._panning=false;
     document.removeEventListener("mousemove",onMove);
     document.removeEventListener("mouseup",onUp);
     wrap.style.cursor="grab";
   }
+  function onMove(e){
+    if(e.buttons===0){ onUp(); return; }   // кнопку отпустили вне окна — самовосстановление
+    wrap._panning=true;
+    if(tip) tip.style.opacity=0;
+    wrap.scrollLeft=sl-(e.clientX-sx);
+    wrap.scrollTop=st-(e.clientY-sy);
+  }
   wrap.addEventListener("mousedown",function(e){
     if(e.button!==0) return;
     sx=e.clientX; sy=e.clientY; sl=wrap.scrollLeft; st=wrap.scrollTop;
     wrap.style.cursor="grabbing";
+    wrap._panning=true;
     if(tip) tip.style.opacity=0;
     document.addEventListener("mousemove",onMove);
     document.addEventListener("mouseup",onUp);
     e.preventDefault();
   });
+  window.addEventListener("blur",onUp);
+  if(zoom){
+    wrap.addEventListener("wheel",function(e){
+      e.preventDefault();
+      var old=parseFloat(zoom.value), mn=parseFloat(zoom.min), mx=parseFloat(zoom.max);
+      var next=Math.min(mx, Math.max(mn, old*(e.deltaY<0? 1.15 : 1/1.15)));
+      if(Math.abs(next-old)<0.01) return;
+      var r=wrap.getBoundingClientRect();
+      var offX=e.clientX-r.left+wrap.scrollLeft, offY=e.clientY-r.top+wrap.scrollTop;
+      var ratio=next/old;
+      zoom.value=Math.round(next);
+      if(zoom.oninput) zoom.oninput();
+      wrap.scrollLeft=offX*ratio-(e.clientX-r.left);
+      wrap.scrollTop=offY*ratio-(e.clientY-r.top);
+    }, {passive:false});
+  }
 }
 function mapImageBlock(mapId){
   var img=el("img",{alt:"map "+mapId, style:"image-rendering:pixelated;display:block;border:1px solid var(--line);border-radius:6px;background:var(--panel2);width:100%;transition:transform .1s"});
@@ -2715,7 +2733,7 @@ function mapImageBlock(mapId){
     lgSwatch("222,138,46",t("mi_built")),
     el("span",{class:"muted"},[t("mi_claim")]) ]);
   setTimeout(reload,0);
-  attachDragPan(wrap, tip);
+  attachDragPan(wrap, tip, zoom);
   return el("div",{class:"card wide",style:"margin:8px 0"},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
@@ -2765,7 +2783,7 @@ function spaceMapBlock(){
   function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
   function toPx(bd,pad,x,y){
     var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
-    return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
+    return [ pad+(bd.maxx-x)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];   // X отзеркален как на картинке
   }
   img.addEventListener("mousemove", function(e){
     if(wrap._panning || !DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
@@ -2819,7 +2837,7 @@ function spaceMapBlock(){
     }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
   }
   findIn.addEventListener("keydown",function(e){ if(e.key==="Enter") runFind(); });
-  attachDragPan(wrap, tip);
+  attachDragPan(wrap, tip, zoom);
   return el("div",{},[
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("span",{class:"muted small"},["🔍"]), zoom, stat, pcount ]),
