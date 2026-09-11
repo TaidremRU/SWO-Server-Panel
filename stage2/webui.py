@@ -879,6 +879,15 @@ class WebUI:
             "Content-Disposition": 'inline; filename="%s"' % (fn or "space_map.png"),
         })
 
+    def _api_space_map_data(self, h, method, q, sess):
+        """Точки звёздной системы для наведения (id/координаты/детали)."""
+        try:
+            d = players.space_map_points(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: space_map_points")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_health(self, h, method, q, sess):
         now = time.time()
         if not self._health_cache or now - self._health_cache[0] > 60:
@@ -1612,7 +1621,7 @@ var T = {
   sp_title:"Космос", sp_inspace:"в космосе сейчас", sp_stuck:"залипли оффлайн", sp_units:"космо-юнитов всего",
   sp_ship:"есть корабль (spaceUnitId)", sp_planets:"Освоение других карт", sp_plots:"участков", sp_owners:"владельцев",
   su_title:"Звёздная система (снимок)", su_ships:"корабли", su_meteorites:"метеориты", su_pods:"космо-предметы", su_vel:"скорость (vx,vy)", su_hp:"HP",
-  su_cargo:"груз", su_moving:"в движении",
+  su_cargo:"груз", su_moving:"в движении", su_stopped:"стоит",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
   st_branch:"открывает", st_technote:"названия — что тех открывает в крафте (из craft.json + локализации клиента); ветка/тир — из дерева tech.json",
   md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
@@ -1726,7 +1735,7 @@ var T = {
   sp_title:"Space", sp_inspace:"in space now", sp_stuck:"stuck offline", sp_units:"space units total",
   sp_ship:"has a ship (spaceUnitId)", sp_planets:"Off-world land", sp_plots:"plots", sp_owners:"owners",
   su_title:"Star system (snapshot)", su_ships:"ships", su_meteorites:"meteorites", su_pods:"space items", su_vel:"velocity (vx,vy)", su_hp:"HP",
-  su_cargo:"cargo", su_moving:"moving",
+  su_cargo:"cargo", su_moving:"moving", su_stopped:"stopped",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
   st_branch:"unlocks", st_technote:"names = what the tech unlocks in crafting (from craft.json + client localization); branch/tier from the tech.json tree",
   md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
@@ -2654,6 +2663,62 @@ function mapImageBlock(mapId){
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
 }
+var SPACE_MAP_SIZE=760;
+function spaceMapBlock(){
+  var sz=SPACE_MAP_SIZE;
+  var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;border:0;background:#08090f"});
+  var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
+  var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
+  var zoom=el("input",{type:"range",min:"100",max:"700",step:"20",value:"100",style:"width:150px"});
+  var stat=el("span",{class:"muted small"},[t("mi_wait")]);
+  var DATA=null;
+  zoom.oninput=function(){ img.style.width=zoom.value+"%"; };
+  img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
+  img.onerror=function(){ stat.textContent=t("err_net"); };
+  img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
+  api("/api/space-map-data").then(function(d){ if(d.ok) DATA=d; }).catch(function(){});
+  function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦"}[k]||"?"; }
+  function toPx(bd,pad,x,y){
+    var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
+    return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
+  }
+  img.addEventListener("mousemove", function(e){
+    if(!DATA || !img.naturalWidth){ tip.style.opacity=0; return; }
+    var r=img.getBoundingClientRect();
+    var sx=img.naturalWidth/r.width, sy=img.naturalHeight/r.height;
+    var ix=(e.clientX-r.left)*sx, iy=(e.clientY-r.top)*sy;
+    var pad=sz*DATA.pad_frac;
+    var best=null, bestD=16;
+    DATA.points.forEach(function(p){
+      var xy=toPx(DATA.bounds,pad,p.x,p.y);
+      var d=Math.hypot(xy[0]-ix, xy[1]-iy);
+      if(d<bestD){ bestD=d; best=p; }
+    });
+    if(!best){ tip.style.opacity=0; return; }
+    var lines=[kindIcon(best.kind)+" #"+best.id+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
+    if(best.kind==="ship"){
+      lines.push(best.name||"?");
+      lines.push("HP "+best.health+" · "+t("su_cargo")+" "+best.cargo_items);
+      lines.push(best.moving? "v=("+best.vx+", "+best.vy+")" : t("su_stopped"));
+    } else if(best.kind!=="star"){
+      lines.push(t("su_cargo")+" "+best.cargo_items);
+      lines.push(best.moving? "v=("+best.vx+", "+best.vy+")" : t("su_stopped"));
+    }
+    tip.innerHTML=""; lines.forEach(function(l){ tip.appendChild(el("div",{},[l])); });
+    tip.style.left=(e.clientX-wrap.getBoundingClientRect().left+12)+"px";
+    tip.style.top=(e.clientY-wrap.getBoundingClientRect().top+12)+"px";
+    tip.style.transform="none"; tip.style.opacity=1;
+  });
+  img.addEventListener("mouseleave", function(){ tip.style.opacity=0; });
+  var legend=el("div",{class:"chart-legend",style:"margin-top:6px"},[
+    lgSwatch("255,225,140",t("su_star")), lgSwatch("90,200,255",t("su_ships")),
+    lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")) ]);
+  return el("div",{},[
+    el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
+      el("span",{class:"muted small"},["🔍"]), zoom, stat ]),
+    wrap, legend,
+    el("div",{class:"muted small",style:"margin-top:4px"},[t("su_scatter_note")]) ]);
+}
 function pfFindCard(){
   ensureItemList();
   var inp=el("input",{list:"mf-itemlist",placeholder:t("pf_ph"),style:"padding:5px 8px;flex:1;min-width:160px"});
@@ -2935,13 +3000,7 @@ function drawMap(w, sj){
         el("span",{},["📦 "+t("su_pods")+": "+su.pod_count]),
         el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
       el("h3",{style:"margin-top:10px"},[t("su_starmap")]),
-      el("div",{style:"display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start"},[
-        el("img",{src:"/api/space-map-image?size=560&_="+Date.now(), alt:"star system",
-          style:"image-rendering:pixelated;border:1px solid var(--line);border-radius:8px;background:#08090f;max-width:100%"}),
-        el("div",{class:"chart-legend",style:"flex-direction:column;gap:6px;align-items:flex-start"},[
-          lgSwatch("255,225,140",t("su_star")), lgSwatch("90,200,255",t("su_ships")),
-          lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")),
-          el("div",{class:"muted small",style:"max-width:220px;margin-top:4px"},[t("su_scatter_note")]) ]) ]),
+      spaceMapBlock(),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),

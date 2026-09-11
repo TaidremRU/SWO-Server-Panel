@@ -2656,6 +2656,45 @@ _SPACE_STAR_COL = (255, 225, 140)
 _SPACE_SHIP_COL = (90, 200, 255)
 _SPACE_MET_COL = (150, 140, 128)
 _SPACE_POD_COL = (230, 195, 60)
+_SPACE_PAD_FRAC = 0.05
+
+
+def _space_bounds(su):
+    """Границы системы, гарантированно включающие звезду (0,0) — как в картинке."""
+    bd = su["bounds"]
+    minx, maxx = min(bd["minx"], 0), max(bd["maxx"], 0)
+    miny, maxy = min(bd["miny"], 0), max(bd["maxy"], 0)
+    return minx, maxx, miny, maxy
+
+
+def space_map_points(cfg):
+    """Данные для интерактивной схемы системы (id/координаты/детали каждой
+    точки) — картинка рисуется отдельно (``space_map_image``), тут только
+    метаданные для наведения. Клиент считает пиксель сам: ``pad = size*pad_frac``,
+    ``px = pad + (x-minx)/(maxx-minx)*(size-2*pad)``,
+    ``py = pad + (maxy-y)/(maxy-miny)*(size-2*pad)``.
+    -> ``{ok, bounds{minx,maxx,miny,maxy}, pad_frac, points[{kind,id,x,y,...}]}``."""
+    su = space_units(cfg)
+    if not su.get("ok"):
+        return su
+    minx, maxx, miny, maxy = _space_bounds(su)
+    points = [{"kind": "star", "id": 0, "x": 0, "y": 0, "name": "★"}]
+    for s in su["ships"]:
+        points.append({"kind": "ship", "id": s["id"], "x": s["x"], "y": s["y"],
+                       "name": s["name"], "user_id": s["user_id"], "health": s["health"],
+                       "speed": s.get("speed"), "vx": s["vx"], "vy": s["vy"],
+                       "cargo_items": s["cargo_items"], "aboard": s.get("aboard"),
+                       "moving": s["moving"], "box_name": s["box_name"]})
+    for m in su["meteorites"]:
+        points.append({"kind": "meteorite", "id": m["id"], "x": m["x"], "y": m["y"],
+                       "vx": m["vx"], "vy": m["vy"], "cargo_items": m["cargo_items"],
+                       "moving": m["moving"]})
+    for p in su["pods"]:
+        points.append({"kind": "pod", "id": p["id"], "x": p["x"], "y": p["y"],
+                       "vx": p["vx"], "vy": p["vy"], "cargo_items": p["cargo_items"],
+                       "moving": p["moving"]})
+    return {"ok": True, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
+            "pad_frac": _SPACE_PAD_FRAC, "points": points, "total": len(points)}
 
 
 def space_map_image(cfg, size=760):
@@ -2683,15 +2722,11 @@ def space_map_image(cfg, size=760):
     if not su.get("ok"):
         return su, None, None
     bd = su["bounds"]
-    minx, maxx = bd["minx"], bd["maxx"]
-    miny, maxy = bd["miny"], bd["maxy"]
-    # система всегда центрирована на звезде (0,0) — гарантируем, что она в кадре
-    minx, maxx = min(minx, 0), max(maxx, 0)
-    miny, maxy = min(miny, 0), max(maxy, 0)
+    minx, maxx, miny, maxy = _space_bounds(su)
     spanx = max(maxx - minx, 1)
     spany = max(maxy - miny, 1)
     w = h = size
-    pad = int(size * 0.05)
+    pad = int(size * _SPACE_PAD_FRAC)
 
     def to_px(x, y):
         px = pad + (x - minx) / spanx * (w - 2 * pad)
