@@ -2627,7 +2627,7 @@ function mapImageBlock(mapId){
   var rotLbl=el("span",{class:"muted small",style:"min-width:34px;display:inline-block;text-align:center"},["0°"]);
   var rotCcw=el("button",{class:"small",title:t("mi_rot_ccw"),onclick:function(){ rot-=45; applyView(); }},["↺"]);
   var rotCw=el("button",{class:"small",title:t("mi_rot_cw"),onclick:function(){ rot+=45; applyView(); }},["↻"]);
-  var zoom=el("input",{type:"range",min:"200",max:"800",step:"20",value:"200",style:"width:150px"});
+  var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var OW=null;   // сетка владения {w,h,um_w,um_h,grid,names}
   function rotDeg(){ return rot; }
@@ -2696,7 +2696,7 @@ function spaceMapBlock(){
   var img=el("img",{alt:"star system", style:"image-rendering:pixelated;display:block;width:100%;border:0;background:#08090f"});
   var tip=el("div",{class:"ctip",style:"position:absolute;opacity:0"},[]);
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[img,tip]);
-  var zoom=el("input",{type:"range",min:"200",max:"800",step:"20",value:"200",style:"width:150px"});
+  var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var DATA=null;
   zoom.oninput=function(){ img.style.width=zoom.value+"%"; };
