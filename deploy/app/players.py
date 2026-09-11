@@ -2679,16 +2679,35 @@ _SPACE_POD_COL = (230, 195, 60)
 _SPACE_PAD_FRAC = 0.05
 
 
-def _space_bounds(su, extra=None):
-    """Границы системы, гарантированно включающие звезду (0,0) — как в картинке.
-    ``extra`` — доп. список (x,y) для учёта в границах (напр. именованные объекты)."""
-    bd = su["bounds"]
-    minx, maxx = min(bd["minx"], 0), max(bd["maxx"], 0)
-    miny, maxy = min(bd["miny"], 0), max(bd["maxy"], 0)
-    for x, y in (extra or ()):
-        minx, maxx = min(minx, x), max(maxx, x)
-        miny, maxy = min(miny, y), max(maxy, y)
+def _points_bounds(*groups):
+    """Границы по фактически ПОКАЗЫВАЕМЫМ точкам (не по сырым ``space_units.bounds``,
+    которые включают и скрытых «улетевших» кораблей) — гарантированно включает
+    звезду (0,0). ``groups`` — списки dict'ов с ключами x,y (или (x,y) пары)."""
+    minx = maxx = miny = maxy = 0
+    for g in groups:
+        for it in g:
+            x, y = (it["x"], it["y"]) if isinstance(it, dict) else it
+            minx, maxx = min(minx, x), max(maxx, x)
+            miny, maxy = min(miny, y), max(maxy, y)
     return minx, maxx, miny, maxy
+
+
+_SHIP_LONER_RADIUS = 10000  # корабль без тела (планета/метеорит) ближе этого — считаем «улетел», прячем
+
+
+def _drop_lone_ships(ships, bodies, radius=_SHIP_LONER_RADIUS):
+    """Отфильтровать корабли, у которых нет ни одного тела (планеты/метеорита)
+    ближе ``radius`` — такие «улетевшие в никуда» только засоряют схему.
+    Если ``bodies`` пуст (нет данных) — ничего не прячем (осторожность)."""
+    if not bodies:
+        return ships
+    r2 = radius * radius
+    out = []
+    for s in ships:
+        sx, sy = s["x"], s["y"]
+        if any((sx - bx) ** 2 + (sy - by) ** 2 <= r2 for bx, by in bodies):
+            out.append(s)
+    return out
 
 
 # --- Data\world\star<N>.json — именованные объекты системы (планеты/астероиды) ---
@@ -2816,11 +2835,13 @@ def space_map_points(cfg, star_id=1):
         return su
     so = space_objects(cfg, star_id)
     objs = so.get("objects") or [] if so.get("ok") else []
-    minx, maxx, miny, maxy = _space_bounds(su, [(o["x"], o["y"]) for o in objs])
+    bodies = [(o["x"], o["y"]) for o in objs] + [(m["x"], m["y"]) for m in su["meteorites"]]
+    ships = _drop_lone_ships(su["ships"], bodies)
+    minx, maxx, miny, maxy = _points_bounds(objs, su["meteorites"], su["pods"], ships)
     points = [{"kind": "star", "id": 0, "x": 0, "y": 0, "name": "★"}]
     for o in objs:
         points.append({"kind": "planet", "id": o["id"], "x": o["x"], "y": o["y"], "name": o["name"]})
-    for s in su["ships"]:
+    for s in ships:
         points.append({"kind": "ship", "id": s["id"], "x": s["x"], "y": s["y"],
                        "name": s["name"], "user_id": s["user_id"], "health": s["health"],
                        "speed": s.get("speed"), "vx": s["vx"], "vy": s["vy"],
@@ -2836,7 +2857,8 @@ def space_map_points(cfg, star_id=1):
                        "moving": p["moving"]})
     return {"ok": True, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
             "pad_frac": _SPACE_PAD_FRAC, "points": points, "total": len(points),
-            "planet_count": len(objs)}
+            "planet_count": len(objs),
+            "ships_hidden": len(su["ships"]) - len(ships)}
 
 
 _SPACE_PLANET_COL = (190, 175, 230)
@@ -2878,8 +2900,9 @@ def space_map_image(cfg, size=760, star_id=1):
         return su, None, None
     so = space_objects(cfg, star_id)
     objs = so.get("objects") or [] if so.get("ok") else []
-    bd = su["bounds"]
-    minx, maxx, miny, maxy = _space_bounds(su, [(o["x"], o["y"]) for o in objs])
+    bodies = [(o["x"], o["y"]) for o in objs] + [(m["x"], m["y"]) for m in su["meteorites"]]
+    ships = _drop_lone_ships(su["ships"], bodies)
+    minx, maxx, miny, maxy = _points_bounds(objs, su["meteorites"], su["pods"], ships)
     spanx = max(maxx - minx, 1)
     spany = max(maxy - miny, 1)
     w = h = size
@@ -2911,7 +2934,7 @@ def space_map_image(cfg, size=760, star_id=1):
     for p in su["pods"]:
         x, y = to_px(p["x"], p["y"])
         dot(x, y, _SPACE_POD_COL, 1)
-    for s in su["ships"]:
+    for s in ships:
         x, y = to_px(s["x"], s["y"])
         dot(x, y, _SPACE_SHIP_COL, 3)
     sx, sy = to_px(0, 0)
@@ -2919,9 +2942,10 @@ def space_map_image(cfg, size=760, star_id=1):
 
     png = mapdt.png_bytes(w, h, bytes(rgb), 1)
     _SPACEIMG_CACHE[ck] = ((mt, star_mt), png)
-    return png, "space_map.png", {"w": w, "h": h, "bounds": bd, "planets": len(objs),
-                                  "ships": len(su["ships"]), "meteorites": su["meteorite_count"],
-                                  "pods": su["pod_count"]}
+    return png, "space_map.png", {
+        "w": w, "h": h, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
+        "planets": len(objs), "ships": len(ships), "ships_hidden": len(su["ships"]) - len(ships),
+        "meteorites": su["meteorite_count"], "pods": su["pod_count"]}
 
 
 def space_report(cfg):

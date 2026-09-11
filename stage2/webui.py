@@ -1643,6 +1643,7 @@ var T = {
   md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; имя и координаты в звёздной системе (Data\\world\\star1.json, id карты = id записи, реверс-инжиниринг — см. схему системы)",
   md_spacename:"имя в космосе (коорд.)",
   su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
+  su_hidden:"скрыто (нет тел рядом):",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
   su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
   su_find_hits:"найдено",
@@ -1762,6 +1763,7 @@ var T = {
   md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; name and coordinates in the star system (Data\\world\\star1.json, map id = record id, reverse-engineered — see the system map)",
   md_spacename:"space name (coord.)",
   su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
+  su_hidden:"hidden (no bodies nearby):",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
   su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
   su_find_hits:"found",
@@ -2704,7 +2706,9 @@ function spaceMapBlock(){
   img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; };
   img.onerror=function(){ stat.textContent=t("err_net"); };
   img.src="/api/space-map-image?size="+sz+"&_="+Date.now();
-  api("/api/space-map-data").then(function(d){ if(d.ok){ DATA=d; pcount.textContent="🪐 "+t("su_planets")+": "+d.planet_count; } }).catch(function(){});
+  api("/api/space-map-data").then(function(d){ if(d.ok){ DATA=d;
+    pcount.textContent="🪐 "+t("su_planets")+": "+d.planet_count+(d.ships_hidden? " · "+t("su_hidden")+" "+d.ships_hidden+" 🚀":"");
+  } }).catch(function(){});
   function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
   function toPx(bd,pad,x,y){
     var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
