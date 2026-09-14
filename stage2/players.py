@@ -973,8 +973,11 @@ def _block_class(world_dir):
     return out
 
 
-def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None):
+def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False):
     """PNG-картинка карты: вода/суша/горы/природа/постройки + клаймы.
+    ``force=True`` игнорирует кэш по mtime и перерисовывает картинку заново
+    (кнопка «пересмотреть» — на случай, если файл обновился, а mtime почему-то
+    не сдвинулся, напр. на сетевом диске).
     -> ``(png_bytes, filename, meta)`` либо ``({"ok":False,"error":...}, None, None)``."""
     if mapdt is None:
         return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
@@ -997,7 +1000,7 @@ def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None):
     sc = None if scale in (None, "", "auto") else max(1, min(16, int(scale)))
     ck = (path, sc, bool(claims), owner)
     hit = _MAPIMG_CACHE.get(ck)
-    if hit and hit[0] == mt:
+    if not force and hit and hit[0] == mt:
         return hit[1], "map%d.png" % map_id, {"cached": True}
     res = mapdt.render_png(path, world_dir=world_dir, block_class=_block_class(world_dir),
                            scale=sc, claims=claims, only_owner=owner)

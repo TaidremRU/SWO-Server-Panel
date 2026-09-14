@@ -966,14 +966,15 @@ class WebUI:
         return self._json(h, d, 200 if d.get("ok") else 500)
 
     def _api_mapdt_image(self, h, method, q, sess):
-        """PNG-картинка карты: ?map=N&scale=auto&claims=1&owner=<id>."""
+        """PNG-картинка карты: ?map=N&scale=auto&claims=1&owner=<id>&force=1."""
         mp = (q.get("map") or ["1"])[0]
         scale = (q.get("scale") or ["auto"])[0]
         claims = (q.get("claims") or ["1"])[0] not in ("0", "false", "no")
         owner = (q.get("owner") or [""])[0]
+        force = (q.get("force") or ["0"])[0] not in ("0", "", "false", "no")
         try:
             png, fn, meta = players.mapdt_image(self.cfg, mp, scale=scale,
-                                                claims=claims, owner=owner)
+                                                claims=claims, owner=owner, force=force)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: mapdt_image")
             return self._json(h, {"ok": False, "error": str(e)}, 500)
@@ -1657,7 +1658,7 @@ var T = {
   su_cargo:"груз", su_moving:"в движении", su_stopped:"стоит",
   st_toptech:"Популярные техи", st_researching:"изучает", st_tech:"тех", st_size:"размер",
   st_branch:"открывает", st_technote:"названия — что тех открывает в крафте (из craft.json + локализации клиента); ветка/тир — из дерева tech.json",
-  md_open:"разобрать .dt", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
+  md_open:"показать карту", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
   md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; имя и координаты в звёздной системе (Data\\world\\star1.json, id карты = id записи, реверс-инжиниринг — см. схему системы)",
@@ -1678,6 +1679,7 @@ var T = {
   mi_title:"Картинка карты", mi_wait:"рисую…", mi_claims:"клаймы", mi_owner:"владелец id",
   mi_hover_hint:"наведите курсор на карту", mi_free:"свободно",
   mi_rot_ccw:"повернуть против часовой на 45°", mi_rot_cw:"повернуть по часовой на 45°",
+  mi_review:"пересмотреть", mi_review_hint:"перерисовать карту заново, игнорируя кэш",
   mi_show:"показать", mi_water:"вода", mi_land:"суша", mi_grass:"природа", mi_mtn:"горы",
   mi_ore:"руда", mi_wall:"стены/пол", mi_built:"постройки", mi_claim:"клаймы = цвет по владельцу (галка), либо один владелец по id",
   st_toptechp:"Топ по числу техов", st_techs:"техов", st_resh:"часы иссл.",
@@ -1782,7 +1784,7 @@ var T = {
   su_cargo:"cargo", su_moving:"moving", su_stopped:"stopped",
   st_toptech:"Popular techs", st_researching:"researching", st_tech:"tech", st_size:"size",
   st_branch:"unlocks", st_technote:"names = what the tech unlocks in crafting (from craft.json + client localization); branch/tier from the tech.json tree",
-  md_open:"parse .dt", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
+  md_open:"show map", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
   md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; name and coordinates in the star system (Data\\world\\star1.json, map id = record id, reverse-engineered — see the system map)",
@@ -1803,6 +1805,7 @@ var T = {
   mi_title:"Map image", mi_wait:"rendering…", mi_claims:"claims", mi_owner:"owner id",
   mi_hover_hint:"hover over the map", mi_free:"free",
   mi_rot_ccw:"rotate 45° counter-clockwise", mi_rot_cw:"rotate 45° clockwise",
+  mi_review:"rescan", mi_review_hint:"re-render the map, ignoring the cache",
   mi_show:"show", mi_water:"water", mi_land:"land", mi_grass:"nature", mi_mtn:"mountains",
   mi_ore:"ore", mi_wall:"walls/floor", mi_built:"structures", mi_claim:"claims = colour per owner (checkbox), or one owner by id",
   st_toptechp:"Top by tech count", st_techs:"techs", st_resh:"research h",
@@ -2746,14 +2749,20 @@ function mapImageBlock(mapId){
   }
   zoom.oninput=applyView;
   applyView();
-  function reload(){
+  function reload(force){
     stat.textContent=t("mi_wait");
-    var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+"&_="+Date.now();
-    img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; applyView(); };
+    var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+(force?"&force=1":"")+"&_="+Date.now();
+    img.onload=function(){
+      stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; applyView();
+      // рендер картинки на сервере попутно обновляет и кэш сетки владения —
+      // к моменту onload он уже свежий, тянем заново только при форс-пересмотре
+      if(force) api("/api/mapdt-owners?map="+mapId+"&_="+Date.now()).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
+    };
     img.onerror=function(){ stat.textContent=t("err_net"); };
     img.src=u;
   }
-  claimsCb.onchange=reload;
+  var reviewBtn=el("button",{class:"small",title:t("mi_review_hint"),onclick:function(){ reload(true); }},["⟳ "+t("mi_review")]);
+  claimsCb.onchange=function(){ reload(); };
   ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
   api("/api/mapdt-owners?map="+mapId).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
   img.addEventListener("mousemove",function(e){
@@ -2785,9 +2794,9 @@ function mapImageBlock(mapId){
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
       el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
-      rotCcw, rotLbl, rotCw,
+      rotCcw, rotLbl, rotCw, reviewBtn,
       el("span",{class:"muted small"},["🔍"]), zoom,
-      ownIn, el("button",{class:"small",onclick:reload},[t("mi_show")]), stat ]),
+      ownIn, el("button",{class:"small",onclick:function(){ reload(); }},[t("mi_show")]), stat ]),
     wrap, info.el, leg ]);
 }
 function lgSwatch(rgb, label){
