@@ -31,7 +31,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import common
@@ -1540,8 +1540,9 @@ class WebUI:
             threading.Timer(1.5, self._shutdown_supervisor).start()
             return ok, txt
         if op == "restarttask":
-            self._detached_task_restart(self.cfg.get("task_name", "SigmaSteamBot"))
-            return True, "задача перезапускается — панель оборвётся на ~10 секунд, обновите страницу"
+            ok = self._detached_task_restart(self.cfg.get("task_name", "SigmaSteamBot"))
+            return ok, ("задача перезапустится через ~15 с — панель оборвётся на это время, обновите страницу"
+                        if ok else "не удалось создать задачу перезапуска — см. logs/supervisor.log")
         if op == "testalert":
             self.bot.push_alert("🔔 Тест-алерт из веб-панели • %s" % _now_iso())
             return True, "тест-алерт поставлен в очередь отправки администраторам"
@@ -1589,15 +1590,40 @@ class WebUI:
             logging.exception("webui: stop bot")
 
     def _detached_task_restart(self, task):
-        flags = (getattr(subprocess, "DETACHED_PROCESS", 0x8)
-                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200))
-        cmd = ('timeout /t 2 /nobreak >nul & schtasks /End /TN "%s" & '
-               'timeout /t 3 /nobreak >nul & schtasks /Change /TN "%s" /ENABLE & '
-               'schtasks /Run /TN "%s"') % (task, task, task)
-        logging.info("webui: перезапуск задачи %s отдельным процессом", task)
-        subprocess.Popen(["cmd", "/c", cmd], creationflags=flags, close_fds=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+        """Перезапустить задачу планировщика, не полагаясь на то, что наш же
+        процесс переживёт собственный ``schtasks /End``.
+
+        Раньше End→Run гнались отдельным detached cmd.exe, запущенным ИЗ этого
+        же процесса — но Task Scheduler держит все процессы задачи в одном
+        Job Object, и когда ``/End`` завершает задачу, вместе с ней убивается
+        и подряженный (detached) потомок, несмотря на DETACHED_PROCESS/
+        CREATE_NEW_PROCESS_GROUP (это флаги консоли/группы процессов, а не
+        job'ы). End→Run молча не доезжал до конца именно поэтому. Решение —
+        не подряжать потомка самим, а зарегистрировать ОДНОРАЗОВУЮ задачу в
+        самом планировщике (SC ONCE, через ~15 с): её запускает служба
+        планировщика заново, отдельно от нашего job'а, так что наша смерть на
+        End её не касается. Самоудаляется последней командой в своей же
+        цепочке — флаг ``/Z`` тут не работает, валит создание задачи ошибкой
+        в XML EndBoundary. 15 с, а не 5 — на глаз (проверено на .108):
+        schtasks сам предупреждает и не гарантирует запуск, если /ST ближе
+        ~10 с к текущему моменту (round-trip создания задачи + погрешность
+        планировщика)."""
+        helper = task + "RestartHelper"
+        when = (datetime.now() + timedelta(seconds=15)).strftime("%H:%M:%S")
+        tr = ('cmd /c "schtasks /End /TN {t} & schtasks /Change /TN {t} /ENABLE '
+              '& schtasks /Run /TN {t} & schtasks /Delete /F /TN {h}"').format(t=task, h=helper)
+        r = subprocess.run(
+            ["schtasks", "/Create", "/F", "/SC", "ONCE", "/ST", when,
+             "/TN", helper, "/TR", tr],
+            capture_output=True, timeout=15,
+        )
+        ok = r.returncode == 0
+        if ok:
+            logging.info("webui: задача %s перезапустится в %s через одноразовую %s", task, when, helper)
+        else:
+            logging.error("webui: не удалось создать %s: %s", helper,
+                          r.stderr.decode("cp866", "replace").strip() or r.stdout.decode("cp866", "replace").strip())
+        return ok
 
 
 # --------------------------------------------------------------------------- SPA
