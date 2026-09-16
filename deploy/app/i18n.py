@@ -64,6 +64,15 @@ L = {
             "через SSH/RDP."
         ),
 
+        # --- веб-панель ---
+        "webui.info": (
+            "🌐 Веб-панель: <code>{url}</code>\n"
+            "Забыли пароль? <code>/webui reset</code> сбросит на admin/admin "
+            "(панель попросит сменить при следующем входе)."
+        ),
+        "webui.disabled": "🌐 Веб-панель выключена в config.json (webui.enabled=false).",
+        "webui.reset_done": "🔑 Пароль веб-панели сброшен на admin/admin — смените при входе.",
+
         # --- алерты ---
         "alert.bot_started": "🟢 <b>SigmaSteamBot запущен</b>",
         "alert.vm_back": "✅ <b>VM снова в сети</b> (после перезагрузки)",
@@ -183,6 +192,7 @@ L = {
             "/restartsteam — перезапуск Steam\n"
             "/restartvm — перезагрузка VM (с подтверждением)\n"
             "/watchdog on|off — авто-поддержание игры\n"
+            "/webui [reset] — адрес веб-панели / сброс её пароля на admin/admin\n"
             "/lang ru|en — язык интерфейса\n"
             "/stopbot — остановить сам скрипт (с подтверждением; запуск обратно — только с VM)\n\n"
             "Ниже — кнопки для того же самого."
@@ -259,6 +269,15 @@ L = {
             "not on VM reboot). The game and Steam keep running. Bringing it back — only "
             "from the VM via SSH/RDP."
         ),
+
+        # --- web panel ---
+        "webui.info": (
+            "🌐 Web panel: <code>{url}</code>\n"
+            "Forgot the password? <code>/webui reset</code> resets it to admin/admin "
+            "(the panel will ask you to change it on next login)."
+        ),
+        "webui.disabled": "🌐 Web panel disabled in config.json (webui.enabled=false).",
+        "webui.reset_done": "🔑 Web panel password reset to admin/admin — change it on login.",
 
         # --- alerts ---
         "alert.bot_started": "🟢 <b>SigmaSteamBot started</b>",
@@ -379,6 +398,7 @@ L = {
             "/restartsteam — restart Steam\n"
             "/restartvm — reboot the VM (with confirmation)\n"
             "/watchdog on|off — auto-keep the game up\n"
+            "/webui [reset] — web panel URL / reset its password to admin/admin\n"
             "/lang ru|en — interface language\n"
             "/stopbot — stop the script itself (with confirmation; restart only from the VM)\n\n"
             "The buttons below do the same."

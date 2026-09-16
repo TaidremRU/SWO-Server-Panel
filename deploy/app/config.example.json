@@ -60,20 +60,34 @@
 
   "game_window_size": [1024, 768],
   "login_flow": {
-    "_comment": "координаты ОТНОСИТЕЛЬНО окна игры при game_window_size; сверьте через nav.py shot",
+    "_comment": "координаты в % ширины/высоты окна игры (xp,yp: 0..100) — не зависят от реального "
+                "разрешения/DPI конкретной машины. Настраивать удобнее всего через вкладку «Вход» "
+                "веб-панели (клик по свежему скрину сам подставляет xp/yp); nav.py shot/clickp — "
+                "запасной путь через SSH. Старый формат (абсолютные пиксели x,y при game_window_size) "
+                "по-прежнему поддерживается для уже настроенных конфигов.",
     "menu_steps": [
-      {"action": "click", "x": 866, "y": 496, "wait": 2.5, "tag": "game"},
-      {"action": "click", "x": 450, "y": 290, "wait": 2.5, "tag": "local"},
-      {"action": "ensure_check", "x": 226, "y": 364, "wait": 1.0, "tag": "steamlist"},
-      {"action": "click", "x": 301, "y": 513, "wait": 3.0, "tag": "play"}
+      {"action": "click", "xp": 84.57, "yp": 64.58, "wait": 2.5, "tag": "game"},
+      {"action": "click", "xp": 43.95, "yp": 37.76, "wait": 2.5, "tag": "local"},
+      {"action": "ensure_check", "xp": 22.07, "yp": 47.40, "wait": 1.0, "tag": "steamlist"},
+      {"action": "click", "xp": 29.39, "yp": 66.80, "wait": 3.0, "tag": "play"}
     ],
-    "ok": {"x": 511, "y": 525},
+    "ok": {"xp": 49.90, "yp": 68.36},
     "await_menu_timeout": 60,
     "await_login_timeout": 120,
     "await_ingame_timeout": 150,
+    "_account_steps_comment": "опционально: шаги ДО клика по Ok, выполняются только если задан "
+                              "cfg.active_account — напр. очистить поле логина и напечатать его "
+                              "заново под нужный аккаунт. {account_user}/{account_password} — "
+                              "подставляются из активной записи cfg.game_accounts. Пример: "
+                              "[{\"action\":\"click\",\"xp\":41,\"yp\":38,\"tag\":\"loginfield\"}, "
+                              "{\"action\":\"key\",\"key\":\"ctrla\"}, "
+                              "{\"action\":\"type\",\"text\":\"{account_user}\"}, "
+                              "{\"action\":\"key\",\"key\":\"tab\"}, "
+                              "{\"action\":\"type\",\"text\":\"{account_password}\"}]",
+    "account_steps": [],
     "_after_ingame_comment": "шаги ПОСЛЕ входа в мир (напр. открыть чат кликом по иконке в тулбаре); пусто = ничего",
     "after_ingame": [
-      {"action": "click", "x": 547, "y": 702, "wait": 1.5, "tag": "openchat"}
+      {"action": "click", "xp": 53.42, "yp": 91.41, "wait": 1.5, "tag": "openchat"}
     ]
   },
 

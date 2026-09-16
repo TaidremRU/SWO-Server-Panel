@@ -64,6 +64,7 @@ def main():
 
                 web = WebUI(cfg, state, bot, wd)
                 web.start()
+                bot.web = web
             except Exception:  # noqa: BLE001
                 logging.exception("supervisor: веб-панель не запустилась (продолжаю без неё)")
                 web = None

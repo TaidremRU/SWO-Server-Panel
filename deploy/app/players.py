@@ -901,6 +901,46 @@ def mapdt_summary(cfg, map_id):
     return d
 
 
+_MAPDT_CONTAINERS_CACHE = {}
+
+
+def mapdt_containers(cfg, map_id, min_items=1, cap=2000):
+    """«Контейнер (x,y) → что лежит» по всей карте map<N>.dt (все контейнеры,
+    без привязки к конкретному предмету — в отличие от mapdt_find). Кэш по mtime."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        map_id = int(map_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    path = os.path.join(world_dir, "Data", "maps", "map%d.dt" % map_id)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return {"ok": False, "error": "нет файла map%d.dt" % map_id}
+    ck = (path, cap)
+    hit = _MAPDT_CONTAINERS_CACHE.get(ck)
+    if hit and hit[0] == mt:
+        d = hit[1]
+    else:
+        t0 = time.time()
+        items = load_items(world_dir)
+        d = mapdt.list_containers(path, world_dir=world_dir, item_names=items, cap=cap, min_items=1)
+        if d.get("ok"):
+            d["map"] = map_id
+            d["parse_sec"] = round(time.time() - t0, 2)
+        _MAPDT_CONTAINERS_CACHE[ck] = (mt, d)
+    if not d.get("ok") or min_items <= 1:
+        return d
+    out = dict(d)
+    out["containers"] = [c for c in d["containers"] if c["total"] >= min_items]
+    out["total_spots"] = len(out["containers"])
+    return out
+
+
 def mapdt_index(cfg):
     """Список карт с базовой инфой + отметкой, разобрана ли уже (в кэше)."""
     world_dir = find_world_dir(cfg)

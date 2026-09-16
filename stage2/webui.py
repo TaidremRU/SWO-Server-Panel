@@ -241,6 +241,14 @@ class AuthStore:
             self.d = self._make(newuser or self.username, newpw, must_change=False)
             self._save()
 
+    def reset(self):
+        """Сброс на admin/admin + must_change (забытый пароль, без доступа к RDP) —
+        дергается командой /webui reset из Telegram."""
+        with self._lock:
+            self.d = self._make("admin", "admin", must_change=True)
+            self._save()
+        logging.warning("webui: пароль сброшен на admin/admin через /webui reset")
+
     def _save(self):
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -435,11 +443,24 @@ class WebUI:
                 return
 
     # ------------------------------------------------------------------- audit
+    _AUDIT_MAX_BYTES = 5 * 1024 * 1024  # ротация: .log -> .log.1 (один бэкап)
+
     def audit(self, ip, user, msg):
         line = "%s\t%s\t%s\t%s\n" % (_now_iso(), ip, user, msg)
         try:
-            with self._audit_lock, open(self._audit_path, "a", encoding="utf-8") as f:
-                f.write(line)
+            with self._audit_lock:
+                try:
+                    if os.path.getsize(self._audit_path) > self._AUDIT_MAX_BYTES:
+                        old = self._audit_path + ".1"
+                        try:
+                            os.remove(old)
+                        except OSError:
+                            pass
+                        os.rename(self._audit_path, old)
+                except OSError:
+                    pass  # файла ещё нет — обычное дело при первом запуске
+                with open(self._audit_path, "a", encoding="utf-8") as f:
+                    f.write(line)
         except OSError:
             logging.exception("webui: не удалось записать аудит")
         logging.info("webui audit: %s [%s] %s", user, ip, msg)
@@ -498,6 +519,8 @@ class WebUI:
                                   {"Cache-Control": "no-store"})
             if path == "/favicon.ico":
                 return self._send(h, 204, "text/plain", b"")
+            if path == "/healthz":
+                return self._api_healthz(h)
             if not path.startswith("/api/"):
                 return self._send(h, 404, "text/plain; charset=utf-8", b"not found")
 
@@ -555,6 +578,22 @@ class WebUI:
                 pass
 
     # ------------------------------------------------------------------ public
+    def _api_healthz(self, h):
+        """Без авторизации, для внешнего аптайм-мониторинга: отдаёт только
+        неконфиденциальные булевы флаги из уже готового снапшота (без live-collect,
+        чтобы неавторизованный эндпоинт не давал повод гонять тяжёлую работу)."""
+        snap = self.state.data.get("last_snapshot") or {}
+        steam = snap.get("steam") or {}
+        game = snap.get("game") or {}
+        body = json.dumps({
+            "ok": True,
+            "supervisor_up": True,
+            "steam_up": bool(steam.get("running")),
+            "game_up": bool(game.get("running")),
+            "snapshot_age": int(time.time() - snap["ts"]) if snap.get("ts") else None,
+        }).encode("utf-8")
+        return self._send(h, 200, "application/json", body, {"Cache-Control": "no-store"})
+
     def _api_session(self, h):
         _, sess = self._session_of(h)
         out = {"app": "SigmaSteamBot", "version": VERSION, "authed": bool(sess),
@@ -994,6 +1033,19 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_mapdt_containers(self, h, method, q, sess):
+        """Непустые контейнеры карты: ?map=N&min=1 -> [{x,y,slot,items,total}]."""
+        try:
+            mn = max(1, int((q.get("min") or ["1"])[0]))
+        except ValueError:
+            mn = 1
+        try:
+            d = players.mapdt_containers(self.cfg, (q.get("map") or ["1"])[0], min_items=mn)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: mapdt_containers")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
     def _api_player_item_find(self, h, method, q, sess):
         """Кто из игроков держит предмет: ?item=<id|имя|подстрока>."""
         item = (q.get("item") or [""])[0]
@@ -1198,6 +1250,31 @@ class WebUI:
             return self._json(h, {"error": "read"}, 404)
         return self._send(h, 200, "image/png", data, {"Cache-Control": "no-store"})
 
+    # -------------------------------------------------------------- login_flow
+    def _api_login_flow(self, h, method, q, sess):
+        """Тюнер координат входа (вкладка «Вход»): отдельный маленький JSON-редактор
+        login_flow, не завязанный на общую форму /api/settings."""
+        if method == "GET":
+            return self._json(h, {
+                "ok": True,
+                "login_flow": self.cfg.get("login_flow", {}) or {},
+                "game_window_size": self.cfg.get("game_window_size", [1024, 768]),
+                "active_account": self.cfg.get("active_account") or "",
+                "game_accounts": [a.get("label") for a in (self.cfg.get("game_accounts") or [])],
+            })
+        b = self._body(h)
+        lf = b.get("login_flow")
+        if not isinstance(lf, dict):
+            return self._json(h, {"error": "invalid", "detail": "login_flow: ожидается объект"}, 400)
+        self.cfg["login_flow"] = lf
+        try:
+            common.save_config(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: login_flow save_config")
+            return self._json(h, {"error": "save_failed", "detail": str(e)}, 500)
+        self.audit(h.client_address[0], sess["user"], "login_flow: сохранён из тюнера")
+        return self._json(h, {"ok": True})
+
     # ------------------------------------------------------------------- roles
     def _api_roles(self, h, method, q, sess):
         tg = self.cfg.get("telegram", {}) or {}
@@ -1296,9 +1373,10 @@ class WebUI:
                 "ok": True, "sections": sections,
                 "game_accounts": accs, "active_account": self.cfg.get("active_account") or "",
                 "login_flow_json": json.dumps(lf, ensure_ascii=False, indent=2),
-                "restart_hint_ru": "большинство изменений применяются после перезапуска задачи "
-                                   "(кнопка «Перезапустить задачу» на вкладке «Действия»); "
-                                   "роли/язык/алерты — сразу.",
+                "restart_hint_ru": "watchdog, монитор сервера, роли/язык/алерты применяются сразу; "
+                                   "остальное (веб-панель, players.*, serverlist.*, поля Telegram-"
+                                   "подключения) — после перезапуска задачи (кнопка «Перезапустить "
+                                   "задачу» на вкладке «Действия»).",
             })
 
         b = self._body(h)
@@ -1371,6 +1449,15 @@ class WebUI:
             self.bot.apply_roles(self.cfg.get("telegram", {}))
         except Exception:  # noqa: BLE001
             logging.exception("webui: apply_roles after settings")
+        try:
+            self.bot.apply_monitor(self.cfg.get("monitor", {}))
+        except Exception:  # noqa: BLE001
+            logging.exception("webui: apply_monitor after settings")
+        try:
+            if self.wd:
+                self.wd.apply()
+        except Exception:  # noqa: BLE001
+            logging.exception("webui: watchdog apply after settings")
         self.audit(h.client_address[0], sess["user"],
                    "настройки: изменено %d полей%s%s" % (
                        len(vals), " +login_flow" if b.get("login_flow") else "",
@@ -1379,7 +1466,8 @@ class WebUI:
 
     # ----------------------------------------------------------------- actions
     _OPS = {"startgame", "stopgame", "restartgame", "restartsteam", "login",
-            "watchdog", "restartvm", "stopbot", "restarttask", "testalert"}
+            "watchdog", "restartvm", "stopbot", "restarttask", "testalert",
+            "navshot", "navstate", "navclickp"}
     _CONFIRM = {"restartvm", "stopbot", "restarttask"}
 
     def _api_action(self, h, method, q, sess):
@@ -1451,7 +1539,36 @@ class WebUI:
         if op == "testalert":
             self.bot.push_alert("🔔 Тест-алерт из веб-панели • %s" % _now_iso())
             return True, "тест-алерт поставлен в очередь отправки администраторам"
+        if op in ("navshot", "navstate", "navclickp"):
+            return self._do_nav_op(op, b)
         return False, "неизвестная операция"
+
+    def _do_nav_op(self, op, b):
+        """Тюнер входа: гоняет nav.py через задачу SigmaNav (runner.run_nav) —
+        та же интерактивная сессия, что и авто-вход watchdog'а."""
+        try:
+            import runner
+        except Exception as e:  # noqa: BLE001
+            return False, "модуль runner недоступен: %s" % e
+        if op == "navshot":
+            args = "shot tuner"
+        elif op == "navstate":
+            args = "state"
+        else:  # navclickp
+            try:
+                xp, yp = float(b.get("xp")), float(b.get("yp"))
+            except (TypeError, ValueError):
+                return False, "нужны числовые xp/yp"
+            button = "right" if b.get("button") == "right" else "left"
+            args = "clickp %.3f %.3f %s tuner%s" % (xp, yp, button, " --dbl" if b.get("dbl") else "")
+        try:
+            _ok, out = runner.run_nav(args, timeout=60)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: nav op %s", op)
+            return False, "ошибка: %s" % e
+        failed = any(m in out for m in ("Traceback", "RuntimeError", "не найдено"))
+        tail = "\n".join(ln for ln in out.strip().splitlines()[-6:])
+        return (not failed), tail or "(нет вывода)"
 
     def _shutdown_supervisor(self):
         logging.info("webui: /stopbot — останавливаю watchdog и бота")
@@ -1594,7 +1711,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1622,6 +1739,11 @@ var T = {
   roles_super:"Главный админ (super_admin_id)", roles_lang:"Язык бота по умолчанию",
   set_save:"Сохранить настройки", set_saved:"Сохранено", set_restart:"Часть изменений применится после перезапуска задачи.", set_accounts:"Игровые аккаунты", set_acc_add:"＋ аккаунт", set_acc_label:"метка", set_acc_user:"логин", set_acc_pw:"пароль (пусто = не менять)", set_acc_active:"активный", set_lf:"login_flow (JSON, продвинутое)", set_secret_set:"задан", set_secret_ph:"оставьте пустым, чтобы не менять", roles_alerts:"Алерты в Telegram включены", roles_hint:"ID через запятую/пробел/с новой строки. ID из обоих списков считается администратором. Нужен ≥1 админ. Главный админ должен быть среди администраторов.",
   save:"Сохранить", saved:"Сохранено, роли применены на лету",
+  entry_intro:"Тюнер координат входа: снимок окна игры, клик по нему — проценты ширины/высоты окна (не зависят от разрешения/DPI). Требует запущенную задачу SigmaNav в интерактивной сессии.",
+  entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
+  entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
+  entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
+  entry_add_step:"+ шаг из выбранной точки", entry_use_pick:"взять выбранную точку", entry_saved:"Сохранено",
   log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)",
   level:"Уровень", lines:"строк", download:"Скачать", navshots_none:"Скринов последовательности входа нет",
   chpass_title:"Смена пароля", chpass_note:"Вход по умолчанию admin/admin. Смените пароль сейчас — минимум 6 символов, не «admin».",
@@ -1661,6 +1783,8 @@ var T = {
   md_open:"показать карту", md_title:"Карта .dt", md_parsing:"разбираю бинарную карту (крупная — до ~15 c)…",
   md_blocks:"блоки", md_machines:"машины", md_ore:"руда / камень", md_containers:"в контейнерах мира",
   md_landowners:"владельцы земли (блоки 8×8)", md_ground:"суша / вода", md_misc:"прочее",
+  md_containers_list:"Содержимое контейнеров", md_containers_filter:"фильтр по предмету",
+  md_containers_col_where:"Где", md_containers_col_items:"Содержимое", md_containers_capped:"список обрезан лимитом",
   md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; имя и координаты в звёздной системе (Data\\world\\star1.json, id карты = id записи, реверс-инжиниринг — см. схему системы)",
   md_spacename:"имя в космосе (коорд.)",
   su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
@@ -1720,7 +1844,7 @@ var T = {
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -1748,6 +1872,11 @@ var T = {
   roles_super:"Super admin (super_admin_id)", roles_lang:"Default bot language",
   set_save:"Save settings", set_saved:"Saved", set_restart:"Some changes take effect after restarting the task.", set_accounts:"Game accounts", set_acc_add:"＋ account", set_acc_label:"label", set_acc_user:"username", set_acc_pw:"password (empty = keep)", set_acc_active:"active", set_lf:"login_flow (JSON, advanced)", set_secret_set:"set", set_secret_ph:"leave empty to keep", roles_alerts:"Telegram alerts enabled", roles_hint:"IDs separated by comma / space / newline. An ID in both lists counts as admin. At least one admin required. Super admin must be one of the admins.",
   save:"Save", saved:"Saved, roles applied live",
+  entry_intro:"Login-flow coordinate tuner: a screenshot of the game window, click on it — percent of window width/height (resolution/DPI independent). Needs the SigmaNav scheduled task running in an interactive session.",
+  entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
+  entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
+  entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
+  entry_add_step:"+ step from picked point", entry_use_pick:"use picked point", entry_saved:"Saved",
   log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)",
   level:"Level", lines:"lines", download:"Download", navshots_none:"No login-sequence screenshots",
   chpass_title:"Change password", chpass_note:"Default login is admin/admin. Change it now — at least 6 characters, not \"admin\".",
@@ -1787,6 +1916,8 @@ var T = {
   md_open:"show map", md_title:"Map .dt", md_parsing:"parsing binary map (big one — up to ~15 s)…",
   md_blocks:"blocks", md_machines:"machines", md_ore:"ore / stone", md_containers:"in world containers",
   md_landowners:"land owners (8×8 blocks)", md_ground:"land / water", md_misc:"misc",
+  md_containers_list:"Container contents", md_containers_filter:"filter by item",
+  md_containers_col_where:"Where", md_containers_col_items:"Contents", md_containers_capped:"list capped by limit",
   md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; name and coordinates in the star system (Data\\world\\star1.json, map id = record id, reverse-engineered — see the system map)",
   md_spacename:"space name (coord.)",
   su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
@@ -1899,14 +2030,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -2085,6 +2216,121 @@ function pollJob(id,m){
       if(S.tab==="dash") loadState(false);
     }).catch(function(){ clearInterval(iv); m.className="msg err"; m.textContent=t("err_net"); });
   },1500);
+}
+
+// ---- entry (login-flow tuner) ----
+function tabEntry(v){
+  var LF=null, PICK=null;
+  var img=el("img",{style:"max-width:100%;border:1px solid var(--bd);cursor:crosshair;display:block;background:#0002"},[]);
+  var pickInfo=el("div",{class:"muted small"},[t("entry_pick_hint")]);
+  var out=el("div",{},[]);
+  var stepsBox=el("div",{},[]);
+
+  img.addEventListener("click", function(e){
+    var r=img.getBoundingClientRect();
+    if(!r.width||!r.height) return;
+    PICK={xp:(e.clientX-r.left)/r.width*100, yp:(e.clientY-r.top)/r.height*100};
+    pickInfo.textContent=t("entry_pick")+": xp="+PICK.xp.toFixed(2)+"  yp="+PICK.yp.toFixed(2);
+  });
+  function refreshShot(){ img.src="/api/nav-shot?name=latest.png&_="+Date.now(); }
+  function act(op, extra){
+    var m=el("div",{class:"msg info"},[t("working")]);
+    out.innerHTML=""; out.appendChild(m);
+    api("/api/action",{body:Object.assign({op:op},extra||{})}).then(function(j){
+      pollJob(j.job, m); setTimeout(refreshShot, 1200);
+    }).catch(function(e){ m.className="msg err"; m.textContent=errText(e); });
+  }
+  function stepRow(list, key, i, s){
+    function fld(prop,ph,w){
+      var inp=el("input",{value:s[prop]!=null?s[prop]:"",placeholder:ph||"",style:"width:"+(w||58)+"px"},[]);
+      inp.addEventListener("change",function(){
+        var v=inp.value;
+        s[prop]=(prop==="xp"||prop==="yp"||prop==="wait")? (v===""?undefined:parseFloat(v)) : v;
+      });
+      return inp;
+    }
+    var actSel=el("select",{},["click","ensure_check","type","key"].map(function(a){
+      return el("option",{value:a,selected:s.action===a},[a]); }));
+    actSel.addEventListener("change",function(){ s.action=actSel.value; drawSteps(); });
+    var extraFld = (s.action==="type") ? fld("text","{account_user}",110)
+                  : (s.action==="key") ? fld("key","enter",70)
+                  : fld("tag","tag",70);
+    var btn=el("select",{},["left","right"].map(function(b){
+      return el("option",{value:b,selected:(s.button||"left")===b},[b]); }));
+    btn.addEventListener("change",function(){ s.button=btn.value; });
+    var dbl=el("input",{type:"checkbox",checked:!!s.dbl},[]);
+    dbl.addEventListener("change",function(){ s.dbl=dbl.checked; });
+    var showXY = s.action==="click" || s.action==="ensure_check";
+    var del=el("button",{class:"small danger",onclick:function(){ list.splice(i,1); drawSteps(); }},["×"]);
+    var pickBtn=el("button",{class:"small",title:t("entry_use_pick"),onclick:function(){
+      if(!PICK) return; s.xp=+PICK.xp.toFixed(2); s.yp=+PICK.yp.toFixed(2); drawSteps(); }},["◎"]);
+    return el("tr",{},[
+      el("td",{},[String(i+1)]), el("td",{},[actSel]),
+      el("td",{},[showXY? fld("xp",null,50):null]), el("td",{},[showXY? fld("yp",null,50):null]),
+      el("td",{},[showXY? pickBtn:null]),
+      el("td",{},[extraFld]), el("td",{},[fld("wait","1.5",45)]),
+      el("td",{},[showXY? btn:null]), el("td",{},[showXY? dbl:null]), el("td",{},[del]),
+    ]);
+  }
+  function stepGroup(key, title){
+    LF[key]=LF[key]||[];
+    var list=LF[key];
+    var box=el("div",{class:"card"},[el("h3",{},[title+" · "+list.length])]);
+    var tb=el("table",{},[el("tr",{},["#","action","xp","yp","","text/key","wait","btn","2×",""].map(function(x){
+      return el("th",{},[x]); }))]);
+    list.forEach(function(s,i){ tb.appendChild(stepRow(list, key, i, s)); });
+    box.appendChild(tb);
+    box.appendChild(el("div",{class:"row",style:"margin-top:6px"},[
+      el("button",{class:"small",onclick:function(){
+        var s={action:"click", wait:1.5, tag:key};
+        if(PICK){ s.xp=+PICK.xp.toFixed(2); s.yp=+PICK.yp.toFixed(2); }
+        list.push(s); drawSteps();
+      }},[t("entry_add_step")]),
+    ]));
+    return box;
+  }
+  function drawSteps(){
+    stepsBox.innerHTML="";
+    stepsBox.appendChild(stepGroup("menu_steps", "menu_steps"));
+    stepsBox.appendChild(stepGroup("account_steps", "account_steps"));
+    stepsBox.appendChild(stepGroup("after_ingame", "after_ingame"));
+    LF.ok=LF.ok||{};
+    var okxp=el("input",{value:LF.ok.xp!=null?LF.ok.xp:"",style:"width:60px"},[]);
+    var okyp=el("input",{value:LF.ok.yp!=null?LF.ok.yp:"",style:"width:60px"},[]);
+    okxp.addEventListener("change",function(){ LF.ok.xp=parseFloat(okxp.value); });
+    okyp.addEventListener("change",function(){ LF.ok.yp=parseFloat(okyp.value); });
+    stepsBox.appendChild(el("div",{class:"card"},[el("h3",{},["ok"]),
+      el("div",{class:"row"},[el("span",{},["xp"]),okxp,el("span",{},["yp"]),okyp,
+        el("button",{class:"small",onclick:function(){
+          if(!PICK) return; LF.ok={xp:+PICK.xp.toFixed(2),yp:+PICK.yp.toFixed(2)}; drawSteps(); }},[t("entry_use_pick")])
+      ])]));
+    stepsBox.appendChild(el("div",{class:"row",style:"margin-top:10px"},[
+      el("button",{class:"small",onclick:save},[t("save")])]));
+  }
+  function save(){
+    var m=el("div",{class:"msg info"},[t("working")]);
+    out.innerHTML=""; out.appendChild(m);
+    api("/api/login-flow",{body:{login_flow:LF}}).then(function(){
+      m.className="msg ok"; m.textContent="✅ "+t("entry_saved");
+    }).catch(function(e){ m.className="msg err"; m.textContent=errText(e); });
+  }
+  v.appendChild(el("div",{},[
+    el("p",{class:"muted"},[t("entry_intro")]),
+    el("div",{class:"row",style:"flex-wrap:wrap;gap:8px;margin-bottom:10px"},[
+      el("button",{class:"small",onclick:function(){ act("navshot"); }},[t("entry_shot")]),
+      el("button",{class:"small",onclick:function(){ act("navstate"); }},[t("entry_state")]),
+      el("button",{class:"small",onclick:function(){ if(PICK) act("navclickp",{xp:PICK.xp,yp:PICK.yp}); }},[t("entry_testclick")]),
+      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("entry_seq_confirm"))) runAction("login",{},0,t("entry_seq")); }},[t("entry_seq")]),
+    ]),
+    out,
+    el("div",{class:"grid",style:"grid-template-columns:minmax(260px,1fr) minmax(320px,1.3fr);align-items:start"},[
+      el("div",{},[img, pickInfo]),
+      stepsBox,
+    ]),
+  ]));
+  api("/api/login-flow").then(function(j){ LF=j.login_flow||{}; drawSteps(); })
+    .catch(function(e){ out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  refreshShot();
 }
 
 // ---- servers ----
@@ -2651,7 +2897,42 @@ function openMapdt(mapId){
       ltable(["#",t("col_name"),"8×8"], (d.land_owners||[]).slice(0,20), function(r){
         return [String(r.owner), plLink(r.owner, r.name), String(r.blocks8)]; })]));
     card.appendChild(grid);
+    card.appendChild(mapdtContainersCard(mapId));
   }).catch(function(e){ card.innerHTML=""; card.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+function mapdtContainersCard(mapId){
+  var body=el("div",{},[]);
+  var filt=el("input",{placeholder:t("md_containers_filter"),style:"max-width:220px"},[]);
+  var CONT=null;
+  function draw(){
+    body.innerHTML="";
+    if(!CONT){ body.appendChild(el("p",{class:"muted"},["…"])); return; }
+    var q=(filt.value||"").trim().toLowerCase();
+    var rows=CONT.containers||[];
+    if(q) rows=rows.filter(function(c){ return c.items.some(function(it){ return (it.name||"").toLowerCase().indexOf(q)>=0; }); });
+    body.appendChild(el("p",{class:"muted"},[
+      CONT.total_spots+" · "+CONT.total_items+(CONT.capped? " ("+t("md_containers_capped")+")":"")
+    ]));
+    body.appendChild(ltable(["X","Y",t("md_containers_col_where"),t("md_containers_col_items")],
+      rows.slice(0,300), function(c){
+        return [String(c.x), String(c.y), c.slot,
+          c.items.map(function(it){ return (it.name||("#"+it.type))+" ×"+it.count; }).join(", ")];
+      }));
+  }
+  filt.addEventListener("input", draw);
+  function load(){
+    body.innerHTML=""; body.appendChild(el("p",{class:"muted"},["…"]));
+    api("/api/mapdt-containers?map="+mapId).then(function(d){
+      if(!d.ok){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+      CONT=d; draw();
+    }).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  return el("div",{class:"card wide"},[
+    el("h3",{},[t("md_containers_list")]),
+    el("div",{class:"row",style:"margin-bottom:8px"},[filt,
+      el("button",{class:"small",onclick:load},[t("tw_show")])]),
+    body,
+  ]);
 }
 function attachDragPan(wrap, info, zoom){
   // тащим карту зажатой ЛКМ (как рукой), не только скроллбарами

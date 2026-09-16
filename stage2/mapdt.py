@@ -376,7 +376,8 @@ def _load_item_ext(world_dir):
 
 # --------------------------------------------------------------------- публичное
 def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
-          paint=False, block_class=None, claims=True, only_owner=None, owners=False):
+          paint=False, block_class=None, claims=True, only_owner=None, owners=False,
+          list_containers=False, container_cap=2000):
     """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
 
     ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
@@ -385,6 +386,11 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
     ``paint`` — вернуть ``pixels`` (bytearray w*h*3, строки по y) с цветовой
     картой (вода/суша/горы/природа/постройки), ``block_class`` = {type: cat}.
     ``claims`` — тонировать застолблённую землю; ``only_owner`` — выделить одного.
+
+    ``list_containers`` — вернуть ``containers_list`` = ``[{x, y, slot,
+    items:[{type, count}]}]`` для всех НЕпустых контейнеров мира (не более
+    ``container_cap`` записей) — в отличие от ``want``, не требует заранее
+    знать искомый предмет.
     """
     try:
         with open(path, "rb") as f:
@@ -394,7 +400,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
 
     item_ext = _load_item_ext(world_dir)
     want = set(want) if want else None
-    ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap}
+    ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap,
+           "containers_list": [] if list_containers else None, "container_cap": container_cap}
     bc = block_class or {}
     r = _R(data)
     try:
@@ -451,8 +458,15 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                     machines[c["machine"]["type"]] += 1
                 for _slot, inv in c["containers"]:
                     container_count += 1
-                    for it in inv["items"]:
+                    nonzero = [it for it in inv["items"] if it.get("count")]
+                    for it in nonzero:
                         container_items[it["type"]] += it["count"]
+                    if (ctx["containers_list"] is not None and nonzero
+                            and len(ctx["containers_list"]) < container_cap):
+                        ctx["containers_list"].append({
+                            "x": _x, "y": _y, "slot": _slot,
+                            "items": [{"type": it["type"], "count": it["count"]} for it in nonzero],
+                        })
                 if c["gas"]:
                     gas_tiles += 1
                 if keep_grid:
@@ -547,6 +561,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
             "grid": grid,
             "hits": ctx["hits"] if want else None,
             "hits_capped": bool(want) and len(ctx["hits"]) >= cap,
+            "containers_list": ctx["containers_list"],
+            "containers_list_capped": bool(list_containers) and len(ctx["containers_list"]) >= container_cap,
             "pixels": px,
             "owner_grid": um_flat if (owners or paint) else None,
             "um_w": um_w, "um_h": um_h,
@@ -646,6 +662,38 @@ def find_item(path, want, world_dir=None, item_names=None, cap=20000, user_names
                      for o, v in by_owner.most_common()],
         "hits": hits,
         "capped": d.get("hits_capped", False),
+    }
+
+
+def list_containers(path, world_dir=None, item_names=None, cap=2000, min_items=1):
+    """Все непустые контейнеры карты ``path`` -> ``{ok, w, h, total_spots,
+    total_items, containers:[{x,y,slot,items:[{type,name,count}],total}], capped}``.
+
+    В отличие от ``find_item`` не требует знать искомый предмет заранее —
+    отдаёт «контейнер (x,y) → что лежит» списком, отсортированным по общему
+    числу предметов (сначала самые «жирные»).
+    """
+    d = parse(path, world_dir=world_dir, keep_grid=False, list_containers=True, container_cap=cap)
+    if not d.get("ok"):
+        return d
+    out = []
+    total_items = 0
+    for c in (d.get("containers_list") or []):
+        total = sum(it["count"] for it in c["items"])
+        if total < min_items:
+            continue
+        total_items += total
+        items = [dict(it, name=(item_names or {}).get(it["type"]) or ("#%s" % it["type"]))
+                 for it in c["items"]]
+        out.append({"x": c["x"], "y": c["y"], "slot": c["slot"], "items": items, "total": total})
+    out.sort(key=lambda c: -c["total"])
+    return {
+        "ok": True,
+        "w": d["w"], "h": d["h"],
+        "total_spots": len(out),
+        "total_items": total_items,
+        "containers": out,
+        "capped": d.get("containers_list_capped", False),
     }
 
 

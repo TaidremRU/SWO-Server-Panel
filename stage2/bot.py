@@ -37,9 +37,23 @@ MOD_ACTS = {"status", "shot", "game_restart", "login", "lang", "lang_ru", "lang_
 
 # что уходит в аудит главному админу — только действия, меняющие состояние
 # (не /status, /shot, /lang, не открытие диалогов подтверждения и не отказы)
-AUDIT_CMDS = {"startgame", "stopgame", "restartgame", "restartsteam", "login", "watchdog"}
+AUDIT_CMDS = {"startgame", "stopgame", "restartgame", "restartsteam", "login", "watchdog", "webui"}
 AUDIT_ACTS = {"game_start", "game_stop", "game_restart", "steam_restart", "login",
               "wd_toggle", "vm_yes", "bot_stop_yes"}
+
+
+def _lan_ip():
+    """Локальный LAN-адрес этой машины (без реальной отправки пакетов)."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 def _fmt_bytes(n, lang="ru"):
@@ -76,6 +90,7 @@ class Bot:
         self.cfg = cfg
         self.state = state
         self.wd = watchdog_ref
+        self.web = None  # проставляется супервизором после старта веб-панели (см. supervisor.py)
         tg = cfg["telegram"]
         self._who = {}  # uid -> отображаемое имя (для аудита)
         self.apply_roles(tg)  # _admins / _mods / allowed / _super_admin / _default_lang / alerts_enabled
@@ -87,7 +102,17 @@ class Bot:
         self._outbox = queue.Queue()
 
         # фоновый монитор наличия сервера в списке Steam-лобби
-        mon = cfg.get("monitor", {}) or {}
+        self.apply_monitor(cfg.get("monitor", {}) or {})
+
+    def apply_monitor(self, mon=None):
+        """Пересчитать параметры фонового монитора сервера из конфига.
+
+        Вызывается из ``__init__`` и веб-панелью после правки ``config.json`` —
+        имя сервера/интервалы/вкл-выкл меняются на лету, без перезапуска
+        супервизора (сам поток ``_monitor_loop`` живёт всегда, см. ``run()``,
+        и на каждой итерации проверяет ``self._mon_enabled``).
+        """
+        mon = mon if mon is not None else (self.cfg.get("monitor", {}) or {})
         self._mon_enabled = mon.get("enabled", True)
         self._mon_name = mon.get("server_name", "AstralSigma")
         self._mon_interval = max(60, int(mon.get("interval_seconds", 300)))
@@ -151,8 +176,7 @@ class Bot:
     def run(self):
         logging.info("bot: старт")
         threading.Thread(target=self._sender_loop, name="sender", daemon=True).start()
-        if self._mon_enabled:
-            threading.Thread(target=self._monitor_loop, name="srvmonitor", daemon=True).start()
+        threading.Thread(target=self._monitor_loop, name="srvmonitor", daemon=True).start()
         r = self.tg.get_updates(0, 0)
         if r.get("ok") and r.get("result"):
             self._offset = r["result"][-1]["update_id"] + 1
@@ -270,7 +294,8 @@ class Bot:
         if role == "moderator" and cmd and cmd not in MOD_CMDS:
             self.tg.send_message(chat, i18n.t(lang, "reply.denied_cmd"), self._menu(lang, role))
             return
-        if cmd in AUDIT_CMDS and not (cmd == "watchdog" and arg not in ("on", "off")):
+        if (cmd in AUDIT_CMDS and not (cmd == "watchdog" and arg not in ("on", "off"))
+                and not (cmd == "webui" and arg != "reset")):
             self._audit(uid, text.strip()[:120])
 
         if cmd in ("start", "help", "menu"):
@@ -310,6 +335,16 @@ class Bot:
                 self._set_lang_and_ack(chat, uid, arg)
             else:
                 self.tg.send_message(chat, i18n.t(lang, "prompt.lang"), self._lang_kb(lang))
+        elif cmd == "webui":
+            wui = self.cfg.get("webui", {}) or {}
+            if not wui.get("enabled", True) or not self.web:
+                self.tg.send_message(chat, i18n.t(lang, "webui.disabled"))
+            elif arg == "reset":
+                self.web.auth.reset()
+                self.tg.send_message(chat, i18n.t(lang, "webui.reset_done"))
+            else:
+                url = "http://%s:%s/" % (_lan_ip(), wui.get("port", 8080))
+                self.tg.send_message(chat, i18n.t(lang, "webui.info", url=url))
         else:
             self.tg.send_message(chat, i18n.t(lang, "reply.not_understood"), self._menu(lang, role))
 
@@ -538,15 +573,15 @@ class Bot:
 
     # ---------- фоновый монитор наличия сервера в списке ----------
     def _monitor_loop(self):
-        target = self._mon_name.lower().replace(" ", "")
         # первая проверка — не сразу на старте (дать Steam/игре подняться)
         if self._stop.wait(min(self._mon_interval, 90)):
             return
         while not self._stop.is_set():
-            try:
-                self._monitor_check(target)
-            except Exception:  # noqa: BLE001
-                logging.exception("srvmonitor: ошибка проверки")
+            if self._mon_enabled:
+                try:
+                    self._monitor_check(self._mon_name.lower().replace(" ", ""))
+                except Exception:  # noqa: BLE001
+                    logging.exception("srvmonitor: ошибка проверки")
             if self._stop.wait(self._mon_interval):
                 return
 

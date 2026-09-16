@@ -23,14 +23,7 @@ class Watchdog(threading.Thread):
         self.enabled = state.data.get("watchdog_enabled")
         if self.enabled is None:
             self.enabled = wd.get("enabled", True)
-        self.auto_steam = wd.get("auto_start_steam", True)
-        self.auto_game = wd.get("auto_start_game", True)
-        self.auto_login = wd.get("auto_login", True)
-        self.grace = wd.get("grace_after_launch_seconds", 150)
-        self.max_per_hour = wd.get("max_restarts_per_hour", 8)
-        self.poll = cfg.get("poll_seconds", 30)
-        self.login_settle = wd.get("login_settle_seconds", 25)
-        self.login_retry = wd.get("login_retry_seconds", 120)
+        self.apply()
         self._login_state = "idle"  # idle | running | done; do_seq сам определит «уже в игре»
         self._game_up_since = 0.0
         self._login_next = 0.0
@@ -47,6 +40,23 @@ class Watchdog(threading.Thread):
         with self.state.lock:
             self.state.data["watchdog_enabled"] = self.enabled
         self.state.save()
+
+    def apply(self):
+        """Пересчитать параметры из ``self.cfg`` (общий объект с webui/config.json).
+
+        Вызывается из ``__init__`` и веб-панелью после сохранения настроек —
+        auto_start_*/grace/лимиты/интервалы применяются на лету, без
+        перезапуска задачи планировщика.
+        """
+        wd = self.cfg.get("watchdog", {})
+        self.auto_steam = wd.get("auto_start_steam", True)
+        self.auto_game = wd.get("auto_start_game", True)
+        self.auto_login = wd.get("auto_login", True)
+        self.grace = wd.get("grace_after_launch_seconds", 150)
+        self.max_per_hour = wd.get("max_restarts_per_hour", 8)
+        self.poll = self.cfg.get("poll_seconds", 30)
+        self.login_settle = wd.get("login_settle_seconds", 25)
+        self.login_retry = wd.get("login_retry_seconds", 120)
 
     def stop(self):
         self._stop.set()

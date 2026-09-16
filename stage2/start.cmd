@@ -1,4 +1,4 @@
 @echo off
-REM Ручной запуск в консоли (для отладки). Штатно бот стартует задачей SigmaSteamBot.
-cd /d %~dp0
-"C:\Users\alex\gamebot\venv\Scripts\python.exe" supervisor.py
+REM Ручной запуск supervisor в консоли (для отладки). Штатно — задача SigmaSteamBot.
+cd /d "%~dp0"
+"%~dp0venv\Scripts\python.exe" supervisor.py

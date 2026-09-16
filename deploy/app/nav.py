@@ -10,7 +10,8 @@
 Команды:
     nav.py rect
     nav.py shot [tag]
-    nav.py click <rx> <ry> [left|right] [--dbl] [tag]
+    nav.py click  <rx> <ry> [left|right] [--dbl] [tag]     # абсолютные пиксели окна
+    nav.py clickp <xp> <yp> [left|right] [--dbl] [tag]     # % ширины/высоты окна (0..100)
     nav.py move  <rx> <ry> [tag]
     nav.py key   <name> [tag]
     nav.py seq   [<имя_последовательности>]     # из config.json -> "sequences"
@@ -24,10 +25,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import pydirectinput  # noqa: E402
 import win32gui  # noqa: E402
@@ -202,6 +204,55 @@ def _to_screen(hwnd, rx, ry):
     return l + int(rx), t + int(ry)
 
 
+def _cur_size(hwnd):
+    l, t, r, b = _rect(hwnd)
+    return max(1, r - l), max(1, b - t)
+
+
+def _pct_to_rel(hwnd, xp, yp):
+    """Проценты (0..100) окна -> пиксели ОТНОСИТЕЛЬНО окна, по ТЕКУЩЕМУ его размеру.
+
+    В отличие от абсолютных пикселей под фиксированный game_window_size,
+    работает независимо от реального разрешения/DPI конкретной машины —
+    достаточно, чтобы разметка UI игры была одинаковой пропорционально."""
+    w, h = _cur_size(hwnd)
+    return (float(xp) / 100.0) * w, (float(yp) / 100.0) * h
+
+
+def _step_xy(step):
+    """(xp,yp) в процентах для шага login_flow. Новый формат — step['xp']/['yp'].
+    Старый формат (абсолютные пиксели @ game_window_size из config.json) —
+    конвертируется на лету, чтобы не ломать уже настроенные конфиги."""
+    if "xp" in step and "yp" in step:
+        return float(step["xp"]), float(step["yp"])
+    return float(step["x"]) / WIN_W * 100.0, float(step["y"]) / WIN_H * 100.0
+
+
+def _resolve_template(text):
+    """Подставить {account_user}/{account_password} активного аккаунта (cfg.active_account
+    в cfg.game_accounts) — для шагов action=type при переключении игровых аккаунтов."""
+    if not text:
+        return text
+    active = CFG.get("active_account")
+    acc = next((a for a in (CFG.get("game_accounts") or []) if a.get("label") == active), None)
+    acc = acc or {}
+    return text.replace("{account_user}", acc.get("user", "")).replace(
+        "{account_password}", acc.get("password", ""))
+
+
+def click_pct(hwnd, xp, yp, button="left", dbl=False):
+    rx, ry = _pct_to_rel(hwnd, xp, yp)
+    _click_rel(hwnd, rx, ry, button, dbl)
+
+
+def do_click_pct(xp, yp, button="left", dbl=False, tag="afterclick"):
+    hwnd = _hwnd()
+    print("click%% rel=(%s,%s)" % (xp, yp))
+    click_pct(hwnd, float(xp), float(yp), button, dbl)
+    time.sleep(1.3)
+    return shot(tag, hwnd)
+
+
 def do_click(rx, ry, button="left", dbl=False, tag="afterclick"):
     hwnd = _hwnd()
     _force_focus(hwnd)
@@ -275,21 +326,37 @@ def _wait_state(hwnd, targets, timeout, tag):
     return seen
 
 
+def _check_half(hwnd):
+    w, _h = _cur_size(hwnd)
+    return max(4, int(round(11 * w / 1024.0)))
+
+
 def _run_menu_steps(hwnd, steps):
     for i, step in enumerate(steps, 1):
         act = step.get("action", "click")
         tag = "seq%02d_%s" % (i, step.get("tag", act))
         say("--- меню, шаг %d/%d: %s %s" % (i, len(steps), act, step))
         if act == "click":
-            _click_rel(hwnd, step["x"], step["y"], step.get("button", "left"), step.get("dbl"))
+            xp, yp = _step_xy(step)
+            click_pct(hwnd, xp, yp, step.get("button", "left"), step.get("dbl"))
         elif act == "ensure_check":
-            if detect.is_checked(shot(tag + "_pre", hwnd), int(step["x"]), int(step["y"])):
+            xp, yp = _step_xy(step)
+            w, h = _cur_size(hwnd)
+            px, py, half = int(xp / 100.0 * w), int(yp / 100.0 * h), _check_half(hwnd)
+            if detect.is_checked(shot(tag + "_pre", hwnd), px, py, half=half):
                 say("  чекбокс уже отмечен — пропуск")
             else:
-                _click_rel(hwnd, step["x"], step["y"])
+                click_pct(hwnd, xp, yp)
                 time.sleep(0.6)
-                ok = detect.is_checked(shot(tag + "_post", hwnd), int(step["x"]), int(step["y"]))
+                w2, h2 = _cur_size(hwnd)
+                px2, py2 = int(xp / 100.0 * w2), int(yp / 100.0 * h2)
+                ok = detect.is_checked(shot(tag + "_post", hwnd), px2, py2, half=_check_half(hwnd))
                 say("  чекбокс " + ("отмечен" if ok else "НЕ отметился"))
+        elif act == "type":
+            _force_focus(hwnd)
+            pydirectinput.typewrite(_resolve_template(step.get("text", "")), interval=0.04)
+        elif act == "key":
+            _raw_key(step.get("key"))
         time.sleep(step.get("wait", 1.5))
         shot(tag, hwnd)
     return True
@@ -331,13 +398,17 @@ def do_seq(name="login"):
         say("do_seq: ожидание логина -> %s" % st)
 
     if st == "login":
-        ok = flow["ok"]
+        acc_steps = flow.get("account_steps")
+        if acc_steps and CFG.get("active_account"):
+            say("do_seq: account_steps (аккаунт '%s')" % CFG.get("active_account"))
+            _run_menu_steps(hwnd, acc_steps)
+        okxp, okyp = _step_xy(flow["ok"])
         deadline = time.time() + flow.get("await_ingame_timeout", 120)
         attempt = 0
         while time.time() < deadline:
             attempt += 1
             say("do_seq: жму OK (попытка %d)" % attempt)
-            _click_rel(hwnd, ok["x"], ok["y"])
+            click_pct(hwnd, okxp, okyp)
             time.sleep(6)
             st = detect.game_state(shot("seq_afterok", hwnd))
             say("do_seq: после OK -> %s" % st)
@@ -369,7 +440,10 @@ def _run_after_ingame(hwnd, flow):
         say("  after_ingame шаг %d: %s" % (i, step))
         _force_focus(hwnd)
         if act == "click":
-            _click_rel(hwnd, step["x"], step["y"], step.get("button", "left"), step.get("dbl"))
+            xp, yp = _step_xy(step)
+            click_pct(hwnd, xp, yp, step.get("button", "left"), step.get("dbl"))
+        elif act == "type":
+            pydirectinput.typewrite(_resolve_template(step.get("text", "")), interval=0.04)
         elif act == "key":
             _raw_key(step["key"])
         time.sleep(step.get("wait", 1.0))
@@ -424,6 +498,16 @@ def main():
                 button = x
         tag = next((x for x in rest if x not in ("left", "right", "--dbl")), "afterclick")
         do_click(rx, ry, button, dbl, tag)
+    elif cmd == "clickp":
+        xp, yp = a[0], a[1]
+        rest = a[2:]
+        button = "left"
+        dbl = "--dbl" in rest
+        for x in rest:
+            if x in ("left", "right"):
+                button = x
+        tag = next((x for x in rest if x not in ("left", "right", "--dbl")), "afterclick")
+        do_click_pct(xp, yp, button, dbl, tag)
     elif cmd == "move":
         do_move(a[0], a[1], a[2] if len(a) > 2 else "aftermove")
     elif cmd == "key":
