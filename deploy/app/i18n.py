@@ -26,6 +26,19 @@ def t(lang, key, **kw):
     return s
 
 
+_OP_LABEL_KEYS = {
+    "stopgame": "menu.game_stop",
+    "restartgame": "menu.game_restart",
+    "restartsteam": "menu.steam_restart",
+    "restartvm": "menu.vm_restart",
+}
+
+
+def op_label(lang, op):
+    """Человеко-читаемое имя одной из gamectl.LOCKED_OPS для сообщения о локе."""
+    return t(lang, _OP_LABEL_KEYS.get(op, op))
+
+
 L = {
     "ru": {
         # --- единицы измерения ---
@@ -55,7 +68,7 @@ L = {
         "lang.en": "English",
 
         # --- запросы/подсказки ---
-        "prompt.vm": "⚠️ Перезагрузить VM? Steam и игра будут закрыты.",
+        "prompt.vm": "⚠️ Перезагрузить VM? Мир сначала попросят сохраниться (~3 мин), затем Steam и игра будут закрыты.",
         "prompt.lang": "🌐 Выберите язык интерфейса:",
         "prompt.stop": (
             "⛔ Остановить SigmaSteamBot?\n"
@@ -87,14 +100,15 @@ L = {
         "reply.not_understood": "Не понял. /help",
         "reply.canceled": "Отменено.",
         "reply.lang_set": "🌐 Язык переключён на русский.",
+        "action.locked": "⛔ {actor} уже запустил(а) «{op}» — подождите {left} с и попробуйте снова.",
 
         # --- «работаю…» ---
         "wait.startgame": "▶️ Запускаю игру…",
-        "wait.stopgame": "⏹ Останавливаю игру…",
-        "wait.restartgame": "🔄 Перезапускаю игру и выполняю вход…",
-        "wait.restartsteam": "♻️ Перезапускаю Steam…",
+        "wait.stopgame": "⏹ Останавливаю игру: прошу мир сохраниться (exit1.txt), жду ~3 мин…",
+        "wait.restartgame": "🔄 Перезапускаю игру: прошу мир сохраниться (exit1.txt), жду ~3 мин, затем вход…",
+        "wait.restartsteam": "♻️ Перезапускаю Steam: прошу мир сохраниться (exit1.txt), жду ~3 мин…",
         "wait.login": "🎮 Выполняю вход в игру…",
-        "wait.vm": "🖥 Перезагрузка VM по команде из Telegram…",
+        "wait.vm": "🖥 Перезагрузка VM по команде из Telegram: прошу мир сохраниться (exit1.txt), жду ~3 мин…",
         "wait.botstop": "⛔ Останавливаю бота…",
         "wait.servers": "🌐 Запрашиваю список серверов…",
 
@@ -261,7 +275,7 @@ L = {
         "lang.en": "English",
 
         # --- prompts ---
-        "prompt.vm": "⚠️ Reboot the VM? Steam and the game will be closed.",
+        "prompt.vm": "⚠️ Reboot the VM? The world will be asked to save first (~3 min), then Steam and the game will be closed.",
         "prompt.lang": "🌐 Choose interface language:",
         "prompt.stop": (
             "⛔ Stop SigmaSteamBot?\n"
@@ -293,14 +307,15 @@ L = {
         "reply.not_understood": "Didn't get that. /help",
         "reply.canceled": "Cancelled.",
         "reply.lang_set": "🌐 Language set to English.",
+        "action.locked": "⛔ {actor} already started \"{op}\" — wait {left}s and try again.",
 
         # --- "working…" ---
         "wait.startgame": "▶️ Starting the game…",
-        "wait.stopgame": "⏹ Stopping the game…",
-        "wait.restartgame": "🔄 Restarting the game and logging in…",
-        "wait.restartsteam": "♻️ Restarting Steam…",
+        "wait.stopgame": "⏹ Stopping the game: asking the world to save (exit1.txt), waiting ~3 min…",
+        "wait.restartgame": "🔄 Restarting the game: asking the world to save (exit1.txt), waiting ~3 min, then logging in…",
+        "wait.restartsteam": "♻️ Restarting Steam: asking the world to save (exit1.txt), waiting ~3 min…",
         "wait.login": "🎮 Logging into the game…",
-        "wait.vm": "🖥 Rebooting the VM by Telegram command…",
+        "wait.vm": "🖥 Rebooting the VM by Telegram command: asking the world to save (exit1.txt), waiting ~3 min…",
         "wait.botstop": "⛔ Stopping the bot…",
         "wait.servers": "🌐 Requesting the server list…",
 

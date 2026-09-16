@@ -883,12 +883,12 @@ def mapdt_summary(cfg, map_id):
         blocks = _load_blocks(world_dir)
         names = load_user_list(world_dir)
         for row in d.get("blocks_by_type", []):
-            row["name"] = blocks.get(row["type"]) or ("block#%s" % row["type"])
+            row["name"] = _block_label(blocks.get(row["type"])) or ("block#%s" % row["type"])
         for key in ("res_in_blocks", "container_items"):
             for row in d.get(key, []):
                 row["name"] = items.get(row["type"]) or ("item#%s" % row["type"])
-        for row in d.get("stone_types", []):  # stonePos.type — не item-id, показываем как есть
-            row["name"] = "тип %s" % row["type"]
+        for row in d.get("stone_types", []):  # stonePos.type — тот же id, что и у blocks.json
+            row["name"] = _block_label(blocks.get(row["type"])) or ("block#%s" % row["type"])
         for row in d.get("machines", []):
             i = row["type"]
             row["name"] = _MACHINE_NAMES[i] if 0 <= i < len(_MACHINE_NAMES) else ("machine#%s" % i)
@@ -1495,6 +1495,144 @@ def tech_label(world_dir, tid):
     return ("%s — %s" % (tid, m["label"])) if m else tid
 
 
+# --- человеко-читаемые подписи к блокам/абилкам ------------------------------
+# blocks.json/ability.json дают только английский slug (id/name). Тексты — из
+# клиентской локализации: resources.assets содержит TextAsset "lang" — XML
+# <Lang><Section id="blocks|ability|...">...<str id="<slug>"><ru>...</ru></str>
+# — собран офлайн тем же приёмом, что и _TECH_NAMES (см. tech_label выше).
+_BLOCK_NAMES_RU = {
+    'acid_puddle': 'Кислотная лужа', 'amphibian_camel': 'Амфибия "Верблюд"',
+    'amphibian_elephant': 'Амфибия "Слон"', 'amphibian_polecat': 'Амфибия "Хорек"',
+    'amphibian_turtle': 'Амфибия "Черепаха"', 'apple': 'Яблоня', 'arable': 'Пашня',
+    'armored_car1': 'Бронеавтомобиль "Енот"', 'armored_car_chipmunk': 'Броневик "Бурундук"',
+    'bananas': 'Банановая пальма', 'baobab': 'Баобаб', 'bed': 'Кровать', 'beet': 'Свекла',
+    'bell_pepper': 'Сладкий перец', 'birch': 'Береза', 'boat_crucian': 'Катер "Карась"',
+    'boat_pike': 'Катер "Щука"', 'box': 'Ящик', 'box_annihilator': 'Ящик аннигилятор',
+    'brick_bridge': 'Кирпичный мост', 'bush': 'Куст', 'cabbage': 'Капуста',
+    'car_1': 'Фургон V-1', 'car_2': 'Фургон V-2', 'car_3': 'Фургон V-3', 'car_buggy': 'Багги',
+    'car_kangaroo': 'Автомобиль "Кенгуру"', 'carrot': 'Морковь', 'chest_wood': 'Деревянный сундук',
+    'coal': 'Уголь', 'cobalt': 'Кобальтовая руда', 'cobalt_crusher': 'Дробилка (кобальт)',
+    'cobalt_distiller': 'Дистиллятор (кобальт)', 'cobalt_extractor': 'Экстрактор (кобальт)',
+    'cobalt_furnace': 'Печь (кобальт)', 'cobalt_press': 'Пресс (кобальт)', 'coconut': 'Кокосовая пальма',
+    'collector_container': 'Контейнер-коллектор', 'collider': 'Коллайдер',
+    'collider_block': 'Блок коллайдера', 'comfortable_bed': 'Удобная кровать',
+    'container': 'Контейнер', 'copper_ore': 'Медная руда', 'corn': 'Кукуруза',
+    'cosmochlor': 'Космохлоровая руда', 'crusher': 'Дробилка', 'cucumber': 'Огурец',
+    'culinary_table': 'Кулинарный стол', 'cyber_workbench': 'Кибер-верстак', 'dill': 'Укроп',
+    'distiller': 'Дистиллятор', 'door_brick': 'Кирпичная дверь', 'door_iron': 'Железная дверь',
+    'door_stone': 'Каменная дверь', 'door_titan': 'Титановая дверь', 'door_wood': 'Деревянная дверь',
+    'drawing_table': 'Чертёжный стол', 'electronium': 'Электрониевая руда',
+    'epsilon_metal': 'Эпсилон-металл', 'extra_hydroponics': 'Доп. гидропоника',
+    'extractor': 'Экстрактор', 'faunitron': 'Фаунитрон', 'feeder': 'Кормушка',
+    'feeder_refrigerator': 'Холодильник-кормушка', 'floor_brick': 'Кирпичный пол',
+    'floor_iron': 'Железный пол', 'floor_stone': 'Каменный пол', 'floor_titan': 'Титановый пол',
+    'floor_wood': 'Деревянный пол', 'furnace': 'Печь', 'garlic': 'Чеснок', 'gold_ore': 'Золотая руда',
+    'grape': 'Виноград', 'grass': 'Трава', 'hydroponics_unit': 'Гидропонная установка',
+    'hyperdrive': 'Гипердвигатель', 'industrial_mixer': 'Промышленный миксер',
+    'industrial_workbench': 'Индустриальный верстак', 'iridium': 'Иридиевая руда',
+    'iron': 'Железная руда', 'iron_boat': 'Железная лодка', 'iron_bridge': 'Железный мост',
+    'iron_workbench': 'Железный верстак', 'lab_table': 'Лабораторный стол',
+    'landing_area': 'Посадочная площадка', 'landscaping_generator': 'Генератор ландшафта',
+    'large_container': 'Большой контейнер', 'lead_ore': 'Свинцовая руда', 'lemons': 'Лимонное дерево',
+    'meteorite': 'Метеорит', 'mushrooms': 'Грибы', 'nitrocalite': 'Нитрокалит',
+    'oil': 'Нефть', 'omicronium': 'Омикрониевая руда', 'omicronium_crusher': 'Дробилка (омикроний)',
+    'omicronium_distiller': 'Дистиллятор (омикроний)', 'omicronium_extractor': 'Экстрактор (омикроний)',
+    'omicronium_furnace': 'Печь (омикроний)', 'omicronium_press': 'Пресс (омикроний)',
+    'onion': 'Лук', 'oranges': 'Апельсиновое дерево', 'oxygen_generator_og1': 'Генератор кислорода OG-1',
+    'pepper': 'Перец', 'pineapple': 'Ананас', 'planetary_stabilizer': 'Планетарный стабилизатор',
+    'platinum': 'Платиновая руда', 'plutonium': 'Плутониевая руда', 'poisonous_moss': 'Ядовитый мох',
+    'portal': 'Портал', 'potatoes': 'Картофель', 'press': 'Пресс', 'protonite': 'Протонитовая руда',
+    'pumpkin': 'Тыква', 'quantum_hyperdrive': 'Квантовый гипердвигатель',
+    'quantum_workbench': 'Квантовый верстак', 'recycling_workbench': 'Верстак переработки',
+    'refrigerator': 'Холодильник', 'rescue_capsule': 'Спасательная капсула', 'rice': 'Рис',
+    'rocket_carnotaurus': 'Ракета "Карнотавр"', 'rocket_cargo1': 'Грузовой отсек ракеты 1',
+    'rocket_cargo2': 'Грузовой отсек ракеты 2', 'rocket_diplodocus': 'Ракета "Диплодок"',
+    'rocket_engine_i1': 'Ракетный двигатель I-1', 'rocket_engine_i2': 'Ракетный двигатель I-2',
+    'rocket_engine_n1': 'Ракетный двигатель N-1', 'rocket_engine_n2': 'Ракетный двигатель N-2',
+    'rocket_engine_quantum': 'Квантовый ракетный двигатель', 'rocket_engine_sfe3': 'Ракетный двигатель SFE-3',
+    'rocket_jalopy': 'Ракета Jalopy', 'rocket_pterodactyl': 'Ракета "Птеродактиль"',
+    'rocket_r1': 'Ракета R1', 'rocket_r2': 'Ракета R2', 'rocket_r3': 'Ракета R3',
+    'rocket_sauropod': 'Ракета "Завропод"', 'rocket_spinosaurus': 'Ракета "Спинозавр"',
+    'rocket_stegosaurus': 'Ракета "Стегозавр"', 'rocket_tyrannosaurus': 'Ракета "Тираннозавр"',
+    'rubber_tree': 'Каучуковое дерево', 'salt': 'Соль', 'seaweed': 'Водоросли',
+    'sequoia': 'Секвойя', 'silver_ore': 'Серебряная руда', 'space_item': 'Космический предмет',
+    'spruce': 'Ель', 'station_control_panel': 'Панель управления станцией',
+    'stone': 'Камень', 'stone_bridge': 'Каменный мост', 'strawberry': 'Клубника',
+    'sugar_cane': 'Сахарный тростник', 'sulfur': 'Сера', 'tank_bear': 'Танк "Медведь"',
+    'tank_crocodile': 'Танк "Крокодил"', 'tank_fox': 'Танк "Лис"', 'tank_muskrat': 'Танк "Ондатра"',
+    'tank_rhinoceros': 'Танк "Носорог"', 'tank_wolf': 'Танк "Волк"', 'titan_workbench': 'Титановый верстак',
+    'titanium_bed': 'Титановая кровать', 'titanium_ore': 'Титановая руда', 'tomatoes': 'Помидоры',
+    'trading_station': 'Торговая станция', 'tropical_tree': 'Тропическое дерево', 'tree': 'Дерево',
+    'tungsten': 'Вольфрамовая руда', 'tungsten_bed': 'Вольфрамовая кровать',
+    'tungsten_workbench': 'Вольфрамовый верстак', 'uranium_ore': 'Урановая руда',
+    'vulcanite': 'Вулканитовая руда', 'wall_brick': 'Кирпичная стена', 'wall_iron': 'Железная стена',
+    'wall_stone': 'Каменная стена', 'wall_titan': 'Титановая стена', 'wall_wood': 'Деревянная стена',
+    'waterlily': 'Кувшинка', 'watermelon': 'Арбуз', 'wheat': 'Пшеница', 'wooden_boat': 'Деревянная лодка',
+    'wooden_bridge': 'Деревянный мост', 'workbench': 'Верстак', 'xirium': 'Ксириевая руда',
+}
+
+_ABILITY_NAMES_RU = {
+    'attack1': 'Вероятность ускорения атаки в 2 раза (5%)',
+    'attack2': 'Вероятность ускорения атаки в 2 раза (10%)',
+    'attack3': 'Вероятность ускорения атаки в 2 раза (15%)',
+    'autocure': 'Автоматическое использование лекарств из инвентаря',
+    'autoeat': 'Автоматическое использование еды из инвентаря',
+    'autoenergy': 'Автоматическое использование энергетиков из инвентаря',
+    'autooxygen': 'Автоматическая экипировка скафандром при отсутствии кислорода',
+    'boost_tech1': 'Вероятность ускорения исследования на 10% (2%)',
+    'boost_tech2': 'Вероятность ускорения исследования на 10% (5%)',
+    'boost_tech3': 'Вероятность ускорения исследования на 10% (10%)',
+    'cargo1': 'Увеличение размера инвентаря на 1 слот', 'cargo2': 'Увеличение размера инвентаря на 2 слота',
+    'cargo3': 'Увеличение размера инвентаря на 3 слота', 'cargo4': 'Увеличение размера инвентаря на 4 слота',
+    'cargo5': 'Увеличение размера инвентаря на 5 слотов', 'cargo6': 'Увеличение размера инвентаря на 6 слотов',
+    'cargo7': 'Увеличение размера инвентаря на 7 слотов', 'cargo8': 'Увеличение размера инвентаря на 8 слотов',
+    'cargo9': 'Увеличение размера инвентаря на 9 слотов', 'cargo10': 'Увеличение размера инвентаря на 10 слотов',
+    'cargo11': 'Увеличение размера инвентаря на 11 слотов', 'cargo12': 'Увеличение размера инвентаря на 12 слотов',
+    'cargo13': 'Увеличение размера инвентаря на 13 слотов', 'cargo14': 'Увеличение размера инвентаря на 14 слотов',
+    'cargo15': 'Увеличение размера инвентаря на 15 слотов', 'cargo16': 'Увеличение размера инвентаря на 16 слотов',
+    'cargo17': 'Увеличение размера инвентаря на 17 слотов', 'cargo18': 'Увеличение размера инвентаря на 18 слотов',
+    'cargo19': 'Увеличение размера инвентаря на 19 слотов', 'cargo20': 'Увеличение размера инвентаря на 20 слотов',
+    'cargo21': 'Увеличение размера инвентаря на 21 слот', 'cargo22': 'Увеличение размера инвентаря на 22 слота',
+    'cargo23': 'Увеличение размера инвентаря на 23 слота', 'cargo24': 'Увеличение размера инвентаря на 24 слота',
+    'cargo25': 'Увеличение размера инвентаря на 25 слотов', 'cargo26': 'Увеличение размера инвентаря на 26 слотов',
+    'cargo27': 'Увеличение размера инвентаря на 27 слотов', 'cargo28': 'Увеличение размера инвентаря на 28 слотов',
+    'cargo29': 'Увеличение размера инвентаря на 29 слотов',
+    # cargo30 — в клиентской локализации нет строки (пропуск в игре), оставлен как #slug
+    'craft1': 'Вероятность ускорения крафта в 2 раза (10%)', 'craft2': 'Вероятность ускорения крафта в 2 раза (20%)',
+    'craft3': 'Вероятность ускорения крафта в 2 раза (30%)',
+    'crit1': 'Критический удар (1%)', 'crit2': 'Критический удар (2%)', 'crit3': 'Критический удар (3%)',
+    'crit4': 'Критический удар (4%)', 'crit5': 'Критический удар (5%)',
+    'exp1': 'Ускорение получения опыта (5%)', 'exp2': 'Ускорение получения опыта (10%)',
+    'exp3': 'Ускорение получения опыта (15%)',
+    'hand_mining1': 'Ускорение добычи руками в 2 раза', 'hand_mining2': 'Ускорение добычи руками в 3 раза',
+    'hand_mining3': 'Ускорение добычи руками в 4 раза', 'hand_mining4': 'Ускорение добычи руками в 5 раз',
+    'item_double1': 'Вероятность создания в два раза больше предметов при крафте (1%)',
+    'item_double2': 'Вероятность создания в два раза больше предметов при крафте (2%)',
+    'item_double3': 'Вероятность создания в два раза больше предметов при крафте (3%)',
+    'item_double4': 'Вероятность создания в два раза больше предметов при крафте (4%)',
+    'item_durability1': 'Вероятность создания прочного предмета (5%)',
+    'item_durability2': 'Вероятность создания прочного предмета (10%)',
+    'item_durability3': 'Вероятность создания прочного предмета (15%)',
+    'item_durability4': 'Вероятность создания прочного предмета (20%)',
+    'item_durability5': 'Вероятность создания прочного предмета (25%)',
+    'mining1': 'Вероятность ускорения добычи в 2 раза (10%)', 'mining2': 'Вероятность ускорения добычи в 2 раза (20%)',
+    'mining3': 'Вероятность ускорения добычи в 2 раза (30%)',
+    'regeneration1': 'Ускоренная регенерация (1 уровень)', 'regeneration2': 'Ускоренная регенерация (2 уровень)',
+    'regeneration3': 'Ускоренная регенерация (3 уровень)',
+    'survival1': 'Вероятность выживания при смертельном повреждении (2%)',
+    'survival2': 'Вероятность выживания при смертельном повреждении (5%)',
+    'survival3': 'Вероятность выживания при смертельном повреждении (10%)',
+}
+
+
+def _block_label(slug):
+    return _BLOCK_NAMES_RU.get(slug, slug) if slug else None
+
+
+def _ability_label(slug):
+    return _ABILITY_NAMES_RU.get(slug, slug) if slug else None
+
+
 def mapdt_find(cfg, map_id, item):
     """Найти предмет(ы) во всём мире или на одной карте.
 
@@ -1909,7 +2047,7 @@ def player_detail(cfg, uid):
             "long_params": [{"type": p.get("type"), "val": p.get("val")}
                             for p in (unit.get("paramLongList") or [])],
             "skills": [{"type": s.get("type"), "val": s.get("val")} for s in (unit.get("skillLevels") or [])],
-            "abilities": [abil_names.get(a) or ("#%s" % a) for a in (unit.get("ability") or [])],
+            "abilities": [_ability_label(abil_names.get(a)) or ("#%s" % a) for a in (unit.get("ability") or [])],
             "buffs": len(unit.get("buffs") or []),
             "stash_count": len(inv_u),
             "carry_count": len(inv_a),
@@ -2805,7 +2943,7 @@ def space_units(cfg, star_id=None):
     for u in d["units"]:
         stars.add(u.get("star_id"))
         xs.append(u["x"]); ys.append(u["y"])
-        bn = blocks.get(u["box_type"]) or ("#%s" % u["box_type"])
+        bn = _block_label(blocks.get(u["box_type"])) or ("#%s" % u["box_type"])
         base = {"id": u["id"], "x": round(u["x"], 1), "y": round(u["y"], 1),
                 "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
                 "box_type": u["box_type"], "box_name": bn,

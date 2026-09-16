@@ -1478,6 +1478,12 @@ class WebUI:
         if op in self._CONFIRM and not b.get("confirm"):
             return self._json(h, {"error": "need_confirm"}, 400)
         lang = i18n.norm(b.get("lang") or self.cfg.get("telegram", {}).get("default_lang", "ru"))
+        if op in gamectl.LOCKED_OPS:
+            ok, info = common.try_action_lock(self.state, sess["user"], op)
+            if not ok:
+                msg = i18n.t(lang, "action.locked", actor=info["actor"],
+                             op=i18n.op_label(lang, info["op"]), left=info["left"])
+                return self._json(h, {"error": "locked", "detail": msg}, 409)
         jid = secrets.token_hex(8)
         job = {"id": jid, "op": op, "done": False, "ok": None, "text": "",
                "started": time.time(), "finished": None}
@@ -1524,7 +1530,7 @@ class WebUI:
             return True, "watchdog " + ("включён" if self.wd.enabled else "выключен")
         if op == "restartvm":
             self.bot.push_alert(i18n.t(self.bot._default_lang, "wait.vm"))
-            ok, msg = gamectl.restart_vm()
+            ok, msg = gamectl.restart_vm(self.cfg)
             return ok, ("VM перезагружается" if ok else "не удалось: %s" % msg)
         if op == "stopbot":
             task = self.cfg.get("task_name", "SigmaSteamBot")

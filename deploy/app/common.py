@@ -105,6 +105,28 @@ class State:
             os.replace(tmp, self.path)
 
 
+ACTION_LOCK_TTL = 300  # 5 минут — окно взаимоисключения опасных действий (gamectl.LOCKED_OPS)
+
+
+def try_action_lock(state, actor, op):
+    """Не даёт двум админам/модераторам одновременно дёргать restart/stop игры,
+    Steam или VM — держит один активный лок ``ACTION_LOCK_TTL`` секунд с момента
+    первого действия (не продлевается и не снимается досрочно по завершении).
+
+    -> ``(True, None)`` — лок взят (или это тот же ``actor``, что и держит его),
+    можно выполнять; ``(False, {"actor", "op", "left"})`` — занято другим, с
+    сколько секунд осталось ждать."""
+    now = time.time()
+    with state.lock:
+        lock = state.data.get("action_lock")
+        if lock and lock.get("actor") != actor and now - lock.get("started", 0) < ACTION_LOCK_TTL:
+            left = int(ACTION_LOCK_TTL - (now - lock["started"]))
+            return False, {"actor": lock.get("actor"), "op": lock.get("op"), "left": max(left, 1)}
+        state.data["action_lock"] = {"actor": actor, "op": op, "started": now}
+    state.save()
+    return True, None
+
+
 class Telegram:
     """Минимальный клиент Bot API поверх curl.exe с SOCKS5-прокси."""
 

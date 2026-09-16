@@ -238,6 +238,18 @@ class Bot:
         if name:
             self._who[uid] = name
 
+    def _lock_or_deny(self, chat, uid, lang, op):
+        """Взять action-лок (см. common.try_action_lock) перед stopgame/restartgame/
+        restartsteam/restartvm. True — можно выполнять, False — уже занято другим
+        админом/модератором, отказ уже отправлен в чат."""
+        actor = self._who.get(uid) or ("id %s" % uid)
+        ok, info = common.try_action_lock(self.state, actor, op)
+        if ok:
+            return True
+        self.tg.send_message(chat, i18n.t(lang, "action.locked", actor=info["actor"],
+                                           op=i18n.op_label(lang, info["op"]), left=info["left"]))
+        return False
+
     def _audit(self, uid, what):
         """Копию действия другого админа/модератора — главному админу."""
         sa = self._super_admin
@@ -310,14 +322,17 @@ class Bot:
             self._async(chat, i18n.t(lang, "wait.startgame"),
                         lambda: self._tr(lang, gamectl.start_game(self.cfg)), lang=lang, role=role)
         elif cmd == "stopgame":
-            self._async(chat, i18n.t(lang, "wait.stopgame"),
-                        lambda: self._tr(lang, gamectl.stop_game(self.cfg)), lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "stopgame"):
+                self._async(chat, i18n.t(lang, "wait.stopgame"),
+                            lambda: self._tr(lang, gamectl.stop_game(self.cfg)), lang=lang, role=role)
         elif cmd == "restartgame":
-            self._async(chat, i18n.t(lang, "wait.restartgame"),
-                        lambda: self._do_restart_and_login(lang), shot_after=True, lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "restartgame"):
+                self._async(chat, i18n.t(lang, "wait.restartgame"),
+                            lambda: self._do_restart_and_login(lang), shot_after=True, lang=lang, role=role)
         elif cmd == "restartsteam":
-            self._async(chat, i18n.t(lang, "wait.restartsteam"),
-                        lambda: self._tr(lang, gamectl.restart_steam(self.cfg)), lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "restartsteam"):
+                self._async(chat, i18n.t(lang, "wait.restartsteam"),
+                            lambda: self._tr(lang, gamectl.restart_steam(self.cfg)), lang=lang, role=role)
         elif cmd == "login":
             self._async(chat, i18n.t(lang, "wait.login"),
                         lambda: self._do_login(lang), shot_after=True, lang=lang, role=role)
@@ -363,14 +378,17 @@ class Bot:
             self._async(chat, i18n.t(lang, "wait.startgame"),
                         lambda: self._tr(lang, gamectl.start_game(self.cfg)), lang=lang, role=role)
         elif act == "game_stop":
-            self._async(chat, i18n.t(lang, "wait.stopgame"),
-                        lambda: self._tr(lang, gamectl.stop_game(self.cfg)), lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "stopgame"):
+                self._async(chat, i18n.t(lang, "wait.stopgame"),
+                            lambda: self._tr(lang, gamectl.stop_game(self.cfg)), lang=lang, role=role)
         elif act == "game_restart":
-            self._async(chat, i18n.t(lang, "wait.restartgame"),
-                        lambda: self._do_restart_and_login(lang), shot_after=True, lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "restartgame"):
+                self._async(chat, i18n.t(lang, "wait.restartgame"),
+                            lambda: self._do_restart_and_login(lang), shot_after=True, lang=lang, role=role)
         elif act == "steam_restart":
-            self._async(chat, i18n.t(lang, "wait.restartsteam"),
-                        lambda: self._tr(lang, gamectl.restart_steam(self.cfg)), lang=lang, role=role)
+            if self._lock_or_deny(chat, uid, lang, "restartsteam"):
+                self._async(chat, i18n.t(lang, "wait.restartsteam"),
+                            lambda: self._tr(lang, gamectl.restart_steam(self.cfg)), lang=lang, role=role)
         elif act == "login":
             self._async(chat, i18n.t(lang, "wait.login"),
                         lambda: self._do_login(lang), shot_after=True, lang=lang, role=role)
@@ -382,10 +400,15 @@ class Bot:
         elif act == "vm_restart":
             self.tg.send_message(chat, i18n.t(lang, "prompt.vm"), self._confirm_vm(lang))
         elif act == "vm_yes":
-            self.push_alert(i18n.t(self._default_lang, "wait.vm"))
-            ok, msg = gamectl.restart_vm()
-            if not ok:
-                self.tg.send_message(chat, i18n.t(lang, "vm.fail", msg=html.escape(str(msg))))
+            if self._lock_or_deny(chat, uid, lang, "restartvm"):
+                self.push_alert(i18n.t(self._default_lang, "wait.vm"))
+
+                def _vm_worker():
+                    ok, msg = gamectl.restart_vm(self.cfg)
+                    if not ok:
+                        self.tg.send_message(chat, i18n.t(lang, "vm.fail", msg=html.escape(str(msg))))
+
+                threading.Thread(target=_vm_worker, name="vmrestart", daemon=True).start()
         elif act == "vm_no":
             self.tg.send_message(chat, i18n.t(lang, "reply.canceled"), self._menu(lang, role))
         elif act == "bot_stop":
