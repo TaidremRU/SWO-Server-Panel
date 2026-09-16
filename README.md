@@ -98,6 +98,12 @@
 
 Те же действия продублированы inline-кнопками. Неизвестным ID на `/start` бот отвечает их numeric ID и больше ничего.
 
+### Безопасная остановка мира и лок на одновременные действия
+
+Перед `stopgame` / `restartgame` / `restartsteam` / `restartvm` — если игра реально запущена — панель кладёт пустой `exit1.txt` в корень активного мира (сервер сам подхватывает флаг и сохраняется/останавливается штатно) и только потом, спустя **3 минуты**, бьёт по Steam/игре/VM. Работает одинаково что из Telegram, что из веб-панели.
+
+Пока это идёт — **5-минутный лок** на эти 4 действия: если один админ/модератор уже начал одно из них, второй при попытке получает отказ с именем того, кто начал, и сколько ещё осталось ждать, вместо параллельного разрушительного действия поверх первого.
+
 ### Список серверов
 
 Sigma World Online **не регистрирует game-серверы** в мастер-листе Valve — каждый публичный хост создаёт **Steam-лобби** (`ISteamMatchmaking::CreateLobby`). Поэтому:
@@ -122,7 +128,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 - **Вход** — логин/пароль из `webui_auth.json` (в `base_dir`, в `.gitignore`). При первом запуске создаётся **`admin` / `admin`** с флагом `must_change`: до смены пароля доступен только экран смены (минимум 6 символов, не `admin`). Хэш — PBKDF2-HMAC-SHA256; сессия — cookie `sid` в памяти процесса (TTL 12 ч); POST защищены CSRF-токеном; неудачные входы — лок-аут по IP (5 попыток → пауза 60 c).
 - **Дашборд** — карты VM / Steam / игра / watchdog / внутренности бота (аптайм процесса, потоки, очередь отправки, возраст снапшота) / монитор сервера, плюс живой скриншот экрана VM. Автообновление раз в 5 c только при активной вкладке; статус берётся из `last_snapshot`, который пишет watchdog, — нагрузки на супервизор почти нет. Кнопка «Обновить (живой опрос)» дёргает `sysinfo.collect()` по требованию.
-- **Действия** — то же, что у бота: `startgame` / `stopgame` / `restartgame` (перезапуск + вход) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (с подтверждением) + `restarttask` (чистый перезапуск задачи `SigmaSteamBot` отдельным процессом) и `testalert` (тестовое сообщение админам через `bot.push_alert`). Длинные операции идут заданием, панель опрашивает результат.
+- **Действия** — то же, что у бота: `startgame` / `stopgame` / `restartgame` (перезапуск + вход) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (с подтверждением) + `restarttask` (перезапуск задачи `SigmaSteamBot` через одноразовую задачу планировщика — переживает `schtasks /End` самого себя, в отличие от прежнего detached-процесса) и `testalert` (тестовое сообщение админам через `bot.push_alert`). Длинные операции идут заданием, панель опрашивает результат.
 - **Серверы** — тот же список Steam-лобби (`serverlist.fetch`, кэш 45 c), AstralSigma наверху.
 - **Настройки** — полноценный редактор `config.json` прямо из браузера (см. ниже), плюс роли (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) применяются на лету (`Bot.apply_roles`) без перезапуска.
 - **Логи** — хвост `supervisor.log` (фильтр по уровню, автообновление, скачивание), аудит панели (`webui_audit.log` — кто/когда/что нажал, отдельно от Telegram-аудита) и галерея скринов последовательности входа (`logs/nav/*.png`).
@@ -156,7 +162,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 Вкладка **«Карта»** — вся работа с картами и бинарными данными мира, реверс-инжиниренными без исходников игры (см. `stage2/mapdt.py`, `stage2/players.py`):
 
 - **Таблица мира** — по каждой карте: онлайн, аватары, территории, размер. **Карта 0 = космос** — игра считает таких игроков онлайн, хотя фактически они могут быть оффлайн. Внемировые (космические) карты подписаны именем и координатами звёздной системы (`🪐 Ryk Xive (x, y)`), которые находятся сопоставлением ID карты с объектом в `Data\world\star<N>.json` — это соответствие подтверждено на всех 26 внемировых картах прод-сервера.
-- **Разбор `.dt`** — ссылка «показать карту» у каждой карты → полный разбор бинарного `Data\maps\map<N>.dt` (точный порт сериализации `Map.Load`/`MapCell.Read`/… из исходника игры): гистограмма блоков/растительности, машины (печь/дробилка/…), точки руды, содержимое всех наземных/подземных контейнеров, сетка владения землёй (8×8-блоки → владелец), газ/заражение, кислородная карта. Основная карта — 512×512, ~13 c на первый разбор, дальше из кэша.
+- **Разбор `.dt`** — ссылка «показать карту» у каждой карты → полный разбор бинарного `Data\maps\map<N>.dt` (точный порт сериализации `Map.Load`/`MapCell.Read`/… из исходника игры): гистограмма блоков/растительности (с русскими названиями — тексты вытащены из клиентской локализации, `resources.assets`), машины (печь/дробилка/…), точки руды (те же id-коды и те же русские названия, что у блоков), содержимое всех наземных/подземных контейнеров, сетка владения землёй (8×8-блоки → владелец), газ/заражение, кислородная карта. Основная карта — 512×512, ~13 c на первый разбор, дальше из кэша.
   - **Просмотрщик карты** — PNG-рендер (свой энкодер, без Pillow) с наведением (блок/владелец под курсором), приближением колёсиком мыши (25–400 %) с зумом к курсору, перетаскиванием («рука»), свободным вращением (по умолчанию 315°, центрируется в любом повороте) и наложением сетки владения землёй. Кнопка **«⟳ пересмотреть»** рядом с вращением — принудительно перерисовывает карту заново, игнорируя кэш по времени изменения файла (на случай, если реальные данные обновились, а кэш — нет).
 - **Территории** — все `userTerritories` игроков с владельцами, фильтр по карте.
 - **Поиск предмета в мире** — id или имя предмета (можно подстроку, напр. `tech_booster`), выбрать карту или «весь мир» → для каждого совпадения координаты `(x, y)`, контейнер (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), количество и прочность. Скан всего мира — до ~2 мин (72 карты), кэш по mtime каждой карты. Эндпоинт `GET /api/mapdt-find?map=N|all&item=<id|имя>`.
@@ -201,7 +207,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Клан** (из `Data\game\clans.json`): имя, рейтинг, состав с именами (👑 лидер) и переходами на карточки · **Друзья** (из `friends.json`)
 - **Исследования:** текущее + ~время до конца (по `serverTime` из `Data\game\settings.json`), изучено техов, бустер · **Миссии**
 - **Позиция:** карта / координаты / точка респавна / список территорий
-- **Аватар:** статы (`paramList`) полосками, навыки, способности с именами (из `Data\ability.json`), склад и «при себе» с названиями предметов (из `Data\items.json`)
+- **Аватар:** статы (`paramList`) полосками, навыки, способности с русскими названиями (slug'и из `Data\ability.json`, тексты — из клиентской локализации, как и у блоков/руды выше), склад и «при себе» с названиями предметов (из `Data\items.json`)
 - **Сессии:** всего / часов онлайн / средняя / макс, гистограмма активности по часам суток, последние 15 сессий
 - **История:** смены ролей (`user_role.txt`), смерти/сбросы (`dead_user.txt`), снос земель (`delete_land*.txt`), месячные награды (`reward_order.txt`)
 - **Чат игрока:** его публичные сообщения из `chat_0..3.txt` (канал + время)
@@ -350,6 +356,12 @@ Language is per-user (`/lang ru|en` or the “🌐 Language” button), stored i
 
 The same actions are mirrored as inline buttons. To an unknown ID, `/start` replies with its numeric ID and nothing else.
 
+### Safe world shutdown and a same-action lock
+
+Before `stopgame` / `restartgame` / `restartsteam` / `restartvm` — if the game is actually running — the panel drops an empty `exit1.txt` into the active world's root folder (the server picks up the flag and saves/stops on its own) and only then, after **3 minutes**, touches Steam/the game/the VM. Same behavior whether triggered from Telegram or the web panel.
+
+While that's in progress — a **5-minute lock** on these 4 actions: if one admin/moderator already started one, a second one trying gets refused with who started it and how long is left, instead of a second destructive action landing on top of the first.
+
 ### Server list
 
 Sigma World Online **does not register game servers** with Valve’s master list — each public host creates a **Steam lobby** (`ISteamMatchmaking::CreateLobby`). Therefore:
@@ -374,7 +386,7 @@ An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webu
 
 - **Login** — username/password from `webui_auth.json` (in `base_dir`, gitignored). On first start it is created as **`admin` / `admin`** with a `must_change` flag: until the password is changed only the change-password screen is available (min 6 chars, not `admin`). Hash — PBKDF2-HMAC-SHA256; session — an in-memory `sid` cookie (12 h TTL); POSTs are CSRF-token protected; failed logins are rate-limited per IP (5 tries → 60 s lock-out).
 - **Dashboard** — VM / Steam / game / watchdog / bot-internals (process uptime, threads, send queue, snapshot age) / server-monitor cards, plus a live VM screenshot. Auto-refresh every 5 s only while the tab is visible; status comes from the `last_snapshot` the watchdog already writes — near-zero extra load on the supervisor. The “Refresh (live poll)” button calls `sysinfo.collect()` on demand.
-- **Actions** — same as the bot: `startgame` / `stopgame` / `restartgame` (restart + login) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (confirmed) plus `restarttask` (clean restart of the `SigmaSteamBot` task from a detached process) and `testalert` (a test message to admins via `bot.push_alert`). Long operations run as a job the panel polls.
+- **Actions** — same as the bot: `startgame` / `stopgame` / `restartgame` (restart + login) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (confirmed) plus `restarttask` (restarts the `SigmaSteamBot` task via a one-time scheduled task — survives its own `schtasks /End`, unlike the old detached-process approach) and `testalert` (a test message to admins via `bot.push_alert`). Long operations run as a job the panel polls.
 - **Servers** — the same Steam-lobby list (`serverlist.fetch`, 45 s cache), AstralSigma pinned to the top.
 - **Settings** — a full `config.json` editor right in the browser (see below), plus roles (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) applied live (`Bot.apply_roles`) with no restart needed.
 - **Logs** — tail of `supervisor.log` (level filter, auto-refresh, download), the panel audit (`webui_audit.log` — who/when/what, separate from the Telegram audit) and a gallery of login-sequence screenshots (`logs/nav/*.png`).
@@ -408,7 +420,7 @@ Per-map online/avatars/territories and item search moved to their own **"Map"** 
 The **"Map"** tab — everything about maps and the game's binary world data, reverse-engineered without access to the game's source (see `stage2/mapdt.py`, `stage2/players.py`):
 
 - **World table** — per map: online, avatars, territories, size. **Map 0 = space** — the game counts these players as online even though they may actually be offline. Off-world (space) maps are labeled with the name and coordinates of their star system (`🪐 Ryk Xive (x, y)`), found by matching the map ID to an object in `Data\world\star<N>.json` — this mapping was verified against all 26 off-world maps on the production server.
-- **`.dt` decoding** — a "show map" link per map → full decode of the binary `Data\maps\map<N>.dt` (an exact port of the game's own `Map.Load`/`MapCell.Read`/… serialization): histograms of blocks/vegetation, machines (furnace/crusher/…), ore points, the contents of every ground/underground container, the land-ownership grid (8×8 blocks → owner), gas/infection, oxygen map. The main map is 512×512, ~13 s for the first parse, cached afterwards.
+- **`.dt` decoding** — a "show map" link per map → full decode of the binary `Data\maps\map<N>.dt` (an exact port of the game's own `Map.Load`/`MapCell.Read`/… serialization): histograms of blocks/vegetation (with Russian display names, pulled from the client's own localization, `resources.assets`), machines (furnace/crusher/…), ore points (same id space and same Russian names as blocks), the contents of every ground/underground container, the land-ownership grid (8×8 blocks → owner), gas/infection, oxygen map. The main map is 512×512, ~13 s for the first parse, cached afterwards.
   - **Map viewer** — a PNG render (own encoder, no Pillow) with hover info (block/owner under the cursor), mouse-wheel zoom-to-cursor (25–400%), drag-to-pan, free rotation (315° by default, stays centered at any angle), and a land-ownership overlay. A **"⟳ rescan"** button next to the rotation controls force-redraws the map, bypassing the file-mtime cache (for when the real data changed but the cache didn't notice).
 - **Territories** — every player's `userTerritories` with owners, filterable by map.
 - **Find an item in the world** — type an item id or name (a substring works, e.g. `tech_booster`), pick a map or "whole world" → every match lists its `(x, y)`, the container (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), the count and durability. A whole-world scan takes up to ~2 min (72 maps); cached per map mtime. Endpoint `GET /api/mapdt-find?map=N|all&item=<id|name>`.
@@ -443,7 +455,7 @@ The world folder is set via `config.json → players`: `localserver_root` (empty
 - **Clan** (from `Data\game\clans.json`): name, rating, members with names (👑 leader) and cross-links · **Friends** (from `friends.json`)
 - **Research:** current + est. time left (via `serverTime` from `Data\game\settings.json`), techs done, booster · **Missions**
 - **Position:** map / coords / respawn point / territory list
-- **Avatar:** stats (`paramList`) as bars, skills, named abilities (from `Data\ability.json`), stash and carried inventory with item names (from `Data\items.json`)
+- **Avatar:** stats (`paramList`) as bars, skills, named abilities in Russian (slugs from `Data\ability.json`, display text pulled from the client's own localization, same as blocks/ore above), stash and carried inventory with item names (from `Data\items.json`)
 - **Sessions:** total / hours online / avg / max, activity histogram by hour of day, last 15 sessions
 - **History:** role changes (`user_role.txt`), deaths/resets (`dead_user.txt`), land removals (`delete_land*.txt`), monthly rewards (`reward_order.txt`)
 - **Player chat:** their public messages from `chat_0..3.txt` (channel + time)

@@ -119,8 +119,12 @@ Sigma World Online не регистрирует game-серверы в маст
   watchdog'а, живой `sysinfo.collect()` — по кнопке.
 - **Действия** — `startgame` / `stopgame` / `restartgame` (перезапуск + вход) /
   `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (с
-  подтверждением) + `restarttask` (чистый перезапуск задачи отдельным процессом) и
-  `testalert`. Длинные операции — заданием с опросом результата.
+  подтверждением) + `restarttask` (перезапуск задачи через одноразовую задачу
+  планировщика — переживает `schtasks /End` самого себя) и `testalert`. Длинные
+  операции — заданием с опросом результата. Перед `stopgame`/`restartgame`/
+  `restartsteam`/`restartvm` (если игра запущена) — `exit1.txt` в корень мира +
+  3 минуты на штатную остановку, и 5-минутный лок на эти 4 действия между
+  админами/модераторами (см. `gamectl.request_world_exit` / `common.try_action_lock`).
 - **Серверы** — тот же `serverlist.fetch` (кэш 45 c).
 - **Роли** — `allowed_user_ids` / `moderator_user_ids` / `super_admin_id` /
   `default_lang` / `alerts_enabled`. Сохранение → `common.save_config` (UTF-8 без
@@ -138,7 +142,8 @@ Sigma World Online не регистрирует game-серверы в маст
   Клик по нику → **карточка игрока**: профиль, клан (`clans.json`) + друзья
   (`friends.json`), исследования/миссии (время до конца — по `serverTime` из
   `Data\game\settings.json`), позиция/территории, аватар (статы, навыки,
-  способности и инвентарь с именами из `Data\{items,ability}.json`), сессии +
+  способности (русские названия из клиентской локализации, `resources.assets`)
+  и инвентарь с именами из `Data\{items,ability}.json`), сессии +
   гистограмма по часам суток, история (роли/смерти/земли/награды из `Logs\`),
   публичный чат игрока (`chat_0..3.txt`). Под **своим паролем панели** (повторная
   проверка + throttle + аудит): кнопки «Показать пароль» игрока (`code`) и
