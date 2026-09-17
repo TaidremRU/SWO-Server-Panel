@@ -1633,11 +1633,21 @@ class WebUI:
         в XML EndBoundary. 15 с, а не 5 — на глаз (проверено на .108):
         schtasks сам предупреждает и не гарантирует запуск, если /ST ближе
         ~10 с к текущему моменту (round-trip создания задачи + погрешность
-        планировщика)."""
+        планировщика).
+
+        Между End и Run — пауза ``ping -n 4 127.0.0.1 >nul`` (~3 с; НЕ
+        ``timeout /t`` — тот падает без консоли: «Input redirection is not
+        supported», а тут задача запускается службой планировщика без
+        интерактивной сессии). Без паузы 2026-09-17 дважды поймали гонку:
+        Run стартовал новый процесс раньше, чем старый реально исчезал из
+        таблицы процессов — новый видел «живой» PID в supervisor.lock,
+        считал себя дублем и тихо выходил (exit 0), оставляя панель
+        недоступной до ручного ``schtasks /Run``."""
         helper = task + "RestartHelper"
         when = (datetime.now() + timedelta(seconds=15)).strftime("%H:%M:%S")
-        tr = ('cmd /c "schtasks /End /TN {t} & schtasks /Change /TN {t} /ENABLE '
-              '& schtasks /Run /TN {t} & schtasks /Delete /F /TN {h}"').format(t=task, h=helper)
+        tr = ('cmd /c "schtasks /End /TN {t} & ping -n 4 127.0.0.1 >nul '
+              '& schtasks /Change /TN {t} /ENABLE & schtasks /Run /TN {t} '
+              '& schtasks /Delete /F /TN {h}"').format(t=task, h=helper)
         r = subprocess.run(
             ["schtasks", "/Create", "/F", "/SC", "ONCE", "/ST", when,
              "/TN", helper, "/TR", tr],
