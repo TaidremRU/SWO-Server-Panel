@@ -2943,22 +2943,27 @@ def space_units(cfg, star_id=None):
     for u in d["units"]:
         stars.add(u.get("star_id"))
         xs.append(u["x"]); ys.append(u["y"])
-        bn = _block_label(blocks.get(u["box_type"])) or ("#%s" % u["box_type"])
+        slug = blocks.get(u["box_type"]) or ""
+        bn = _block_label(slug) or ("#%s" % u["box_type"])
         base = {"id": u["id"], "x": round(u["x"], 1), "y": round(u["y"], 1),
                 "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
                 "box_type": u["box_type"], "box_name": bn,
                 "cargo_items": u.get("inv_items", 0),
                 "moving": (abs(u["vx"]) + abs(u["vy"])) > 0.01,
                 "star_id": u.get("star_id")}
-        if bn.startswith("rocket"):
+        # Классификация — по СЫРОМУ англ. слагу из blocks.json, не по переведённому
+        # bn (после RU-названий 2026-09-16 bn стал русским, и rocket*/meteorite/
+        # space_item больше никогда не совпадали — все объекты молча уходили в
+        # "other", корабли/метеориты/предметы пропадали с карты).
+        if slug.startswith("rocket"):
             uid = u["user_id"] or su_owner.get(u["id"]) or 0
             base.update(user_id=uid, name=names.get(uid) or ("id %s" % uid if uid else "—"),
                         speed=u["speed"], rotate=u["rotate"], health=u["box_health"],
                         aboard=len(u["aboard"]))
             ships.append(base)
-        elif bn == "meteorite":
+        elif slug == "meteorite":
             meteorites.append(base)
-        elif bn == "space_item":
+        elif slug == "space_item":
             pods.append(base)
         else:
             other += 1
@@ -2988,6 +2993,8 @@ _SPACE_STAR_COL = (255, 225, 140)
 _SPACE_SHIP_COL = (90, 200, 255)
 _SPACE_MET_COL = (150, 140, 128)
 _SPACE_POD_COL = (230, 195, 60)
+_SPACE_SATELLITE_COL = (140, 205, 235)
+_SPACE_ASTEROID_COL = (170, 125, 80)
 _SPACE_PAD_FRAC = 0.05
 
 
@@ -3027,7 +3034,10 @@ def _drop_lone_ships(ships, bodies, radius=_SHIP_LONER_RADIUS):
 # статистике байт: массив записей переменной длины, для каждой:
 #   uint32 <хвост предыдущей записи, НЕ id — пропускаем>
 #   int32 nameLen; utf8 name (nameLen байт)
-#   int32 type (0|1|2 — судя по частоте, категория объекта)
+#   int32 type — КАТЕГОРИЯ ОБЪЕКТА, подтверждено 2026-09-17 по геометрии на
+#     star1.json: 0=планета (12 шт., 10-38k ед. от звезды), 1=спутник (32 шт.,
+#     21-195 ед. от ближайшей планеты — тесная орбита), 2=астероид (389 шт.,
+#     267-27234 ед. от ближайшей планеты — разбросаны по системе)
 #   7 байт тегов/флагов (не расшифрованы)
 #   float64 x; float64 y            <- позиция (ПРОВЕРЕНО: 433/433 валидны на
 #                                       star1.json, диапазон разумный ±40k;
@@ -3074,12 +3084,19 @@ def _parse_star_file(path):
             continue          # не настоящая граница записи — соседняя случайная "строка"
         end = namepos + 4 + ln
         try:
+            typ = struct.unpack_from("<i", b, end)[0]
             x, y = struct.unpack_from("<d", b, end + 11)[0], struct.unpack_from("<d", b, end + 19)[0]
         except struct.error:
             continue
         if not (math.isfinite(x) and math.isfinite(y) and abs(x) < 1_000_000 and abs(y) < 1_000_000):
             continue
-        out.append({"name": chunk.decode("utf-8"), "x": round(x, 1), "y": round(y, 1)})
+        # type 0|1|2 — ПОДТВЕРЖДЕНО по геометрии на star1.json: type1 всегда в
+        # 21-195 ед. от ближайшего type0 (орбита спутника), type2 — 267-27234 ед.
+        # (разбросаны по системе, астероидный пояс); type0 — 10-38 тыс. ед. от
+        # звезды (сами планеты). 0=планета, 1=спутник, 2=астероид.
+        kind = {0: "planet", 1: "satellite", 2: "asteroid"}.get(typ, "planet")
+        out.append({"name": chunk.decode("utf-8"), "type": typ, "kind": kind,
+                    "x": round(x, 1), "y": round(y, 1)})
     # id = порядковый номер в файле (1-based) — ПОДТВЕРЖДЕНО пользователем:
     # запрошенное имя нашлось под тем же номером, что игра показывает как ID
     # (Ryk Xive = 5-я запись в star1.json = ID5 в игре). Хрупко: если фильтр
@@ -3152,7 +3169,7 @@ def space_map_points(cfg, star_id=1):
     minx, maxx, miny, maxy = _points_bounds(objs, su["meteorites"], su["pods"], ships)
     points = [{"kind": "star", "id": 0, "x": 0, "y": 0, "name": "★"}]
     for o in objs:
-        points.append({"kind": "planet", "id": o["id"], "x": o["x"], "y": o["y"], "name": o["name"]})
+        points.append({"kind": o.get("kind", "planet"), "id": o["id"], "x": o["x"], "y": o["y"], "name": o["name"]})
     for s in ships:
         points.append({"kind": "ship", "id": s["id"], "x": s["x"], "y": s["y"],
                        "name": s["name"], "user_id": s["user_id"], "health": s["health"],
@@ -3169,7 +3186,10 @@ def space_map_points(cfg, star_id=1):
                        "moving": p["moving"]})
     return {"ok": True, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
             "pad_frac": _SPACE_PAD_FRAC, "points": points, "total": len(points),
-            "planet_count": len(objs),
+            "planet_count": sum(1 for o in objs if o.get("kind") == "planet"),
+            "satellite_count": sum(1 for o in objs if o.get("kind") == "satellite"),
+            "asteroid_count": sum(1 for o in objs if o.get("kind") == "asteroid"),
+            "object_count": len(objs),
             "ships_hidden": len(su["ships"]) - len(ships)}
 
 
@@ -3178,9 +3198,11 @@ _SPACE_PLANET_COL = (190, 175, 230)
 
 def space_map_image(cfg, size=760, star_id=1):
     """Рассеянная диаграмма звёздной системы (PNG): звезда в (0,0), именованные
-    объекты (планеты/астероиды из ``Data\\world\\star<N>.json``) лавандовым,
-    метеориты/поды/корабли (из ``space_units``) по их координатам. Не карта
-    местности — просто визуализация того, что реально известно.
+    объекты из ``Data\\world\\star<N>.json`` — планеты лавандовым, спутники
+    голубым, астероиды коричневым (по полю ``type``, см. комментарий у
+    ``_parse_star_file``), метеориты/поды/корабли (из ``space_units``) по их
+    координатам. Не карта местности — просто визуализация того, что реально
+    известно.
     -> ``(png_bytes, fname, meta)``."""
     if mapdt is None:
         return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
@@ -3237,9 +3259,13 @@ def space_map_image(cfg, size=760, star_id=1):
                     i = (y * w + x) * 3
                     rgb[i], rgb[i + 1], rgb[i + 2] = color
 
+    _obj_col = {"planet": _SPACE_PLANET_COL, "satellite": _SPACE_SATELLITE_COL,
+                "asteroid": _SPACE_ASTEROID_COL}
+    _obj_r = {"planet": 2, "satellite": 1, "asteroid": 1}
     for o in objs:
         x, y = to_px(o["x"], o["y"])
-        dot(x, y, _SPACE_PLANET_COL, 1)
+        k = o.get("kind", "planet")
+        dot(x, y, _obj_col.get(k, _SPACE_PLANET_COL), _obj_r.get(k, 1))
     for m in su["meteorites"]:
         x, y = to_px(m["x"], m["y"])
         dot(x, y, _SPACE_MET_COL, 1 if m["cargo_items"] < 12 else 2)

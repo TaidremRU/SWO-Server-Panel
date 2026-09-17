@@ -1819,14 +1819,14 @@ var T = {
   md_containers_col_where:"Где", md_containers_col_items:"Содержимое", md_containers_capped:"список обрезан лимитом",
   md_offworld_hint:"внесистемная карта (не 0/1) — планета/данж; имя и координаты в звёздной системе (Data\\world\\star1.json, id карты = id записи, реверс-инжиниринг — см. схему системы)",
   md_spacename:"имя в космосе (коорд.)",
-  su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты/астероиды",
+  su_starmap:"Схема системы", su_star:"звезда", su_planets:"планеты", su_satellites:"спутники", su_asteroids:"астероиды",
   su_hidden:"скрыто (нет тел рядом):",
   su_scatter_note:"позиции планет — реверс-инжиниринг бинарного формата Data\\world\\star<N>.json без исходника (сервер-генератор мира не дан); координаты проверены, но имена НЕ уникальны между звёздными системами",
   su_hover_hint:"наведите курсор на карту",
-  su_find_ph:"имя планеты/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
-  su_find_ph2:"имя планеты/астероида —", su_cluster:"кластер", su_system:"система",
+  su_find_ph:"имя планеты/спутника/астероида (звезда 1)", su_find_none:"не найдено в этой системе",
+  su_find_ph2:"имя планеты/спутника/астероида —", su_cluster:"кластер", su_system:"система",
   su_clusters:"кластеров", su_systems:"систем всего",
-  su_find_hits:"найдено", su_find_click:"показать на схеме",
+  su_find_hits:"найдено", su_find_click:"показать на схеме", su_objects:"объектов",
   mf_title:"Поиск предмета в мире", mf_ph:"id или имя (напр. tech_booster)", mf_map:"карта",
   mf_all:"весь мир", mf_go:"искать", mf_wait:"сканирую карты (весь мир — до ~2 мин, кэшируется)…",
   mf_total:"всего штук", mf_spots:"точек", mf_scanned:"карт просканировано", mf_where:"где",
@@ -1956,14 +1956,14 @@ var T = {
   md_containers_col_where:"Where", md_containers_col_items:"Contents", md_containers_capped:"list capped by limit",
   md_offworld_hint:"off-world map (not 0/1) — planet/dungeon; name and coordinates in the star system (Data\\world\\star1.json, map id = record id, reverse-engineered — see the system map)",
   md_spacename:"space name (coord.)",
-  su_starmap:"System map", su_star:"star", su_planets:"planets/asteroids",
+  su_starmap:"System map", su_star:"star", su_planets:"planets", su_satellites:"satellites", su_asteroids:"asteroids",
   su_hidden:"hidden (no bodies nearby):",
   su_scatter_note:"planet positions are reverse-engineered from the binary Data\\world\\star<N>.json format (no source for the world generator); coordinates are validated, but names are NOT unique across star systems",
   su_hover_hint:"hover over the map",
-  su_find_ph:"planet/asteroid name (star 1)", su_find_none:"not found in this system",
-  su_find_ph2:"planet/asteroid name —", su_cluster:"cluster", su_system:"system",
+  su_find_ph:"planet/satellite/asteroid name (star 1)", su_find_none:"not found in this system",
+  su_find_ph2:"planet/satellite/asteroid name —", su_cluster:"cluster", su_system:"system",
   su_clusters:"clusters", su_systems:"systems total",
-  su_find_hits:"found", su_find_click:"show on map",
+  su_find_hits:"found", su_find_click:"show on map", su_objects:"objects",
   mf_title:"Find an item in the world", mf_ph:"id or name (e.g. tech_booster)", mf_map:"map",
   mf_all:"whole world", mf_go:"search", mf_wait:"scanning maps (whole world — up to ~2 min, cached)…",
   mf_total:"total qty", mf_spots:"spots", mf_scanned:"maps scanned", mf_where:"where",
@@ -3182,9 +3182,10 @@ function spaceMapBlock(starId){
   img.onerror=function(){ stat.textContent=t("err_net"); };
   img.src="/api/space-map-image?size="+sz+"&star="+starId+"&_="+Date.now();
   api("/api/space-map-data?star="+starId).then(function(d){ if(d.ok){ DATA=d;
-    pcount.textContent="🪐 "+t("su_planets")+": "+d.planet_count+(d.ships_hidden? " · "+t("su_hidden")+" "+d.ships_hidden+" 🚀":"");
+    pcount.textContent="🪐 "+d.planet_count+" · 🌙 "+d.satellite_count+" · 🪨 "+d.asteroid_count+
+      (d.ships_hidden? " · "+t("su_hidden")+" "+d.ships_hidden+" 🚀":"");
   } }).catch(function(){});
-  function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐"}[k]||"?"; }
+  function kindIcon(k){ return {star:"★",ship:"🚀",meteorite:"☄",pod:"📦",planet:"🪐",satellite:"🌙",asteroid:"🪨"}[k]||"?"; }
   function toPx(bd,pad,x,y){
     var spanx=Math.max(bd.maxx-bd.minx,1), spany=Math.max(bd.maxy-bd.miny,1);
     return [ pad+(x-bd.minx)/spanx*(sz-2*pad), pad+(bd.maxy-y)/spany*(sz-2*pad) ];
@@ -3202,7 +3203,8 @@ function spaceMapBlock(starId){
       if(d<bestD){ bestD=d; best=p; }
     });
     if(!best){ info.clear(); return; }
-    var lines=[kindIcon(best.kind)+(best.kind==="planet"?" #"+best.id+" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
+    var named=(best.kind==="planet"||best.kind==="satellite"||best.kind==="asteroid");
+    var lines=[kindIcon(best.kind)+(named?" #"+best.id+" "+best.name:" #"+best.id)+(best.kind==="star"?"":"  ("+Math.round(best.x)+", "+Math.round(best.y)+")")];
     if(best.kind==="ship"){
       lines.push(best.name||"?");
       lines.push("HP "+best.health+" · "+t("su_cargo")+" "+best.cargo_items);
@@ -3216,7 +3218,8 @@ function spaceMapBlock(starId){
   img.addEventListener("mouseleave", function(){ info.clear(); });
   var pcount=el("span",{class:"muted small"},["🪐 …"]);
   var legend=el("div",{class:"chart-legend",style:"margin-top:6px"},[
-    lgSwatch("255,225,140",t("su_star")), lgSwatch("190,175,230",t("su_planets")),
+    lgSwatch("255,225,140",t("su_star")), lgSwatch("190,175,230","🪐 "+t("su_planets")),
+    lgSwatch("140,205,235","🌙 "+t("su_satellites")), lgSwatch("170,125,80","🪨 "+t("su_asteroids")),
     lgSwatch("90,200,255",t("su_ships")),
     lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")) ]);
   // поиск объекта по имени (Data/world/star<N>.json)
@@ -3229,10 +3232,10 @@ function spaceMapBlock(starId){
       findOut.innerHTML="";
       if(!d.ok){ findOut.appendChild(el("span",{},[d.error||"error"])); return; }
       if(!d.matches.length){ hlFrac=null; updateHl(); findOut.appendChild(el("span",{},[t("su_find_none")])); return; }
-      findOut.appendChild(el("span",{},[t("su_find_hits")+" ("+d.total_in_star+" "+t("su_planets")+"): "]));
+      findOut.appendChild(el("span",{},[t("su_find_hits")+" ("+d.total_in_star+" "+t("su_objects")+"): "]));
       d.matches.forEach(function(m){ findOut.appendChild(el("span",{class:"pill",style:"margin:2px 4px 2px 0;cursor:pointer",
         title:t("su_find_click"), onclick:(function(mm){ return function(){ highlightAt(mm.x,mm.y); }; })(m)},[
-        "🪐 #"+m.id+" "+m.name+"  ("+m.x+", "+m.y+")"])); });
+        kindIcon(m.kind)+" #"+m.id+" "+m.name+"  ("+m.x+", "+m.y+")"])); });
       findOut.appendChild(el("div",{class:"muted small",style:"margin-top:4px"},[d.note]));
       highlightAt(d.matches[0].x, d.matches[0].y);
     }).catch(function(e){ findOut.innerHTML=""; findOut.appendChild(el("span",{},[errText(e)])); });
