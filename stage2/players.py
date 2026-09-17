@@ -3196,13 +3196,19 @@ def space_map_points(cfg, star_id=1):
 _SPACE_PLANET_COL = (190, 175, 230)
 
 
-def space_map_image(cfg, size=760, star_id=1):
+_SPACE_ALL_KINDS = frozenset({"planet", "satellite", "asteroid", "ship", "meteorite", "pod"})
+
+
+def space_map_image(cfg, size=760, star_id=1, show=None):
     """Рассеянная диаграмма звёздной системы (PNG): звезда в (0,0), именованные
     объекты из ``Data\\world\\star<N>.json`` — планеты лавандовым, спутники
     голубым, астероиды коричневым (по полю ``type``, см. комментарий у
     ``_parse_star_file``), метеориты/поды/корабли (из ``space_units``) по их
     координатам. Не карта местности — просто визуализация того, что реально
-    известно.
+    известно. ``show`` — множество видов для отрисовки (подмножество
+    ``_SPACE_ALL_KINDS``); ``None`` = все. Звезда рисуется всегда (точка
+    отсчёта). Масштаб/границы картинки не зависят от фильтра — считаются по
+    ПОЛНОМУ набору объектов, чтобы включение/выключение слоя не «прыгало».
     -> ``(png_bytes, fname, meta)``."""
     if mapdt is None:
         return {"ok": False, "error": "модуль mapdt недоступен"}, None, None
@@ -3224,7 +3230,8 @@ def space_map_image(cfg, size=760, star_id=1):
         star_mt = os.path.getmtime(star_path)
     except OSError:
         star_mt = 0
-    ck = (path, size, star_id)
+    show = _SPACE_ALL_KINDS if show is None else (set(show) & _SPACE_ALL_KINDS)
+    ck = (path, size, star_id, frozenset(show))
     hit = _SPACEIMG_CACHE.get(ck)
     if hit and hit[0] == (mt, star_mt):
         return hit[1], "space_map.png", {"cached": True}
@@ -3263,27 +3270,34 @@ def space_map_image(cfg, size=760, star_id=1):
                 "asteroid": _SPACE_ASTEROID_COL}
     _obj_r = {"planet": 2, "satellite": 1, "asteroid": 1}
     for o in objs:
-        x, y = to_px(o["x"], o["y"])
         k = o.get("kind", "planet")
+        if k not in show:
+            continue
+        x, y = to_px(o["x"], o["y"])
         dot(x, y, _obj_col.get(k, _SPACE_PLANET_COL), _obj_r.get(k, 1))
-    for m in su["meteorites"]:
-        x, y = to_px(m["x"], m["y"])
-        dot(x, y, _SPACE_MET_COL, 1 if m["cargo_items"] < 12 else 2)
-    for p in su["pods"]:
-        x, y = to_px(p["x"], p["y"])
-        dot(x, y, _SPACE_POD_COL, 1)
-    for s in ships:
-        x, y = to_px(s["x"], s["y"])
-        dot(x, y, _SPACE_SHIP_COL, 3)
+    if "meteorite" in show:
+        for m in su["meteorites"]:
+            x, y = to_px(m["x"], m["y"])
+            dot(x, y, _SPACE_MET_COL, 1 if m["cargo_items"] < 12 else 2)
+    if "pod" in show:
+        for p in su["pods"]:
+            x, y = to_px(p["x"], p["y"])
+            dot(x, y, _SPACE_POD_COL, 1)
+    if "ship" in show:
+        for s in ships:
+            x, y = to_px(s["x"], s["y"])
+            dot(x, y, _SPACE_SHIP_COL, 3)
     sx, sy = to_px(0, 0)
     dot(sx, sy, _SPACE_STAR_COL, 5)
 
     png = mapdt.png_bytes(w, h, bytes(rgb), 1)
     _SPACEIMG_CACHE[ck] = ((mt, star_mt), png)
+    if len(_SPACEIMG_CACHE) > 32:  # разные ?show= комбинации — иначе кэш растёт без предела
+        _SPACEIMG_CACHE.pop(next(iter(_SPACEIMG_CACHE)))
     return png, "space_map.png", {
         "w": w, "h": h, "bounds": {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy},
         "planets": len(objs), "ships": len(ships), "ships_hidden": len(su["ships"]) - len(ships),
-        "meteorites": su["meteorite_count"], "pods": su["pod_count"]}
+        "meteorites": su["meteorite_count"], "pods": su["pod_count"], "show": sorted(show)}
 
 
 def space_report(cfg):

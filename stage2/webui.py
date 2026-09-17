@@ -916,11 +916,14 @@ class WebUI:
         return self._json(h, d, 200 if d.get("ok") else 500)
 
     def _api_space_map_image(self, h, method, q, sess):
-        """PNG-диаграмма звёздной системы (планеты/метеориты/поды/корабли)."""
+        """PNG-диаграмма звёздной системы (планеты/спутники/астероиды/метеориты/
+        поды/корабли). ?show=planet,ship,... — фильтр видов (пусто/нет = все)."""
         size = (q.get("size") or ["760"])[0]
         star = (q.get("star") or ["1"])[0]
+        # отсутствие ?show= = все виды (обратная совместимость); ?show= (пусто) = ничего
+        show = {s for s in (q.get("show") or [""])[0].split(",") if s} if "show" in q else None
         try:
-            png, fn, meta = players.space_map_image(self.cfg, size=size, star_id=star)
+            png, fn, meta = players.space_map_image(self.cfg, size=size, star_id=star, show=show)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: space_map_image")
             return self._json(h, {"ok": False, "error": str(e)}, 500)
@@ -3149,6 +3152,11 @@ function mapImageBlock(mapId){
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);
 }
+function lgToggle(rgb, label, checked, onchange){
+  var cb=el("input",{type:"checkbox",checked:checked},[]);
+  cb.addEventListener("change",function(){ onchange(cb.checked); });
+  return el("label",{style:"display:inline-flex;align-items:center;gap:5px;cursor:pointer"},[cb, el("b",{style:"background:rgb("+rgb+")"},[]), label]);
+}
 var SPACE_MAP_SIZE=760;
 function spaceMapBlock(starId){
   starId=starId||1;
@@ -3160,6 +3168,11 @@ function spaceMapBlock(starId){
   var zoom=el("input",{type:"range",min:"25",max:"400",step:"5",value:"50",style:"width:150px"});
   var stat=el("span",{class:"muted small"},[t("mi_wait")]);
   var DATA=null, hlFrac=null;
+  var FILTER={planet:true,satellite:true,asteroid:true,ship:true,meteorite:true,pod:true};
+  function refreshShot(){
+    var on=Object.keys(FILTER).filter(function(k){ return FILTER[k]; });
+    img.src="/api/space-map-image?size="+sz+"&star="+starId+"&show="+(on.length?on.join(","):"_none_")+"&_="+Date.now();
+  }
   function updateHl(){
     if(!hlFrac || !img.naturalWidth){ hl.style.opacity=0; return; }
     hl.style.left=(img.offsetLeft+hlFrac.fx*img.offsetWidth)+"px";
@@ -3180,7 +3193,7 @@ function spaceMapBlock(starId){
   zoom.oninput();
   img.onload=function(){ stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; updateHl(); };
   img.onerror=function(){ stat.textContent=t("err_net"); };
-  img.src="/api/space-map-image?size="+sz+"&star="+starId+"&_="+Date.now();
+  refreshShot();
   api("/api/space-map-data?star="+starId).then(function(d){ if(d.ok){ DATA=d;
     pcount.textContent="🪐 "+d.planet_count+" · 🌙 "+d.satellite_count+" · 🪨 "+d.asteroid_count+
       (d.ships_hidden? " · "+t("su_hidden")+" "+d.ships_hidden+" 🚀":"");
@@ -3198,6 +3211,7 @@ function spaceMapBlock(starId){
     var pad=sz*DATA.pad_frac;
     var best=null, bestD=16;
     DATA.points.forEach(function(p){
+      if(p.kind!=="star" && FILTER[p.kind]===false) return;
       var xy=toPx(DATA.bounds,pad,p.x,p.y);
       var d=Math.hypot(xy[0]-ix, xy[1]-iy);
       if(d<bestD){ bestD=d; best=p; }
@@ -3217,11 +3231,15 @@ function spaceMapBlock(starId){
   });
   img.addEventListener("mouseleave", function(){ info.clear(); });
   var pcount=el("span",{class:"muted small"},["🪐 …"]);
+  function toggle(kind){ return function(v){ FILTER[kind]=v; refreshShot(); }; }
   var legend=el("div",{class:"chart-legend",style:"margin-top:6px"},[
-    lgSwatch("255,225,140",t("su_star")), lgSwatch("190,175,230","🪐 "+t("su_planets")),
-    lgSwatch("140,205,235","🌙 "+t("su_satellites")), lgSwatch("170,125,80","🪨 "+t("su_asteroids")),
-    lgSwatch("90,200,255",t("su_ships")),
-    lgSwatch("150,140,128","☄ "+t("su_meteorites")), lgSwatch("230,195,60","📦 "+t("su_pods")) ]);
+    lgSwatch("255,225,140",t("su_star")),
+    lgToggle("190,175,230","🪐 "+t("su_planets"), FILTER.planet, toggle("planet")),
+    lgToggle("140,205,235","🌙 "+t("su_satellites"), FILTER.satellite, toggle("satellite")),
+    lgToggle("170,125,80","🪨 "+t("su_asteroids"), FILTER.asteroid, toggle("asteroid")),
+    lgToggle("90,200,255",t("su_ships"), FILTER.ship, toggle("ship")),
+    lgToggle("150,140,128","☄ "+t("su_meteorites"), FILTER.meteorite, toggle("meteorite")),
+    lgToggle("230,195,60","📦 "+t("su_pods"), FILTER.pod, toggle("pod")) ]);
   // поиск объекта по имени (Data/world/star<N>.json)
   var findIn=el("input",{placeholder:t("su_find_ph2")+" star"+starId,style:"padding:5px 8px;flex:1;min-width:140px"});
   var findOut=el("div",{class:"muted small",style:"margin-top:4px"},[]);
