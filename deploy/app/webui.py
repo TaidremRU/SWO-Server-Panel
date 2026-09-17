@@ -1814,7 +1814,10 @@ var T = {
   bn_none:"Пока ничего не загружено.", bn_count:"записей", bn_saved_at:"загружено",
   bn_all:"все", bn_records:"Комбинации", bn_time:"время, с", bn_effect:"эффект",
   bn_no_effect:"без эффекта", bn_ingredients:"ингредиенты",
-  bn_state_note:"«эффект #N» — внутренний код игры, точное название пока не расшифровано (не то же самое, что тип статов игрока).",
+  bn_state_note:"Эффекты не складываются линейно из ингредиентов (проверено регрессией на реальных данных) — похоже на рецепты/случайность, а не на сумму вкладов.",
+  bn_bt0:"Здоровье", bn_bt1:"Энергия", bn_bt2:"Меткость", bn_bt3:"Скорость движения",
+  bn_bt4:"Скорость действия", bn_bt5:"Сила ближнего боя", bn_bt6:"Сила дальнего боя",
+  bn_bt7:"Щит", bn_bt8:"Скорость ближнего боя", bn_bt9:"Скорость дальнего боя",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -1917,9 +1920,11 @@ var T = {
   pd_mod:"Модерация (оффлайн)", pd_mod_ban:"Забанить", pd_mod_unban:"Разбанить",
   pd_mod_tp:"Телепорт", pd_mod_givetech:"Выдать техи", pd_mod_resetpw:"Сброс пароля игрока",
   pd_mod_newcode:"новый пароль игрока",
-  pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина",
-  pd_p4:"Меткость", pd_p5:"Скорость действия", pd_p6:"Скорость атаки",
-  pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
+  pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Меткость",
+  pd_p4:"Скорость движения", pd_p5:"Скорость действия", pd_p6:"Скорость атаки",
+  pd_p7:"Генетика A", pd_p8:"Генетика B", pd_p9:"Генетика C", pd_p10:"Генетика D",
+  pd_p11:"Кислород", pd_p12:"Очки генетики",
+  pd_lp0:"Опыт", pd_lp1:"Уровень", pd_lp2:"Очки распределения",
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -1958,7 +1963,10 @@ var T = {
   bn_none:"Nothing uploaded yet.", bn_count:"records", bn_saved_at:"uploaded",
   bn_all:"all", bn_records:"Combos", bn_time:"time, s", bn_effect:"effect",
   bn_no_effect:"no effect", bn_ingredients:"ingredients",
-  bn_state_note:"\"effect #N\" is the game's internal code — the exact name isn't decoded yet (not the same as the player stat type).",
+  bn_state_note:"Effects don't add up linearly from ingredients (checked with regression on real data) — looks like fixed recipes/randomness, not a sum of contributions.",
+  bn_bt0:"Health", bn_bt1:"Energy", bn_bt2:"Accuracy", bn_bt3:"Move speed",
+  bn_bt4:"Action speed", bn_bt5:"Melee strength", bn_bt6:"Ranged strength",
+  bn_bt7:"Shield", bn_bt8:"Melee speed", bn_bt9:"Ranged speed",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2061,9 +2069,11 @@ var T = {
   pd_mod:"Moderation (offline)", pd_mod_ban:"Ban", pd_mod_unban:"Unban",
   pd_mod_tp:"Teleport", pd_mod_givetech:"Grant tech", pd_mod_resetpw:"Reset player password",
   pd_mod_newcode:"new player password",
-  pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina",
-  pd_p4:"Accuracy", pd_p5:"Action speed", pd_p6:"Attack speed",
-  pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
+  pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Accuracy",
+  pd_p4:"Move speed", pd_p5:"Action speed", pd_p6:"Attack speed",
+  pd_p7:"Genetics A", pd_p8:"Genetics B", pd_p9:"Genetics C", pd_p10:"Genetics D",
+  pd_p11:"Oxygen", pd_p12:"Genetic points",
+  pd_lp0:"Exp", pd_lp1:"Level", pd_lp2:"Distribution points",
   pd_skill_pfx:"Skill", pd_skill_hint:"exact name unknown to the panel — +2%/level to something",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -2424,6 +2434,11 @@ function tabEntry(v){
 }
 
 // ---- buff notepad (мешаем микстуры) ----
+// enum ZData.BuffType (Il2CppDumper, 2026-09-17, GameAssembly.dll) — id'ы отличаются
+// от статов игрока (UnitParamType) несмотря на пересечение диапазона 0-9.
+var BUFF_TYPE_KEY={0:"bn_bt0",1:"bn_bt1",2:"bn_bt2",3:"bn_bt3",4:"bn_bt4",
+                    5:"bn_bt5",6:"bn_bt6",7:"bn_bt7",8:"bn_bt8",9:"bn_bt9"};
+function buffTypeName(state){ var k=BUFF_TYPE_KEY[state]; return k? t(k) : ("#"+state); }
 function tabBuffs(v){
   var msg=el("span",{class:"muted small"},[]);
   var body=el("div",{},[el("p",{class:"muted"},["…"])]);
@@ -2474,7 +2489,7 @@ function tabBuffs(v){
       var ingrCell=el("td",{},[el("div",{class:"chips"}, r.items.map(function(it){
         return el("span",{class:"chip",style:it.id===activeFilter?"border-color:var(--acc);color:var(--acc)":""},[it.name]); }))]);
       var buffCell = r.buff.length
-        ? el("div",{}, r.buff.map(function(b){ return el("div",{},[t("bn_effect")+" #"+b.state+": "+(b.val>0?"+":"")+b.val]); }))
+        ? el("div",{}, r.buff.map(function(b){ return el("div",{},[buffTypeName(b.state)+": "+(b.val>0?"+":"")+b.val]); }))
         : el("span",{class:"muted small"},[t("bn_no_effect")]);
       tb.appendChild(el("tr",{},[el("td",{},[String(r.idx+1)]), el("td",{},[r.time!=null?String(r.time):"—"]), ingrCell, buffCell]));
     });
@@ -2747,29 +2762,38 @@ function renderPlayerModal(d){
       return el("span",{class:"chip"},[tt.map+": "+tt.x+","+tt.y]); })) : "—"]
   ]));
 
-  // Статы 0-3 (Энергия/Сытость/Здоровье/Стамина) растут вместе с одноимённым
-  // навыком (skillLevels того же type): val/valMax паспортизированы напрямую
-  // из данных сервера (см. память "тип 4/тип 6" — подтверждено сопоставлением
-  // paramList/skillLevels на живых unit*.json). Навыки 4-6 — те же +2%/уровень
-  // множители (val=1+0.02*level): 5/6 подтверждены пользователем в клиенте
-  // (Скорость действия / Скорость атаки), 4 — Меткость методом исключения.
-  var PBL={0:"pd_p0",1:"pd_p1",2:"pd_p2",3:"pd_p3"}, LPL={0:"pd_lp0",1:"pd_lp1",2:"pd_lp2"};
-  var BONUS={4:"pd_p4",5:"pd_p5",6:"pd_p6"};
+  // paramList/skillLevels.type и long_params.type — enum UnitParamType /
+  // UnitParamTypeLong, вытащены 2026-09-17 из живого дампа игры (Il2CppDumper
+  // по GameAssembly.dll+global-metadata.dat, класс ZData.UnitParam/
+  // UnitSkillLevel/UnitParamLong): 0=energy,1=satiety,2=health,3=accuracy,
+  // 4=speedMove,5=speedAction,6=speedAttack,7=genA,8=genB,9=genC,10=genD,
+  // 11=oxygen,12=genetic; long: 0=exp,1=level,2=distributionPoints. Раньше
+  // (до дампа) тип 3 считался "Стаминой" на глаз, а 4 — "Меткостью" методом
+  // исключения — оба были неверны, см. [[sigma-swo-stat-skill-ids]].
+  // val==valMax всегда для типов 3-6 (это не депл. ресурс, а растущий
+  // навыком стат/множитель) — 0-3 рисуем полосой, 4-6 — как "+X%".
+  var PBL={0:"pd_p0",1:"pd_p1",2:"pd_p2",3:"pd_p3",4:"pd_p4",5:"pd_p5",6:"pd_p6",
+           7:"pd_p7",8:"pd_p8",9:"pd_p9",10:"pd_p10",11:"pd_p11",12:"pd_p12"};
+  var LPL={0:"pd_lp0",1:"pd_lp1",2:"pd_lp2"};
+  var BAR_TYPES={0:1,1:1,2:1,3:1}, BONUS_TYPES={4:1,5:1,6:1};
   var params=(av.params||[]).filter(function(pp){ return pp.max>1; }).map(function(pp){
-    if(PBL[pp.type]){
+    var lbl=PBL[pp.type]? t(PBL[pp.type]) : (t("pd_skill_pfx")+" #"+pp.type);
+    if(BAR_TYPES[pp.type]){
       var pct=Math.max(0,Math.min(100, 100*pp.val/pp.max));
-      return [t(PBL[pp.type]), el("div",{class:"bar",title:pp.val+" / "+pp.max},[
+      return [lbl, el("div",{class:"bar",title:pp.val+" / "+pp.max},[
         el("span",{style:"width:"+pct+"%"},[]), el("b",{},[Math.round(pp.val)+" / "+Math.round(pp.max)])])];
     }
-    var pctBonus=Math.round((pp.val-1)*100);
-    var lbl=BONUS[pp.type]? t(BONUS[pp.type]) : (t("pd_skill_pfx")+" #"+pp.type);
-    return [lbl, el("span",{class:"chip",title:BONUS[pp.type]?"":t("pd_skill_hint")},["+"+pctBonus+"%"])];
+    if(BONUS_TYPES[pp.type]){
+      var pctBonus=Math.round((pp.val-1)*100);
+      return [lbl, el("span",{class:"chip"},["+"+pctBonus+"%"])];
+    }
+    return [lbl, el("span",{class:"chip",title:t("pd_skill_hint")},[String(pp.val)])];
   });
   var lps=(av.long_params||[]).map(function(pp){
     var l=(LPL[pp.type] && t(LPL[pp.type])) || ("L"+pp.type); return [l, String(pp.val)]; });
   g.appendChild(kvcard(t("pd_avatar"), params.concat(lps).concat([
     [t("pd_skills"), (av.skills&&av.skills.length)? el("div",{class:"chips"}, av.skills.map(function(sk){
-      var nameKey=PBL[sk.type]||BONUS[sk.type], lbl=nameKey? t(nameKey) : (t("pd_skill_pfx")+" #"+sk.type);
+      var nameKey=PBL[sk.type], lbl=nameKey? t(nameKey) : (t("pd_skill_pfx")+" #"+sk.type);
       return el("span",{class:"chip",title:nameKey?"":t("pd_skill_hint")},[lbl+": "+sk.val]); })) : "—"],
     [t("pd_abilities"), (av.abilities&&av.abilities.length)? el("div",{class:"chips"}, av.abilities.map(function(a){
       return el("span",{class:"chip"},[a]); })) : "—"],
