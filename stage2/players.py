@@ -30,6 +30,7 @@ import collections
 import csv
 import glob
 import io
+import itertools
 import json
 import logging
 import math
@@ -2277,11 +2278,12 @@ def buff_notepad_save(path, raw):
 
 
 def buff_notepad_read(cfg, path):
-    """Загруженный buff_notepad с именами ингредиентов (из ``Data\\items.json``)
-    и списком-индексом «ингредиент -> в каких комбинациях встречается» — для
-    вкладки «Микстуры». Названия эффектов (``buff[].state``) НЕ расшифрованы —
-    это отдельный enum игры, не проверено, совпадает ли он с типами статов
-    игрока (``paramList``, см. [[sigma-swo-stat-skill-ids]])."""
+    """Загруженный buff_notepad с именами ингредиентов (из ``Data\\items.json``,
+    с RU-подписью через ``_buff_material_label`` где есть) и списком-индексом
+    «ингредиент -> в каких комбинациях встречается» — для вкладки «Микстуры».
+    Названия эффектов (``buff[].state``) — см. ``_BUFF_TYPE_NAMES_RU``
+    (``ZData.BuffType``, расшифрован Ghidra-дампом 2026-09-17/18, см.
+    [[sigma-buff-recipe-algorithm]]; это ОТДЕЛЬНЫЙ enum от статов игрока)."""
     d = _read_json(path) or {}
     recs = d.get("items") or []
     if not recs:
@@ -2290,7 +2292,8 @@ def buff_notepad_read(cfg, path):
     item_names = load_items(world_dir) if world_dir else {}
 
     def iname(i):
-        return item_names.get(i) or ("#%s" % i)
+        raw = item_names.get(i)
+        return _buff_material_label(raw) or raw or ("#%s" % i)
 
     records = []
     by_item = {}
@@ -2300,7 +2303,8 @@ def buff_notepad_read(cfg, path):
             "idx": idx,
             "items": [{"id": i, "name": iname(i)} for i in ids],
             "time": r.get("time"),
-            "buff": r.get("buff") or [],
+            "buff": [{"state": b.get("state"), "name": _BUFF_TYPE_NAMES_RU.get(b.get("state"), "#%s" % b.get("state")),
+                      "val": b.get("val")} for b in (r.get("buff") or [])],
         })
         for i in ids:
             slot = by_item.setdefault(i, {"id": i, "name": iname(i), "count": 0})
@@ -2308,6 +2312,158 @@ def buff_notepad_read(cfg, path):
     by_item_list = sorted(by_item.values(), key=lambda x: x["name"].lower())
     return {"ok": True, "count": len(records), "records": records,
             "by_item": by_item_list, "saved_at": d.get("saved_at")}
+
+
+# --- ZData.BuffType / ZData.BuffRecipe.Calc — расшифровано Ghidra-декомпиляцией
+# GameAssembly.dll 2026-09-17/18 (см. [[sigma-buff-recipe-algorithm]] для полного
+# разбора и метода). Формула проверена на 366/366 реальных рецептах сервера —
+# точное совпадение, не эмпирическая аппроксимация.
+_BUFF_TYPE_NAMES_RU = {
+    0: "Здоровье", 1: "Энергия", 2: "Меткость", 3: "Скорость движения",
+    4: "Скорость действия", 5: "Сила ближнего боя", 6: "Сила дальнего боя",
+    7: "Щит", 8: "Скорость ближнего боя", 9: "Скорость дальнего боя",
+}
+
+_BUFF_MATERIAL_NAMES_RU = {
+    "meat": "Мясо", "bone": "Кость", "leather": "Кожа", "meat_fish": "Рыбье мясо",
+    "fat_tail": "Жирный хвост", "brain": "Мозг", "kidneys": "Почки", "liver": "Печень",
+    "stomach": "Желудок", "lungs": "Лёгкие", "eyes": "Глаза", "spleen": "Селезёнка",
+    "ears": "Уши", "cartilage": "Хрящ", "heart": "Сердце", "poultry": "Птица",
+    "poisonous_moss": "Ядовитый мох", "milk": "Молоко", "red_caviar": "Красная икра",
+    "black_caviar": "Чёрная икра", "egg": "Яйцо", "honey": "Мёд", "butter": "Масло", "curd": "Творог",
+}
+
+_BUFF_GETVAL_DIV80 = (3, 5, 6)
+_BUFF_GETVAL_DIV160 = (4, 7, 8, 9)
+_BUFF_CLAMP_THRESH = {0: 5.0, 1: 5.0, 2: 1.0}
+_BUFF_CLAMP_DEFAULT = 0.0999
+
+
+def _buff_material_label(slug):
+    return _BUFF_MATERIAL_NAMES_RU.get(slug, slug) if slug else None
+
+
+def _buff_get_val(t, v):
+    if t in (0, 1):
+        return v
+    if t == 2:
+        return v * 0.0625
+    if t in _BUFF_GETVAL_DIV80:
+        return v / 80.0
+    return v / 160.0
+
+
+def _buff_clamp_val(t, v):
+    thresh = _BUFF_CLAMP_THRESH.get(t, _BUFF_CLAMP_DEFAULT)
+    return 0.0 if abs(v) < thresh else v
+
+
+def _buff_correct_val(t, v):
+    if t in (0, 1, 2):
+        return v
+    if v < 0:
+        return 1.0 / (abs(v) + 1.0)
+    return v + 1.0
+
+
+def _buff_calc(materials, mat, slots):
+    """Точное воспроизведение ``ZData.BuffRecipe.Calc``. ``materials`` — 4
+    id-слага ингредиента В ПОРЯДКЕ СЛОТОВ 0-3 (порядок важен — определяет
+    знак!). ``mat`` — из ``buff_balance_read()['materials']``, ``slots`` —
+    оттуда же ``['slots']``. -> ``{buff_type: val}`` (только ненулевые)."""
+    out = {}
+    for t in range(10):
+        total = 0.0
+        for i in range(4):
+            val, op = mat[materials[i]].get(t, (0.0, 0))
+            if op not in (0, 1):
+                continue
+            st = slots[i].get(t, 2)
+            if st == 2:
+                continue
+            sign = 1 if op == 0 else -1
+            if st == 1:
+                sign = -sign
+            total += sign * val
+        for i in range(4):
+            val, op = mat[materials[i]].get(t, (0.0, 0))
+            if op not in (2, 3):
+                continue
+            st = slots[i].get(t, 2)
+            if st == 2:
+                continue
+            do_sub = (st == 1) != (op == 3)
+            total = total - val if do_sub else total * val
+        v = _buff_clamp_val(t, _buff_get_val(t, total))
+        if abs(v) > 0:
+            out[t] = _buff_correct_val(t, v)
+    return out
+
+
+def buff_balance_read(cfg):
+    """Таблица состояний ингредиентов для микстур (``Data\\product\\buff_balance.json``,
+    ``ZData.BuffBalance``) + фиксированные слоты (``Data\\product\\buff_lib.json``,
+    поле ``slots`` — тоже ``ZData``, общее на весь сервер, не per-рецепт).
+    -> ``{ok, materials: {slug: {type: (val,op)}}, slots: [{type:state},...×4],
+    ingredients: [{id,name}]}``."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    bal = _read_json(os.path.join(world_dir, "Data", "product", "buff_balance.json"))
+    if not bal or not bal.get("items"):
+        return {"ok": False, "error": "нет buff_balance.json — в этом мире ещё не мешали микстуры"}
+    lib = _read_json(os.path.join(world_dir, "Data", "product", "buff_lib.json")) or {}
+    slots_raw = lib.get("slots") or []
+    if len(slots_raw) != 4:
+        return {"ok": False, "error": "нет данных о слотах (buff_lib.json)"}
+    mat = {it["id"]: {s["StateType"]: (s["val"], s["operation"]) for s in (it.get("States") or [])}
+           for it in bal["items"]}
+    slots = [{x["Type"]: x["State"] for x in (s.get("Items") or [])} for s in slots_raw]
+    ingredients = sorted(
+        ({"id": k, "name": _buff_material_label(k) or k} for k in mat),
+        key=lambda x: x["name"].lower())
+    return {"ok": True, "materials": mat, "slots": slots, "ingredients": ingredients}
+
+
+def buff_optimize(cfg, available, target_type, top_n=5):
+    """Перебор всех УПОРЯДОЧЕННЫХ четвёрок из ``available`` (id-слаги
+    ингредиентов, доступных игроку) в поисках максимума эффекта
+    ``target_type`` (``ZData.BuffType``, 0-9). Порядок важен — определяет,
+    в какой слот (0-3) попадёт ингредиент, а слот определяет знак вклада.
+    -> ``{ok, checked, count, results: [{materials:[{id,name}], buffs:[{state,name,val}]}]}``,
+    отсортировано по убыванию ``target_type``."""
+    bal = buff_balance_read(cfg)
+    if not bal.get("ok"):
+        return bal
+    mat, slots = bal["materials"], bal["slots"]
+    try:
+        target_type = int(target_type)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad target_type"}
+    if target_type not in _BUFF_TYPE_NAMES_RU:
+        return {"ok": False, "error": "bad target_type"}
+    avail = [a for a in (available or []) if a in mat]
+    if len(avail) < 4:
+        return {"ok": False, "error": "нужно минимум 4 доступных ингредиента"}
+    n = len(avail)
+    checked = n * (n - 1) * (n - 2) * (n - 3)
+    results = []
+    for combo in itertools.permutations(avail, 4):
+        buffs = _buff_calc(combo, mat, slots)
+        v = buffs.get(target_type)
+        if v is None or v <= 0:
+            continue
+        results.append((v, combo, buffs))
+    results.sort(key=lambda x: -x[0])
+    top = results[:max(1, min(50, int(top_n or 5)))]
+    return {
+        "ok": True, "checked": checked, "count": len(results),
+        "results": [{
+            "materials": [{"id": m, "name": _buff_material_label(m) or m} for m in combo],
+            "buffs": [{"state": t, "name": _BUFF_TYPE_NAMES_RU.get(t, "#%s" % t), "val": round(v2, 4)}
+                      for t, v2 in sorted(buffs.items(), key=lambda kv: -kv[1])],
+        } for v, combo, buffs in top],
+    }
 
 
 def _inv_container(world_dir, uid, where):

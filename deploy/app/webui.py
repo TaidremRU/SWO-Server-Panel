@@ -1003,6 +1003,41 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_buff_ingredients(self, h, method, q, sess):
+        """Список из 24 ингредиентов микстур (Data\\product\\buff_balance.json) —
+        для чекбоксов оптимизатора во вкладке «Микстуры»."""
+        try:
+            d = players.buff_balance_read(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: buff_balance_read")
+            d = {"ok": False, "error": str(e)}
+        out = {"ok": d.get("ok"), "ingredients": d.get("ingredients", []), "error": d.get("error")}
+        return self._json(h, out, 200 if out.get("ok") else 404)
+
+    def _api_buff_optimize(self, h, method, q, sess):
+        """POST {available:[слаги], target:BuffType, top:5} — асинхронный перебор
+        (может занять секунды при большом available) через тот же job-механизм,
+        что и /api/action. Прогресс — GET /api/job?id=..."""
+        b = self._body(h)
+        jid = secrets.token_hex(8)
+        job = {"id": jid, "done": False, "ok": None, "result": None,
+               "started": time.time(), "finished": None}
+        with self._jobs_lock:
+            self._jobs[jid] = job
+            while len(self._jobs) > 30:
+                self._jobs.pop(next(iter(self._jobs)))
+
+        def run():
+            try:
+                d = players.buff_optimize(self.cfg, b.get("available"), b.get("target"), b.get("top", 5))
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: buff_optimize")
+                d = {"ok": False, "error": str(e)}
+            job.update(ok=bool(d.get("ok")), result=d, done=True, finished=time.time())
+
+        threading.Thread(target=run, name="buffopt", daemon=True).start()
+        return self._json(h, {"job": jid})
+
     def _api_mapdt_index(self, h, method, q, sess):
         try:
             d = players.mapdt_index(self.cfg)
@@ -1814,7 +1849,11 @@ var T = {
   bn_none:"Пока ничего не загружено.", bn_count:"записей", bn_saved_at:"загружено",
   bn_all:"все", bn_records:"Комбинации", bn_time:"время, с", bn_effect:"эффект",
   bn_no_effect:"без эффекта", bn_ingredients:"ингредиенты",
-  bn_state_note:"Эффекты не складываются линейно из ингредиентов (проверено регрессией на реальных данных) — похоже на рецепты/случайность, а не на сумму вкладов.",
+  bn_state_note:"Формула смешивания разобрана и проверена (совпадает с сервером на всех известных рецептах) — оптимизатор ниже считает точно, не угадывает.",
+  bn_opt_title:"Оптимизатор рецептов", bn_opt_intro:"Отметь, какие ингредиенты у тебя есть, выбери желаемый эффект — переберём все сочетания по 4 и найдём топ-5.",
+  bn_opt_target:"Эффект", bn_opt_go:"Найти", bn_opt_checked:"комбинаций проверено", bn_opt_found:"с положительным эффектом",
+  bn_opt_none:"Ни одна комбинация из выбранных ингредиентов не даёт этот эффект в плюс.",
+  bn_opt_all:"все", bn_opt_none_sel:"ничего", bn_opt_working:"считаю…",
   bn_bt0:"Здоровье", bn_bt1:"Энергия", bn_bt2:"Меткость", bn_bt3:"Скорость движения",
   bn_bt4:"Скорость действия", bn_bt5:"Сила ближнего боя", bn_bt6:"Сила дальнего боя",
   bn_bt7:"Щит", bn_bt8:"Скорость ближнего боя", bn_bt9:"Скорость дальнего боя",
@@ -1963,7 +2002,11 @@ var T = {
   bn_none:"Nothing uploaded yet.", bn_count:"records", bn_saved_at:"uploaded",
   bn_all:"all", bn_records:"Combos", bn_time:"time, s", bn_effect:"effect",
   bn_no_effect:"no effect", bn_ingredients:"ingredients",
-  bn_state_note:"Effects don't add up linearly from ingredients (checked with regression on real data) — looks like fixed recipes/randomness, not a sum of contributions.",
+  bn_state_note:"The mixing formula has been fully reverse-engineered and verified (matches the server on every known recipe) — the optimizer below computes exactly, it doesn't guess.",
+  bn_opt_title:"Recipe optimizer", bn_opt_intro:"Check the ingredients you have, pick the effect you want — every 4-ingredient combo will be tried to find the top 5.",
+  bn_opt_target:"Effect", bn_opt_go:"Search", bn_opt_checked:"combos checked", bn_opt_found:"with a positive effect",
+  bn_opt_none:"None of the selected ingredients produce a positive value for this effect.",
+  bn_opt_all:"all", bn_opt_none_sel:"none", bn_opt_working:"crunching…",
   bn_bt0:"Health", bn_bt1:"Energy", bn_bt2:"Accuracy", bn_bt3:"Move speed",
   bn_bt4:"Action speed", bn_bt5:"Melee strength", bn_bt6:"Ranged strength",
   bn_bt7:"Shield", bn_bt8:"Melee speed", bn_bt9:"Ranged speed",
@@ -2489,13 +2532,67 @@ function tabBuffs(v){
       var ingrCell=el("td",{},[el("div",{class:"chips"}, r.items.map(function(it){
         return el("span",{class:"chip",style:it.id===activeFilter?"border-color:var(--acc);color:var(--acc)":""},[it.name]); }))]);
       var buffCell = r.buff.length
-        ? el("div",{}, r.buff.map(function(b){ return el("div",{},[buffTypeName(b.state)+": "+(b.val>0?"+":"")+b.val]); }))
+        ? el("div",{}, r.buff.map(function(b){ return el("div",{},[b.name+": "+(b.val>0?"+":"")+b.val]); }))
         : el("span",{class:"muted small"},[t("bn_no_effect")]);
       tb.appendChild(el("tr",{},[el("td",{},[String(r.idx+1)]), el("td",{},[r.time!=null?String(r.time):"—"]), ingrCell, buffCell]));
     });
     body.appendChild(tb);
   }
   load();
+
+  // ---- оптимизатор рецептов (полный перебор по проверенной формуле) ----
+  var optIngr = {};
+  var optChips = el("div",{class:"chips",style:"margin:8px 0"},[el("span",{class:"muted small"},["…"])]);
+  var optTarget = el("select",{}, Object.keys(BUFF_TYPE_KEY).map(function(k){
+    return el("option",{value:k},[t(BUFF_TYPE_KEY[k])]);
+  }));
+  var optMsg = el("span",{class:"muted small"},[]);
+  var optResults = el("div",{},[]);
+  function loadIngredients(){
+    api("/api/buff-ingredients").then(function(d){
+      optChips.innerHTML="";
+      if(!d.ok || !d.ingredients.length){ optChips.appendChild(el("div",{class:"muted small"},[d.error||t("bn_none")])); return; }
+      d.ingredients.forEach(function(it){
+        var cb=el("input",{type:"checkbox",checked:true},[]);
+        optIngr[it.id]=cb;
+        optChips.appendChild(el("label",{style:"display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:20px;padding:2px 8px;font-size:11.5px;cursor:pointer"},[cb, it.name]));
+      });
+    }).catch(function(e){ optChips.innerHTML=""; optChips.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  function pollOpt(jid){
+    var iv=setInterval(function(){
+      api("/api/job?id="+jid).then(function(j){
+        if(!j.done) return;
+        clearInterval(iv);
+        optMsg.textContent="";
+        var d=j.result||{};
+        optResults.innerHTML="";
+        if(!d.ok){ optResults.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+        optResults.appendChild(el("div",{class:"muted small",style:"margin-bottom:8px"},[
+          d.checked+" "+t("bn_opt_checked")+" · "+d.count+" "+t("bn_opt_found")]));
+        if(!d.results.length){ optResults.appendChild(el("div",{class:"muted"},[t("bn_opt_none")])); return; }
+        d.results.forEach(function(res,i){
+          var ingr=res.materials.map(function(m){ return m.name; }).join(" + ");
+          var buffs=res.buffs.map(function(b){ return b.name+": "+(b.val>0?"+":"")+b.val; }).join(", ");
+          optResults.appendChild(el("div",{class:"card",style:"margin-bottom:6px"},[
+            el("b",{},["#"+(i+1)+"  "+ingr]),
+            el("div",{class:"small",style:"margin-top:4px"},[buffs])
+          ]));
+        });
+      }).catch(function(){ clearInterval(iv); optMsg.textContent=t("err_net"); });
+    },1200);
+  }
+  function runOptimize(){
+    var available=Object.keys(optIngr).filter(function(k){ return optIngr[k].checked; });
+    if(available.length<4){ optMsg.textContent=t("bn_opt_none"); return; }
+    optMsg.textContent=t("bn_opt_working");
+    optResults.innerHTML="";
+    api("/api/buff-optimize",{body:{available:available,target:parseInt(optTarget.value,10),top:5}})
+      .then(function(r){ pollOpt(r.job); })
+      .catch(function(e){ optMsg.textContent=errText(e); });
+  }
+  loadIngredients();
+
   v.appendChild(el("div",{},[
     el("div",{class:"card",style:"margin-bottom:12px"},[
       el("h3",{},[t("bn_upload")]),
@@ -2507,6 +2604,17 @@ function tabBuffs(v){
           try{ upload(JSON.parse(pasteTa.value)); } catch(e){ msg.textContent=t("bn_invalid")+": "+e.message; }
         }},[t("bn_save")])
       ]),
+    ]),
+    el("div",{class:"card",style:"margin-bottom:12px"},[
+      el("h3",{},[t("bn_opt_title")]),
+      el("p",{class:"muted small"},[t("bn_opt_intro")]),
+      optChips,
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[
+        el("span",{class:"small"},[t("bn_opt_target")]), optTarget,
+        el("button",{class:"small pri",onclick:runOptimize},[t("bn_opt_go")]),
+        optMsg
+      ]),
+      el("div",{style:"margin-top:10px"},[optResults])
     ]),
     body,
     el("div",{class:"muted small",style:"margin-top:8px"},[t("bn_state_note")])
