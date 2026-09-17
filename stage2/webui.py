@@ -2471,7 +2471,7 @@ function tabBuffs(v){
     body.appendChild(tb);
   }
   load();
-  return el("div",{},[
+  v.appendChild(el("div",{},[
     el("div",{class:"card",style:"margin-bottom:12px"},[
       el("h3",{},[t("bn_upload")]),
       el("p",{class:"muted small"},[t("bn_intro")]),
@@ -2485,7 +2485,7 @@ function tabBuffs(v){
     ]),
     body,
     el("div",{class:"muted small",style:"margin-top:8px"},[t("bn_state_note")])
-  ]);
+  ]));
 }
 
 // ---- servers ----
