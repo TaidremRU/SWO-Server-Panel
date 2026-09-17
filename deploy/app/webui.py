@@ -1874,7 +1874,9 @@ var T = {
   pd_mod:"Модерация (оффлайн)", pd_mod_ban:"Забанить", pd_mod_unban:"Разбанить",
   pd_mod_tp:"Телепорт", pd_mod_givetech:"Выдать техи", pd_mod_resetpw:"Сброс пароля игрока",
   pd_mod_newcode:"новый пароль игрока",
-  pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
+  pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина",
+  pd_p4:"Меткость", pd_p5:"Скорость действия", pd_p6:"Скорость атаки",
+  pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
@@ -2009,7 +2011,9 @@ var T = {
   pd_mod:"Moderation (offline)", pd_mod_ban:"Ban", pd_mod_unban:"Unban",
   pd_mod_tp:"Teleport", pd_mod_givetech:"Grant tech", pd_mod_resetpw:"Reset player password",
   pd_mod_newcode:"new player password",
-  pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
+  pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina",
+  pd_p4:"Accuracy", pd_p5:"Action speed", pd_p6:"Attack speed",
+  pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
   pd_skill_pfx:"Skill", pd_skill_hint:"exact name unknown to the panel — +2%/level to something",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
@@ -2622,8 +2626,10 @@ function renderPlayerModal(d){
   // навыком (skillLevels того же type): val/valMax паспортизированы напрямую
   // из данных сервера (см. память "тип 4/тип 6" — подтверждено сопоставлением
   // paramList/skillLevels на живых unit*.json). Навыки 4-6 — те же +2%/уровень
-  // множители (val=1+0.02*level), но их игровое название неизвестно панели.
+  // множители (val=1+0.02*level): 5/6 подтверждены пользователем в клиенте
+  // (Скорость действия / Скорость атаки), 4 — Меткость методом исключения.
   var PBL={0:"pd_p0",1:"pd_p1",2:"pd_p2",3:"pd_p3"}, LPL={0:"pd_lp0",1:"pd_lp1",2:"pd_lp2"};
+  var BONUS={4:"pd_p4",5:"pd_p5",6:"pd_p6"};
   var params=(av.params||[]).filter(function(pp){ return pp.max>1; }).map(function(pp){
     if(PBL[pp.type]){
       var pct=Math.max(0,Math.min(100, 100*pp.val/pp.max));
@@ -2631,14 +2637,15 @@ function renderPlayerModal(d){
         el("span",{style:"width:"+pct+"%"},[]), el("b",{},[Math.round(pp.val)+" / "+Math.round(pp.max)])])];
     }
     var pctBonus=Math.round((pp.val-1)*100);
-    return [t("pd_skill_pfx")+" #"+pp.type, el("span",{class:"chip",title:t("pd_skill_hint")},["+"+pctBonus+"%"])];
+    var lbl=BONUS[pp.type]? t(BONUS[pp.type]) : (t("pd_skill_pfx")+" #"+pp.type);
+    return [lbl, el("span",{class:"chip",title:BONUS[pp.type]?"":t("pd_skill_hint")},["+"+pctBonus+"%"])];
   });
   var lps=(av.long_params||[]).map(function(pp){
     var l=(LPL[pp.type] && t(LPL[pp.type])) || ("L"+pp.type); return [l, String(pp.val)]; });
   g.appendChild(kvcard(t("pd_avatar"), params.concat(lps).concat([
     [t("pd_skills"), (av.skills&&av.skills.length)? el("div",{class:"chips"}, av.skills.map(function(sk){
-      var known=!!PBL[sk.type], lbl=known? t(PBL[sk.type]) : (t("pd_skill_pfx")+" #"+sk.type);
-      return el("span",{class:"chip",title:known?"":t("pd_skill_hint")},[lbl+": "+sk.val]); })) : "—"],
+      var nameKey=PBL[sk.type]||BONUS[sk.type], lbl=nameKey? t(nameKey) : (t("pd_skill_pfx")+" #"+sk.type);
+      return el("span",{class:"chip",title:nameKey?"":t("pd_skill_hint")},[lbl+": "+sk.val]); })) : "—"],
     [t("pd_abilities"), (av.abilities&&av.abilities.length)? el("div",{class:"chips"}, av.abilities.map(function(a){
       return el("span",{class:"chip"},[a]); })) : "—"],
     [t("pd_buffs"), av.buffs||0]
