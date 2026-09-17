@@ -77,7 +77,8 @@ try:
                         "server_chat", "server_events", "server_private_chat",
                         "stats_bundle", "world_map", "server_health", "twink_report",
                         "players_csv", "make_world_backup", "tech_track_scan", "tech_track_read",
-                        "player_item_search", "tech_meta", "tech_label", "mapdt_find"):
+                        "player_item_search", "tech_meta", "tech_label", "mapdt_find",
+                        "buff_notepad_save", "buff_notepad_read"):
                 assert hasattr(players, _fn), "players: нет %s" % _fn
             _pf = players.player_item_search(cfg, "tech_booster")
             assert _pf.get("ok"), "player_item_search: %s" % _pf.get("error")

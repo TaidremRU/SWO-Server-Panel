@@ -384,6 +384,7 @@ class WebUI:
         self._audit_lock = threading.Lock()
         self._tt_state = os.path.join(base, "tech_track_state.json")
         self._tt_log = os.path.join(base, "logs", "tech_track.jsonl")
+        self._buff_path = os.path.join(base, "buff_notepad.json")
         self._stop = threading.Event()
         self._srv = None
         self._thread = None
@@ -977,6 +978,28 @@ class WebUI:
                                         limit=(q.get("limit") or ["400"])[0])
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: tech_track_read")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_buff_notepad(self, h, method, q, sess):
+        """Вкладка «Микстуры». GET — сохранённый buff_notepad с именами
+        ингредиентов; POST {data:{...}} — сохранить новый (файл с машины
+        игрока, панель сама его прочитать не может)."""
+        if method == "POST":
+            b = self._body(h)
+            try:
+                d = players.buff_notepad_save(self._buff_path, b.get("data"))
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: buff_notepad_save")
+                d = {"ok": False, "error": str(e)}
+            if d.get("ok"):
+                self.audit(h.client_address[0], sess["user"],
+                           "buff_notepad: загружен (%s записей)" % d.get("count"))
+            return self._json(h, d, 200 if d.get("ok") else 400)
+        try:
+            d = players.buff_notepad_read(self.cfg, self._buff_path)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: buff_notepad_read")
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
@@ -1746,7 +1769,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1775,6 +1798,13 @@ var T = {
   set_save:"Сохранить настройки", set_saved:"Сохранено", set_restart:"Часть изменений применится после перезапуска задачи.", set_accounts:"Игровые аккаунты", set_acc_add:"＋ аккаунт", set_acc_label:"метка", set_acc_user:"логин", set_acc_pw:"пароль (пусто = не менять)", set_acc_active:"активный", set_lf:"login_flow (JSON, продвинутое)", set_secret_set:"задан", set_secret_ph:"оставьте пустым, чтобы не менять", roles_alerts:"Алерты в Telegram включены", roles_hint:"ID через запятую/пробел/с новой строки. ID из обоих списков считается администратором. Нужен ≥1 админ. Главный админ должен быть среди администраторов.",
   save:"Сохранить", saved:"Сохранено, роли применены на лету",
   entry_intro:"Тюнер координат входа: снимок окна игры, клик по нему — проценты ширины/высоты окна (не зависят от разрешения/DPI). Требует запущенную задачу SigmaNav в интерактивной сессии.",
+  bn_intro:"Игра сама ведёт локальный файл buff_notepad.json — память всех опробованных комбинаций из 4 ингредиентов и их эффектов. Панель его не видит (файл на машине игрока, не на сервере) — загрузите его сюда вручную, чтобы посмотреть, что с чем даёт.",
+  bn_upload:"Загрузить buff_notepad.json", bn_paste:"…или вставьте содержимое файла сюда",
+  bn_save:"Сохранить", bn_saved:"Сохранено", bn_invalid:"Не похоже на buff_notepad.json",
+  bn_none:"Пока ничего не загружено.", bn_count:"записей", bn_saved_at:"загружено",
+  bn_all:"все", bn_records:"Комбинации", bn_time:"время, с", bn_effect:"эффект",
+  bn_no_effect:"без эффекта", bn_ingredients:"ингредиенты",
+  bn_state_note:"«эффект #N» — внутренний код игры, точное название пока не расшифровано (не то же самое, что тип статов игрока).",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -1883,7 +1913,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -1912,6 +1942,13 @@ var T = {
   set_save:"Save settings", set_saved:"Saved", set_restart:"Some changes take effect after restarting the task.", set_accounts:"Game accounts", set_acc_add:"＋ account", set_acc_label:"label", set_acc_user:"username", set_acc_pw:"password (empty = keep)", set_acc_active:"active", set_lf:"login_flow (JSON, advanced)", set_secret_set:"set", set_secret_ph:"leave empty to keep", roles_alerts:"Telegram alerts enabled", roles_hint:"IDs separated by comma / space / newline. An ID in both lists counts as admin. At least one admin required. Super admin must be one of the admins.",
   save:"Save", saved:"Saved, roles applied live",
   entry_intro:"Login-flow coordinate tuner: a screenshot of the game window, click on it — percent of window width/height (resolution/DPI independent). Needs the SigmaNav scheduled task running in an interactive session.",
+  bn_intro:"The game keeps a local buff_notepad.json — a memory of every 4-ingredient combo tried and its effect. The panel can't see it (it lives on the player's machine, not the server) — upload it here to see what mixes with what.",
+  bn_upload:"Upload buff_notepad.json", bn_paste:"…or paste the file contents here",
+  bn_save:"Save", bn_saved:"Saved", bn_invalid:"Doesn't look like a buff_notepad.json",
+  bn_none:"Nothing uploaded yet.", bn_count:"records", bn_saved_at:"uploaded",
+  bn_all:"all", bn_records:"Combos", bn_time:"time, s", bn_effect:"effect",
+  bn_no_effect:"no effect", bn_ingredients:"ingredients",
+  bn_state_note:"\"effect #N\" is the game's internal code — the exact name isn't decoded yet (not the same as the player stat type).",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2073,14 +2110,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","buffs","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -2374,6 +2411,81 @@ function tabEntry(v){
   api("/api/login-flow").then(function(j){ LF=j.login_flow||{}; drawSteps(); })
     .catch(function(e){ out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   refreshShot();
+}
+
+// ---- buff notepad (мешаем микстуры) ----
+function tabBuffs(v){
+  var msg=el("span",{class:"muted small"},[]);
+  var body=el("div",{},[el("p",{class:"muted"},["…"])]);
+  var activeFilter=null;
+  function upload(obj){
+    if(!obj || !Array.isArray(obj.items)){ msg.textContent=t("bn_invalid"); return; }
+    msg.textContent=t("working");
+    api("/api/buff-notepad",{body:{data:obj}}).then(function(r){
+      msg.textContent="✅ "+t("bn_saved")+" ("+r.count+")";
+      activeFilter=null; load();
+    }).catch(function(e){ msg.textContent=errText(e); });
+  }
+  var fileInp=el("input",{type:"file",accept:".json,application/json"});
+  fileInp.addEventListener("change",function(){
+    var f=fileInp.files[0]; if(!f) return;
+    var reader=new FileReader();
+    reader.onload=function(){
+      try{ upload(JSON.parse(reader.result)); }
+      catch(e){ msg.textContent=t("bn_invalid")+": "+e.message; }
+      fileInp.value="";
+    };
+    reader.readAsText(f);
+  });
+  var pasteTa=el("textarea",{rows:"4",placeholder:t("bn_paste"),style:"width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px"});
+  function load(){
+    api("/api/buff-notepad").then(render).catch(function(e){
+      body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  function chipStyle(on){ return "cursor:pointer"+(on?";background:var(--acc);color:#fff;border-color:var(--acc)":""); }
+  function render(d){
+    body.innerHTML="";
+    if(!d.ok){ body.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    if(!d.count){ body.appendChild(el("div",{class:"muted"},[t("bn_none")])); return; }
+    body.appendChild(el("div",{class:"muted small",style:"margin-bottom:8px"},[
+      d.count+" "+t("bn_count")+(d.saved_at? " · "+t("bn_saved_at")+" "+d.saved_at:"")]));
+    var chips=el("div",{class:"chips",style:"margin-bottom:10px"},[
+      el("span",{class:"chip",style:chipStyle(activeFilter===null),onclick:function(){ activeFilter=null; render(d); }},[t("bn_all")+" ("+d.count+")"])
+    ]);
+    d.by_item.forEach(function(it){
+      chips.appendChild(el("span",{class:"chip",style:chipStyle(activeFilter===it.id),
+        onclick:function(){ activeFilter=(activeFilter===it.id)?null:it.id; render(d); }},[it.name+" ×"+it.count]));
+    });
+    body.appendChild(chips);
+    var recs=d.records.filter(function(r){ return activeFilter===null || r.items.some(function(it){ return it.id===activeFilter; }); });
+    body.appendChild(el("h3",{},[t("bn_records")+" · "+recs.length]));
+    var tb=el("table",{},[el("tr",{},["#",t("bn_time"),t("bn_ingredients"),t("bn_effect")].map(function(x){ return el("th",{},[x]); }))]);
+    recs.forEach(function(r){
+      var ingrCell=el("td",{},[el("div",{class:"chips"}, r.items.map(function(it){
+        return el("span",{class:"chip",style:it.id===activeFilter?"border-color:var(--acc);color:var(--acc)":""},[it.name]); }))]);
+      var buffCell = r.buff.length
+        ? el("div",{}, r.buff.map(function(b){ return el("div",{},[t("bn_effect")+" #"+b.state+": "+(b.val>0?"+":"")+b.val]); }))
+        : el("span",{class:"muted small"},[t("bn_no_effect")]);
+      tb.appendChild(el("tr",{},[el("td",{},[String(r.idx+1)]), el("td",{},[r.time!=null?String(r.time):"—"]), ingrCell, buffCell]));
+    });
+    body.appendChild(tb);
+  }
+  load();
+  return el("div",{},[
+    el("div",{class:"card",style:"margin-bottom:12px"},[
+      el("h3",{},[t("bn_upload")]),
+      el("p",{class:"muted small"},[t("bn_intro")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"},[fileInp, msg]),
+      pasteTa,
+      el("div",{class:"row",style:"margin-top:6px"},[
+        el("button",{class:"small",onclick:function(){
+          try{ upload(JSON.parse(pasteTa.value)); } catch(e){ msg.textContent=t("bn_invalid")+": "+e.message; }
+        }},[t("bn_save")])
+      ]),
+    ]),
+    body,
+    el("div",{class:"muted small",style:"margin-top:8px"},[t("bn_state_note")])
+  ]);
 }
 
 // ---- servers ----

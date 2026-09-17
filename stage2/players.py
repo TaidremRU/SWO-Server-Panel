@@ -2255,6 +2255,61 @@ def tech_track_read(cfg, log_path, uid=None, kind=None, limit=400):
     return {"ok": True, "total": len(rows), "events": rows[-limit:][::-1]}
 
 
+def buff_notepad_save(path, raw):
+    """Сохранить buff_notepad.json, загруженный вручную через веб-панель (вкладка
+    «Микстуры») — сам файл лежит на машине игрока, сервер его не видит.
+    Формат (как в игре): ``{"items":[{"items":[id,id,id,id],"time":float,
+    "isSign":bool,"buff":[{"state":int,"val":float},...]},...]}``."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
+        return {"ok": False, "error": "неверный формат: ожидается объект с полем items[]"}
+    for r in raw["items"]:
+        if not isinstance(r, dict) or not isinstance(r.get("items"), list):
+            return {"ok": False, "error": "неверный формат записи в items[]"}
+    out = {"items": raw["items"], "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        tmp = path + ".swtmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "count": len(out["items"])}
+
+
+def buff_notepad_read(cfg, path):
+    """Загруженный buff_notepad с именами ингредиентов (из ``Data\\items.json``)
+    и списком-индексом «ингредиент -> в каких комбинациях встречается» — для
+    вкладки «Микстуры». Названия эффектов (``buff[].state``) НЕ расшифрованы —
+    это отдельный enum игры, не проверено, совпадает ли он с типами статов
+    игрока (``paramList``, см. [[sigma-swo-stat-skill-ids]])."""
+    d = _read_json(path) or {}
+    recs = d.get("items") or []
+    if not recs:
+        return {"ok": True, "count": 0, "records": [], "by_item": [], "saved_at": d.get("saved_at")}
+    world_dir = find_world_dir(cfg)
+    item_names = load_items(world_dir) if world_dir else {}
+
+    def iname(i):
+        return item_names.get(i) or ("#%s" % i)
+
+    records = []
+    by_item = {}
+    for idx, r in enumerate(recs):
+        ids = r.get("items") or []
+        records.append({
+            "idx": idx,
+            "items": [{"id": i, "name": iname(i)} for i in ids],
+            "time": r.get("time"),
+            "buff": r.get("buff") or [],
+        })
+        for i in ids:
+            slot = by_item.setdefault(i, {"id": i, "name": iname(i), "count": 0})
+            slot["count"] += 1
+    by_item_list = sorted(by_item.values(), key=lambda x: x["name"].lower())
+    return {"ok": True, "count": len(records), "records": records,
+            "by_item": by_item_list, "saved_at": d.get("saved_at")}
+
+
 def _inv_container(world_dir, uid, where):
     """-> (path, mtime, root_obj, inv_dict) для 'stash' (файл игрока) или 'carry'
     (файл его юнита). Или (None, None, None, err_str)."""
