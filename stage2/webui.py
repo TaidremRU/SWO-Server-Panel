@@ -1867,6 +1867,7 @@ var T = {
   pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
   tt_title:"Трекинг техов / бустеров", tt_none:"пока пусто (панель ведёт лог с момента включения)",
   tt_gained:"изучил", tt_spent:"потратил бустер", tt_bgain:"получил бустер", tt_reschg:"новое исследование", tt_map:"сменил карту",
+  tt_chart_title:"Учёба и бустеры по дням", tt_chart_tech:"техов изучено", tt_chart_boost:"бустеров потрачено",
   pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
   pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
   pd_inv_count:"кол-во", pd_inv_from:"откуда", pd_inv_carry:"при себе",
@@ -1874,6 +1875,7 @@ var T = {
   pd_mod_tp:"Телепорт", pd_mod_givetech:"Выдать техи", pd_mod_resetpw:"Сброс пароля игрока",
   pd_mod_newcode:"новый пароль игрока",
   pd_p0:"Энергия", pd_p1:"Сытость", pd_p2:"Здоровье", pd_p3:"Стамина", pd_lp0:"Очки иссл.", pd_lp1:"Уровень", pd_lp2:"",
+  pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
   dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", roles:"Settings", logs:"Logs",
@@ -2000,6 +2002,7 @@ var T = {
   pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
   tt_title:"Tech / booster tracking", tt_none:"empty so far (the panel logs from when it was enabled)",
   tt_gained:"researched", tt_spent:"spent booster", tt_bgain:"gained booster", tt_reschg:"new research", tt_map:"changed map",
+  tt_chart_title:"Research & boosters by day", tt_chart_tech:"techs learned", tt_chart_boost:"boosters spent",
   pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
   pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
   pd_inv_count:"qty", pd_inv_from:"from", pd_inv_carry:"carried",
@@ -2007,6 +2010,7 @@ var T = {
   pd_mod_tp:"Teleport", pd_mod_givetech:"Grant tech", pd_mod_resetpw:"Reset player password",
   pd_mod_newcode:"new player password",
   pd_p0:"Energy", pd_p1:"Hunger", pd_p2:"Health", pd_p3:"Stamina", pd_lp0:"Research pts", pd_lp1:"Level", pd_lp2:"",
+  pd_skill_pfx:"Skill", pd_skill_hint:"exact name unknown to the panel — +2%/level to something",
   ago:"ago", never:"no data", n_a:"n/a" }
 };
 function t(k){ return (T[S.lang]&&T[S.lang][k]) || (T.ru[k]) || k; }
@@ -2355,8 +2359,8 @@ function tabEntry(v){
       el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("entry_seq_confirm"))) runAction("login",{},0,t("entry_seq")); }},[t("entry_seq")]),
     ]),
     out,
-    el("div",{class:"grid",style:"grid-template-columns:minmax(260px,1fr) minmax(320px,1.3fr);align-items:start"},[
-      el("div",{},[img, pickInfo]),
+    el("div",{},[
+      el("div",{style:"max-width:720px;margin-bottom:14px"},[img, pickInfo]),
       stepsBox,
     ]),
   ]));
@@ -2614,18 +2618,27 @@ function renderPlayerModal(d){
       return el("span",{class:"chip"},[tt.map+": "+tt.x+","+tt.y]); })) : "—"]
   ]));
 
+  // Статы 0-3 (Энергия/Сытость/Здоровье/Стамина) растут вместе с одноимённым
+  // навыком (skillLevels того же type): val/valMax паспортизированы напрямую
+  // из данных сервера (см. память "тип 4/тип 6" — подтверждено сопоставлением
+  // paramList/skillLevels на живых unit*.json). Навыки 4-6 — те же +2%/уровень
+  // множители (val=1+0.02*level), но их игровое название неизвестно панели.
   var PBL={0:"pd_p0",1:"pd_p1",2:"pd_p2",3:"pd_p3"}, LPL={0:"pd_lp0",1:"pd_lp1",2:"pd_lp2"};
   var params=(av.params||[]).filter(function(pp){ return pp.max>1; }).map(function(pp){
-    var pct=Math.max(0,Math.min(100, 100*pp.val/pp.max));
-    var lbl=PBL[pp.type]? t(PBL[pp.type]) : ("тип "+pp.type);
-    return [lbl, el("div",{class:"bar",title:pp.val+" / "+pp.max},[
-      el("span",{style:"width:"+pct+"%"},[]), el("b",{},[Math.round(pp.val)+" / "+Math.round(pp.max)])])];
+    if(PBL[pp.type]){
+      var pct=Math.max(0,Math.min(100, 100*pp.val/pp.max));
+      return [t(PBL[pp.type]), el("div",{class:"bar",title:pp.val+" / "+pp.max},[
+        el("span",{style:"width:"+pct+"%"},[]), el("b",{},[Math.round(pp.val)+" / "+Math.round(pp.max)])])];
+    }
+    var pctBonus=Math.round((pp.val-1)*100);
+    return [t("pd_skill_pfx")+" #"+pp.type, el("span",{class:"chip",title:t("pd_skill_hint")},["+"+pctBonus+"%"])];
   });
   var lps=(av.long_params||[]).map(function(pp){
     var l=(LPL[pp.type] && t(LPL[pp.type])) || ("L"+pp.type); return [l, String(pp.val)]; });
   g.appendChild(kvcard(t("pd_avatar"), params.concat(lps).concat([
     [t("pd_skills"), (av.skills&&av.skills.length)? el("div",{class:"chips"}, av.skills.map(function(sk){
-      return el("span",{class:"chip"},["#"+sk.type+": "+sk.val]); })) : "—"],
+      var known=!!PBL[sk.type], lbl=known? t(PBL[sk.type]) : (t("pd_skill_pfx")+" #"+sk.type);
+      return el("span",{class:"chip",title:known?"":t("pd_skill_hint")},[lbl+": "+sk.val]); })) : "—"],
     [t("pd_abilities"), (av.abilities&&av.abilities.length)? el("div",{class:"chips"}, av.abilities.map(function(a){
       return el("span",{class:"chip"},[a]); })) : "—"],
     [t("pd_buffs"), av.buffs||0]
@@ -2769,11 +2782,25 @@ function renderPlayerModal(d){
 
   var ttCard=el("div",{class:"card"},[el("h3",{},[t("tt_title")]), el("div",{class:"muted small"},["…"])]);
   g.appendChild(ttCard);
-  api("/api/tech-track?limit=80&uid="+d.id).then(function(tj){
+  api("/api/tech-track?limit=1500&uid="+d.id).then(function(tj){
     ttCard.innerHTML=""; ttCard.appendChild(el("h3",{},[t("tt_title")+(tj.total!=null?" · "+tj.total:"")]));
     if(!tj.ok || !tj.events || !tj.events.length){ ttCard.appendChild(el("div",{class:"muted small"},[t("tt_none")])); return; }
-    var box=el("div",{class:"mono small",style:"max-height:200px;overflow:auto"},[]);
-    tj.events.forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,true)])); });
+    var days=[], techByDay={}, boostByDay={};
+    for(var i=13;i>=0;i--){
+      var k=new Date(Date.now()-i*86400000).toISOString().slice(0,10);
+      days.push(k); techByDay[k]=0; boostByDay[k]=0;
+    }
+    tj.events.forEach(function(e){
+      var k=(e.ts||"").slice(0,10);
+      if(!(k in techByDay)) return;
+      if(e.kind==="tech_gained") techByDay[k]+=(e.count||0);
+      else if(e.kind==="booster_spent") boostByDay[k]+=(e.delta||0);
+    });
+    ttCard.appendChild(bigChart(t("tt_chart_title"), "bar", days.map(function(k){ return k.slice(5); }),
+      [{name:t("tt_chart_tech"), unit:"", data:days.map(function(k){ return techByDay[k]; }), color:CHART_COL[1]},
+       {name:t("tt_chart_boost"), unit:"", data:days.map(function(k){ return boostByDay[k]; }), color:CHART_COL[2]}]));
+    var box=el("div",{class:"mono small",style:"max-height:200px;overflow:auto;margin-top:8px"},[]);
+    tj.events.slice(0,80).forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,true)])); });
     ttCard.appendChild(box);
   }).catch(function(){ ttCard.querySelector(".muted").textContent=t("err_net"); });
 
