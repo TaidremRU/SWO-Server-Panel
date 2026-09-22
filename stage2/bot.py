@@ -549,8 +549,6 @@ class Bot:
             )
 
     # ---------- список игровых серверов ----------
-    _HL_SERVER = "astralsigma"  # какой сервер подсвечивать в списке
-
     def _do_servers(self, chat, lang, role):
         self.tg.send_message(chat, i18n.t(lang, "wait.servers"))
 
@@ -571,8 +569,10 @@ class Bot:
         if not res:
             return i18n.t(lang, "servers.none")
 
+        hl_target = self._mon_name.lower().replace(" ", "")
+
         def is_hl(s):
-            return self._HL_SERVER in (s.get("name") or "").lower().replace(" ", "")
+            return hl_target in (s.get("name") or "").lower().replace(" ", "")
 
         res.sort(key=lambda s: (not is_hl(s), -(s.get("players") or 0), (s.get("name") or "").lower()))
         shown = res[:40]

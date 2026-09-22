@@ -52,6 +52,7 @@ SESSION_TTL = 12 * 3600
 SHOT_MIN_INTERVAL = 4.0
 SERVERS_CACHE_SEC = 45
 PLAYERS_CACHE_SEC = 15
+REAUTH_ELEVATE_SECONDS = 60  # окно после ввода пароля, когда чувствительные действия его не переспрашивают
 
 
 def _now_iso():
@@ -261,7 +262,7 @@ class AuthStore:
 
 
 class Sessions:
-    """Сессии в памяти: token -> {user, ip, csrf, born, seen}."""
+    """Сессии в памяти: token -> {user, ip, csrf, born, seen, elevated_until}."""
 
     def __init__(self):
         self._d = {}
@@ -272,7 +273,7 @@ class Sessions:
         csrf = secrets.token_urlsafe(24)
         with self._lock:
             self._d[tok] = {"user": user, "ip": ip, "csrf": csrf,
-                            "born": time.time(), "seen": time.time()}
+                            "born": time.time(), "seen": time.time(), "elevated_until": 0}
         return tok, csrf
 
     def get(self, tok):
@@ -284,11 +285,27 @@ class Sessions:
                 self._d.pop(tok, None)
                 return None
             s["seen"] = time.time()
-            return dict(s)
+            d = dict(s)
+            d["tok"] = tok
+            return d
 
     def drop(self, tok):
         with self._lock:
             self._d.pop(tok, None)
+
+    def elevate(self, tok, seconds):
+        """Отметить сессию как «подтверждённую паролем» на ``seconds`` вперёд —
+        чувствительные операции (см. ``WebUI._reauth``) в этом окне пароль не
+        переспрашивают."""
+        with self._lock:
+            s = self._d.get(tok)
+            if s is not None:
+                s["elevated_until"] = time.time() + seconds
+
+    def is_elevated(self, tok):
+        with self._lock:
+            s = self._d.get(tok)
+            return bool(s and s["elevated_until"] > time.time())
 
 
 class Throttle:
@@ -704,6 +721,8 @@ class WebUI:
         ts, payload = self._srv_cache
         out = dict(payload)
         out["cached_age"] = int(now - ts)
+        mon_name = (self.cfg.get("monitor", {}) or {}).get("server_name", "AstralSigma")
+        out["highlight"] = mon_name.lower().replace(" ", "")
         return self._json(h, out)
 
     # ---------------------------------------------------------------- players
@@ -744,17 +763,28 @@ class WebUI:
     def _reauth(self, h, sess, what, body=None):
         """Повторная проверка админ-пароля панели (для чувствительных операций).
         ``body`` — уже разобранный JSON тела (если None — читается здесь).
-        -> (ok, body_dict_or_error_response)."""
+        -> (ok, body_dict_or_error_response).
+
+        Сессия, недавно подтверждённая паролем, освобождается от повторного
+        ввода на ``REAUTH_ELEVATE_SECONDS`` (диалог на фронте сам решает,
+        когда его показывать, по ответу ``password_required``/``bad_password``)."""
+        b = body if body is not None else self._body(h)
+        if self.sessions.is_elevated(sess.get("tok")):
+            return True, b
         ip = h.client_address[0]
+        pw = b.get("password") or ""
+        if not pw:
+            # 403, не 401 — 401 в api() трактуется фронтом как "сессия истекла" и разлогинивает
+            return False, self._json(h, {"error": "password_required"}, 403)
         okt, wait = self.throttle.check(ip)
         if not okt:
             return False, self._json(h, {"error": "throttled", "retry": wait}, 429)
-        b = body if body is not None else self._body(h)
-        if not self.auth.verify(sess["user"], (b.get("password") or "")):
+        if not self.auth.verify(sess["user"], pw):
             self.throttle.fail(ip)
             self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль: %s" % what)
             return False, self._json(h, {"error": "bad_password"}, 403)
         self.throttle.ok(ip)
+        self.sessions.elevate(sess.get("tok"), REAUTH_ELEVATE_SECONDS)
         return True, b
 
     def _api_player_secret(self, h, pid, sess):
@@ -1783,6 +1813,8 @@ a.pl-link:hover{text-decoration:underline}
 .dlg .bd{padding:14px}
 .dlg .grid{grid-template-columns:repeat(3,minmax(0,1fr))}
 @media(max-width:760px){.dlg .grid{grid-template-columns:1fr}}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);width:320px;max-width:100%;padding:16px;margin-top:60px}
+.modal h3{margin:0 0 10px}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
 .chip{font-size:11.5px;padding:1px 7px;border:1px solid var(--line);border-radius:20px;color:var(--mut)}
 .bar{position:relative;height:14px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden;min-width:90px}
@@ -2145,6 +2177,63 @@ function setConn(ok){ S.conn=ok; var d=$("#conn"); if(d) d.className="dot "+(ok?
 function errText(e){ if(!e) return t("err_net"); if(e.err==="net") return t("err_net");
   var k="err_"+(e.error||e.err||""); return T[S.lang][k]||e.detail||e.error||t("err_net"); }
 
+// ---- password confirmation modal (чувствительные действия) ----
+// Сервер сам решает, нужен ли пароль (сессия недавно подтверждена — см.
+// REAUTH_ELEVATE_SECONDS на бэке): сначала пробуем без пароля, и только если
+// сервер ответит password_required/bad_password — показываем диалог.
+function openPasswordModal(onSubmit){
+  var pw=el("input",{type:"password",placeholder:t("pass"),autocomplete:"current-password"});
+  var errEl=el("div",{class:"msg err",style:"display:none;margin-top:8px"},[]);
+  var busy=false;
+  function close(){ if(ovl.parentNode) ovl.parentNode.removeChild(ovl); document.removeEventListener("keydown",onKey); }
+  function onKey(e){ if(e.key==="Escape") close(); }
+  function submit(){
+    if(busy || !pw.value) return;
+    busy=true; errEl.style.display="none";
+    Promise.resolve(onSubmit(pw.value)).then(function(){ close(); })
+      .catch(function(e){
+        busy=false;
+        errEl.style.display=""; errEl.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e);
+        pw.value=""; pw.focus();
+      });
+  }
+  pw.addEventListener("keydown",function(e){ if(e.key==="Enter") submit(); });
+  var ovl=el("div",{class:"ovl",onclick:function(e){ if(e.target===ovl) close(); }},[
+    el("div",{class:"modal",style:"max-width:320px"},[
+      el("h3",{},[t("pd_code_prompt")]),
+      el("div",{class:"row"},[pw, el("button",{class:"small pri",onclick:submit},[t("pd_code_btn")])]),
+      errEl,
+    ]),
+  ]);
+  document.body.appendChild(ovl);
+  setTimeout(function(){ pw.focus(); },0);
+}
+// JSON-запрос через api(), защищённый паролем панели.
+function gatedApi(url, extra, onOk, onErr){
+  function attempt(pw){
+    var body=Object.assign({}, extra||{}); if(pw) body.password=pw;
+    return api(url,{body:body});
+  }
+  attempt(null).then(onOk).catch(function(e){
+    if(e && (e.error==="password_required" || e.error==="bad_password")){
+      openPasswordModal(function(pw){ return attempt(pw).then(onOk); });
+    } else if(onErr) onErr(e);
+  });
+}
+// Как gatedApi, но для скачивания файла (world-backup): onOk получает "сырой" Response.
+function gatedFetchBlob(url, extra, onOk, onErr){
+  function attempt(pw){
+    var body=Object.assign({}, extra||{}); if(pw) body.password=pw;
+    return fetch(url,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify(body)})
+      .then(function(r){ if(r.ok) return onOk(r); return r.json().then(function(j){ throw j; }); });
+  }
+  attempt(null).catch(function(e){
+    if(e && (e.error==="password_required" || e.error==="bad_password")){
+      openPasswordModal(function(pw){ return attempt(pw); });
+    } else if(onErr) onErr(e);
+  });
+}
+
 // ---- helpers ----
 function fdur(s){ if(s==null) return t("n_a"); s=Math.floor(s); var d=Math.floor(s/86400);s%=86400;
   var h=Math.floor(s/3600);s%=3600; var m=Math.floor(s/60); s%=60;
@@ -2327,15 +2416,13 @@ function tabAct(v){
     return el("button",{class:cls,onclick:function(){ runAction(d[0], d[3]||{}, d[2], t(d[1])); }},[t(d[1])]);
   }));
   var out=el("div",{id:"actout"},[]);
-  var expPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:120px"});
   var expMsg=el("span",{class:"muted small"},[]);
   var exp=el("div",{class:"card",style:"margin-top:16px"},[
     el("h3",{},[t("ex_title")]),
     el("div",{class:"row",style:"flex-wrap:wrap;gap:8px"},[
       el("button",{class:"small",onclick:function(){ window.open("/api/players-csv","_blank"); }},[t("ex_csv")]),
-      expPw,
-      el("button",{class:"small",onclick:function(){ backupDownload("state",expPw.value,expMsg); }},[t("ex_bstate")]),
-      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("ex_bfull")+"?")) backupDownload("full",expPw.value,expMsg); }},[t("ex_bfull")]),
+      el("button",{class:"small",onclick:function(){ backupDownload("state",expMsg); }},[t("ex_bstate")]),
+      el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("ex_bfull")+"?")) backupDownload("full",expMsg); }},[t("ex_bfull")]),
       expMsg
     ])
   ]);
@@ -2393,15 +2480,15 @@ function tabEntry(v){
       return inp;
     }
     var actSel=el("select",{},["click","ensure_check","type","key"].map(function(a){
-      return el("option",{value:a,selected:s.action===a},[a]); }));
+      return el("option",{value:a,selected:s.action===a?"selected":null},[a]); }));
     actSel.addEventListener("change",function(){ s.action=actSel.value; drawSteps(); });
     var extraFld = (s.action==="type") ? fld("text","{account_user}",110)
                   : (s.action==="key") ? fld("key","enter",70)
                   : fld("tag","tag",70);
     var btn=el("select",{},["left","right"].map(function(b){
-      return el("option",{value:b,selected:(s.button||"left")===b},[b]); }));
+      return el("option",{value:b,selected:(s.button||"left")===b?"selected":null},[b]); }));
     btn.addEventListener("change",function(){ s.button=btn.value; });
-    var dbl=el("input",{type:"checkbox",checked:!!s.dbl},[]);
+    var dbl=el("input",{type:"checkbox",checked:s.dbl?"checked":null},[]);
     dbl.addEventListener("change",function(){ s.dbl=dbl.checked; });
     var showXY = s.action==="click" || s.action==="ensure_check";
     var del=el("button",{class:"small danger",onclick:function(){ list.splice(i,1); drawSteps(); }},["×"]);
@@ -2633,14 +2720,15 @@ function loadSrv(){
     var out=$("#srvout"); out.innerHTML="";
     if(!j.ok){ out.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
     if(!j.servers.length){ out.appendChild(el("p",{class:"muted"},[t("srv_none")])); return; }
+    var hlName=j.highlight||"astralsigma";
     var rows=j.servers.slice().sort(function(a,b){
-      var ah=/astralsigma/.test((a.name||"").toLowerCase().replace(/ /g,""));
-      var bh=/astralsigma/.test((b.name||"").toLowerCase().replace(/ /g,""));
+      var ah=(a.name||"").toLowerCase().replace(/ /g,"").indexOf(hlName)!==-1;
+      var bh=(b.name||"").toLowerCase().replace(/ /g,"").indexOf(hlName)!==-1;
       if(ah!==bh) return ah?-1:1; return (b.players||0)-(a.players||0);
     });
     var tb=el("table",{},[ el("tr",{},[t("col_name"),t("col_players"),t("col_map"),t("col_ver"),t("col_addr"),t("col_mem")].map(function(x){return el("th",{},[x]);})) ]);
     rows.forEach(function(s){
-      var hl=/astralsigma/.test((s.name||"").toLowerCase().replace(/ /g,""));
+      var hl=(s.name||"").toLowerCase().replace(/ /g,"").indexOf(hlName)!==-1;
       tb.appendChild(el("tr",{class:hl?"hl":""},[
         el("td",{},[(hl?"👑 ":"")+(s.name||"?")]),
         el("td",{},[(s.players||0)+" / "+(s.max_players||0)]),
@@ -2909,13 +2997,11 @@ function renderPlayerModal(d){
   ])));
 
   var canEdit = d.online===false;
-  var pdEditPw=el("input",{type:"password",placeholder:t("pass"),style:"padding:5px 8px;width:130px"});
   function pdWrite(url, extra, msgEl){
     if(msgEl) msgEl.textContent="…";
-    var body=Object.assign({password:pdEditPw.value}, extra);
-    return api(url,{body:body})
-      .then(function(res){ if(msgEl) msgEl.textContent="✅"; api("/api/players/"+d.id).then(renderPlayerModal); return res; })
-      .catch(function(e){ if(msgEl) msgEl.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); throw e; });
+    gatedApi(url, extra,
+      function(){ if(msgEl) msgEl.textContent="✅"; api("/api/players/"+d.id).then(renderPlayerModal); },
+      function(e){ if(msgEl) msgEl.textContent=errText(e); });
   }
   function pdInvOp(op, where, item, count, msgEl){
     return pdWrite("/api/players/"+d.id+"/inventory", {op:op,where:where,item:item,count:count}, msgEl);
@@ -2964,7 +3050,6 @@ function renderPlayerModal(d){
     }
     g.appendChild(el("div",{class:"card"},[
       el("h3",{},[t("pd_inv_edit")]),
-      el("div",{class:"row"},[el("span",{class:"muted small"},[t("pd_code_prompt")]), pdEditPw]),
       el("div",{class:"row",style:"margin-top:8px"},[
         giveItem, giveCnt,
         el("button",{class:"small pri",onclick:function(){
@@ -3082,28 +3167,21 @@ function renderPlayerModal(d){
   b.appendChild(g);
 
   // sensitive blocks (each behind admin password)
-  function gate(box, url, promptKey, render){
-    box.innerHTML="";
-    var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
-    var msg=el("span",{class:"muted small"},[]);
-    var go=el("button",{class:"small",onclick:function(){
-      msg.textContent="…";
-      api(url,{body:{password:pw.value}}).then(function(res){ box.innerHTML=""; render(box,res); })
-        .catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e); });
-    }},[t("pd_code_btn")]);
-    box.appendChild(el("div",{class:"row"},[el("span",{class:"muted small"},[t(promptKey)]), pw, go, msg]));
-    pw.focus();
+  function gate(box, url, render){
+    box.innerHTML=""; box.appendChild(el("p",{class:"muted small"},["…"]));
+    gatedApi(url, {}, function(res){ box.innerHTML=""; render(box,res); },
+      function(e){ box.innerHTML=""; box.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   }
   var secBox=el("div",{class:"card",style:"margin-top:12px"},[]);
   var btnRow=el("div",{class:"row"},[
     el("button",{class:"small danger",onclick:function(){
-      gate(secBox, "/api/players/"+d.id+"/secret", "pd_code_prompt", function(box,res){
+      gate(secBox, "/api/players/"+d.id+"/secret", function(box,res){
         box.appendChild(el("div",{class:"kv"},[el("span",{},["code"]),el("b",{class:"mono"},[res.code||"—"])]));
         box.appendChild(btnRow);
       });
     }},[t("pd_show_code")]),
     el("button",{class:"small danger",onclick:function(){
-      gate(secBox, "/api/players/"+d.id+"/sensitive", "pd_code_prompt", function(box,res){
+      gate(secBox, "/api/players/"+d.id+"/sensitive", function(box,res){
         box.appendChild(el("h3",{},[t("pd_priv")+" · "+(res.private||[]).length]));
         if(!(res.private||[]).length) box.appendChild(el("div",{class:"muted small"},[t("pd_priv_none")]));
         var pb=el("div",{class:"small",style:"max-height:200px;overflow:auto"},[]);
@@ -3611,14 +3689,13 @@ function mdtFindCard(maps){
       el("button",{class:"small",onclick:run},[t("mf_go")]) ]),
     out ]);
 }
-function backupDownload(scope, pw, msg){
+function backupDownload(scope, msg){
   msg.textContent=t("ex_wait");
-  fetch("/api/world-backup",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify({password:pw,scope:scope})})
-    .then(function(r){ if(!r.ok) return r.json().then(function(j){ throw j; });
-      var fn=(r.headers.get("Content-Disposition")||"").match(/filename="?([^"]+)"?/); fn=fn?fn[1]:"world_backup.zip";
-      return r.blob().then(function(bl){ var a=document.createElement("a"); a.href=URL.createObjectURL(bl); a.download=fn; a.click();
-        setTimeout(function(){URL.revokeObjectURL(a.href);},4000); msg.textContent="✅ "+fn; }); })
-    .catch(function(e){ msg.textContent=(e&&e.error==="bad_password")? t("pd_code_bad") : (e&&(e.error||e.detail))||t("err_net"); });
+  gatedFetchBlob("/api/world-backup", {scope:scope}, function(r){
+    var fn=(r.headers.get("Content-Disposition")||"").match(/filename="?([^"]+)"?/); fn=fn?fn[1]:"world_backup.zip";
+    return r.blob().then(function(bl){ var a=document.createElement("a"); a.href=URL.createObjectURL(bl); a.download=fn; a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);},4000); msg.textContent="✅ "+fn; });
+  }, function(e){ msg.textContent=(e&&(e.error||e.detail))||t("err_net"); });
 }
 function scT(node, lg){ return el("div",{class:"sc"+(lg?" sc-lg":"")},[node]); }
 function drawStats(j){
@@ -3934,12 +4011,11 @@ function pullEvents(){
 }
 function chPrivate(body){
   body.innerHTML="";
-  var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
   var qq=el("input",{placeholder:t("sc_search"),style:"padding:6px 8px"});
   var out=el("div",{id:"pvout",style:"margin-top:10px"},[]);
   function run(){
     out.innerHTML=""; out.appendChild(el("p",{class:"muted"},["…"]));
-    api("/api/server-chat",{body:{password:pw.value, q:qq.value, limit:800}}).then(function(j){
+    gatedApi("/api/server-chat", {q:qq.value, limit:800}, function(j){
       out.innerHTML="";
       var box=el("div",{class:"mono small",style:"max-height:62vh;overflow:auto"},[]);
       (j.messages||[]).forEach(function(m){ box.appendChild(el("div",{},[
@@ -3947,21 +4023,20 @@ function chPrivate(body){
         m.from_id!=null? plLink(m.from_id,m.from):el("b",{},[m.from]), " → ",
         m.to_id!=null? plLink(m.to_id,m.to):el("b",{},[m.to]), ": "+m.text ])); });
       out.appendChild(el("p",{class:"muted small"},[String(j.total||0)])); out.appendChild(box);
-    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e)])); });
+    }, function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   }
   body.appendChild(el("p",{class:"muted small"},[t("sc_priv_note")]));
-  body.appendChild(el("div",{class:"row"},[pw, qq, el("button",{class:"small pri",onclick:run},[t("tw_show")])]));
+  body.appendChild(el("div",{class:"row"},[qq, el("button",{class:"small pri",onclick:run},[t("tw_show")])]));
   body.appendChild(out);
 }
 
 // ---- twinks (same-IP account detector) ----
 function tabTwinks(v){
-  var pw=el("input",{type:"password",placeholder:t("pass"),style:"padding:6px 8px"});
   var mn=el("input",{type:"number",value:"2",min:"2",max:"20",style:"padding:6px 8px;width:80px"});
   var out=el("div",{id:"twout",style:"margin-top:12px"},[]);
   function run(){
     out.innerHTML=""; out.appendChild(el("p",{class:"muted"},["…"]));
-    api("/api/twinks",{body:{password:pw.value, min_accounts:parseInt(mn.value,10)||2}}).then(function(j){
+    gatedApi("/api/twinks", {min_accounts:parseInt(mn.value,10)||2}, function(j){
       out.innerHTML="";
       out.appendChild(el("p",{class:"muted small"},[
         t("tw_bycode")+": "+j.code_flagged+" ("+j.code_accounts+" акк.) • "+t("tw_byip")+": "+j.flagged_ips+"/"+j.ip_count+
@@ -3999,12 +4074,11 @@ function tabTwinks(v){
           el("h3",{},["🌐 "+gr.ip+" · "+gr.count]),
           acctable(gr.accounts,[t("tw_connects"),t("pl_col_enter"),t("pl_col_exit"),t("tw_other_ips")])]));
       });
-    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[(e&&e.error==="bad_password")? t("pd_code_bad") : errText(e)])); });
+    }, function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
   }
   v.appendChild(el("div",{},[
     el("p",{class:"muted small"},[t("tw_intro")]),
     el("div",{class:"row"},[
-      el("span",{class:"muted small"},[t("tw_prompt")]), pw,
       el("label",{class:"small"},[t("tw_min")+" ", mn]),
       el("button",{class:"small pri",onclick:run},[t("tw_show")])
     ]),
