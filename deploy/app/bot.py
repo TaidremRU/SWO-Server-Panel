@@ -130,7 +130,8 @@ class Bot:
         disc = disc if disc is not None else (self.cfg.get("discord", {}) or {})
         self._disc_webhook = (disc.get("webhook_url") or "").strip()
         self._disc_enabled = bool(disc.get("enabled")) and bool(self._disc_webhook)
-        self._disc_proxy = (disc.get("proxy") or "").strip() or None
+        # тот же SOCKS5-прокси, что и у Telegram — оба заблокированы с этой VM одинаково
+        self._disc_proxy = (self.cfg.get("telegram", {}).get("proxy") or "").strip() or None
         self._disc_interval = max(60, int(disc.get("interval_seconds", 300)))
 
     def apply_roles(self, tg):

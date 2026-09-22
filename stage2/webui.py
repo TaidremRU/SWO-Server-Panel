@@ -97,9 +97,8 @@ SETTINGS_SCHEMA = [
     ]),
     ("discord", "Discord-стата", "Discord stats", [
         ("discord.enabled", "Включена", "Enabled", "bool", ""),
-        ("discord.webhook_url", "Webhook URL", "Webhook URL", "secret", "вебхук канала Discord (Настройки канала → Интеграции → Вебхуки)"),
+        ("discord.webhook_url", "Webhook URL", "Webhook URL", "secret", "вебхук канала Discord (Настройки канала → Интеграции → Вебхуки); ходит через тот же прокси, что и Telegram"),
         ("discord.interval_seconds", "Интервал, с", "Interval, s", "int", "мин. 60; одно сообщение правится на месте, не спамит"),
-        ("discord.proxy", "Прокси", "Proxy", "str", "socks5h://host:port; пусто = без прокси (нужен, только если Discord заблокирован с этой VM)"),
     ]),
     ("players", "Данные локального сервера", "Local server data", [
         ("players.enabled", "Читать файлы сервера", "Read server files", "bool", ""),
