@@ -14,6 +14,7 @@ supervisor.lock
 nav_cmd.txt
 nav_out.txt
 *.png
+!docs/screenshots/*.png
 buff_notepad.json
 tech_track_state.json
 

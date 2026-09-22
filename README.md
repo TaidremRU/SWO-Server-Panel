@@ -60,7 +60,7 @@
 | `webui.py` | веб-панель (HTTP-поток в супервизоре): аутентификация, API, встроенный SPA; правка ролей на лету через `bot.apply_roles` |
 | `players.py` | вкладка «Игроки» веб-панели: список и онлайн-статус игроков локального сервера из файлов игры (`analytics.txt`, `Data\users\*`, `Logs\game_state.txt`); пароли (`Code`) не отдаются |
 | `mapdt.py` | парсер бинарных карт `Data\maps\map<N>.dt` — точный порт сериализации из исходника игры (террейн, блоки, машины, контейнеры, руда, сетка владения землёй) |
-| `common.py` | конфиг (`load_config` / `save_config` без BOM), логи, `State` (в `state.json`), клиент Telegram поверх `curl.exe` + SOCKS5 |
+| `common.py` | конфиг (`load_config` / `save_config` без BOM), логи, `State` (в `state.json`), клиенты Telegram и Discord-вебхука поверх `curl.exe` + SOCKS5 |
 | `i18n.py` | двуязычные строки (`ru`/`en`) + `t()`; паритет ключей проверяет `selftest.py` |
 | `gamectl.py` | старт/стоп/рестарт Steam и игры, перезагрузка VM, отключение задачи бота |
 | `sysinfo.py` | сбор ресурсов, состояния Steam/игры/сессий |
@@ -121,6 +121,16 @@ Sigma World Online **не регистрирует game-серверы** в ма
 - запрос списка не удался → тик пропускается (не считается «пропажей»), только запись в лог.
 
 Состояние (`monitor_astral` в `state.json`) переживает перезапуск бота — повторных ложных тревог после рестарта нет.
+
+### Discord-стата
+
+Автообновляемое embed-сообщение в Discord-канале — без отдельного бота, только вебхук (`config.json → discord`). Раз в `discord.interval_seconds` (мин. 60) правит на месте одно и то же сообщение (id хранится в `state.json`), а не плодит новые:
+
+- статус сервера (🟢/🔴 по тому же списку Steam-лобби, что и `/servers`), игроков онлайн, карта, версия;
+- график онлайна за 24 ч — PNG-картинка, свой рендер на Pillow (без сторонних JS-графиков), с осью Y и часовыми метками;
+- топ-6 сезонного рейтинга (`Data\users\rating.json`) — только у кого есть награда (`reward > 0`), по убыванию `rating`; показывается не рейтинг, а количество ускорителей на место.
+
+Ходит через тот же SOCKS5-прокси, что и Telegram (`telegram.proxy`) — отдельно настраивать не нужно. По умолчанию выключена, включается во вкладке «Настройки» (нужен только URL вебхука канала).
 
 ### Веб-панель
 
@@ -318,7 +328,7 @@ SigmaConsoleGuard task (SYSTEM, on RDP-disconnect event)
 | `bot.py` | Telegram commands and inline buttons, roles, audit, background server monitor |
 | `webui.py` | web panel (HTTP thread in the supervisor): authentication, API, embedded SPA; live role editing via `bot.apply_roles` |
 | `players.py` | web panel "Players" tab: local-server player list and online status from the game's own files (`analytics.txt`, `Data\users\*`, `Logs\game_state.txt`); passwords (`Code`) are never exposed |
-| `common.py` | config (`load_config` / `save_config` without BOM), logging, `State` (in `state.json`), Telegram client over `curl.exe` + SOCKS5 |
+| `common.py` | config (`load_config` / `save_config` without BOM), logging, `State` (in `state.json`), Telegram and Discord-webhook clients over `curl.exe` + SOCKS5 |
 | `i18n.py` | bilingual strings (`ru`/`en`) + `t()`; key parity checked by `selftest.py` |
 | `gamectl.py` | start/stop/restart Steam and game, reboot VM, disable the bot task |
 | `sysinfo.py` | collects resources, Steam/game/session state |
@@ -379,6 +389,16 @@ The `srvmonitor` thread in the supervisor. First check ~90 s after start, then e
 - if the list request itself fails → the tick is skipped (not counted as “missing”), logged only.
 
 State (`monitor_astral` in `state.json`) survives a bot restart — no repeated false alarms after a restart.
+
+### Discord stats
+
+An auto-updating embed message in a Discord channel — no separate bot, just a webhook (`config.json → discord`). Every `discord.interval_seconds` (min. 60) it edits the same message in place (its id lives in `state.json`) instead of spamming new ones:
+
+- server status (🟢/🔴, from the same Steam-lobby list `/servers` uses), players online, map, version;
+- a 24 h online-count chart — a PNG rendered with Pillow (no third-party JS charting), with a Y axis and hourly labels;
+- the top 6 of the seasonal rating (`Data\users\rating.json`) — only entries with a reward (`reward > 0`), sorted by `rating` descending; shows the booster count per place, not the raw rating points.
+
+Goes through the same SOCKS5 proxy as Telegram (`telegram.proxy`) — nothing extra to configure. Disabled by default; turn it on in the "Settings" tab (just needs the channel's webhook URL).
 
 ### Web UI
 
@@ -527,6 +547,14 @@ After `/stopbot` (task disabled, Telegram won’t help): the **“Запусти
 
 ### Скриншоты / Screenshots
 
-**RU:** Пока не добавлены — появятся, когда панель будет отлажена на тестовом сервере, а не на проде с реальными данными игроков.
+**RU:** С тестового сервера (`ApexSigma`) — реальные данные игроков с прода (`AstralSigma`) в скриншоты не попадают.
 
-**EN:** Not included yet — will be added once the panel is tested on a non-production server, rather than against live player data.
+| Дашборд | Действия |
+|---|---|
+| ![Дашборд](docs/screenshots/dashboard.png) | ![Действия](docs/screenshots/actions.png) |
+
+| Карта | Микстуры |
+|---|---|
+| ![Карта](docs/screenshots/map.png) | ![Микстуры](docs/screenshots/buffs.png) |
+
+**EN:** From the test server (`ApexSigma`) — no live player data from production (`AstralSigma`) ever shows up in screenshots.
