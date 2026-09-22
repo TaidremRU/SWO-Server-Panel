@@ -128,7 +128,7 @@ Sigma World Online **не регистрирует game-серверы** в ма
 
 - статус сервера (🟢/🔴 по тому же списку Steam-лобби, что и `/servers`), игроков онлайн, карта, версия;
 - график онлайна за 24 ч — PNG-картинка, свой рендер на Pillow (без сторонних JS-графиков), с осью Y и часовыми метками;
-- топ-6 сезонного рейтинга (`Data\users\rating.json`) — только у кого есть награда (`reward > 0`), по убыванию `rating`; показывается не рейтинг, а количество ускорителей на место.
+- топ-7 сезонного рейтинга (`Data\users\rating.json`), по убыванию `orderRating`; награда — не поле из файла, а фиксированная шкала по месту: 24 ускорителя исследования → 0 (7 место).
 
 Ходит через тот же SOCKS5-прокси, что и Telegram (`telegram.proxy`) — отдельно настраивать не нужно. По умолчанию выключена, включается во вкладке «Настройки» (нужен только URL вебхука канала).
 
@@ -396,7 +396,7 @@ An auto-updating embed message in a Discord channel — no separate bot, just a 
 
 - server status (🟢/🔴, from the same Steam-lobby list `/servers` uses), players online, map, version;
 - a 24 h online-count chart — a PNG rendered with Pillow (no third-party JS charting), with a Y axis and hourly labels;
-- the top 6 of the seasonal rating (`Data\users\rating.json`) — only entries with a reward (`reward > 0`), sorted by `rating` descending; shows the booster count per place, not the raw rating points.
+- the top 7 of the seasonal rating (`Data\users\rating.json`), sorted by `orderRating` descending; the reward isn't read from the file — it's a fixed scale by place: 24 research boosters down to 0 (7th place).
 
 Goes through the same SOCKS5 proxy as Telegram (`telegram.proxy`) — nothing extra to configure. Disabled by default; turn it on in the "Settings" tab (just needs the channel's webhook URL).
 

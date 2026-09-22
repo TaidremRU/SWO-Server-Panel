@@ -521,20 +521,25 @@ def online_series_recent(cfg, hours=24):
     return {"ok": True, "series": series, "peak": peak, "now": now_online}
 
 
-def rating_top(cfg, top_n=6):
-    """Топ сезонного рейтинга (``Data/users/rating.json``) — только те, у кого
-    есть награда (``reward`` > 0), по убыванию ``rating``.
+REWARD_TIERS = (24, 20, 16, 12, 8, 4, 0)  # призовые ускорители исследования по месту 1..7
+
+
+def rating_top(cfg, top_n=7):
+    """Топ сезонного рейтинга (``Data/users/rating.json``) по убыванию
+    ``orderRating``. Награда — не поле ``reward`` из файла, а фиксированная
+    шкала по месту (``REWARD_TIERS``): 1 место = 24 ускорителя исследования,
+    ..., 7 место = 0.
     -> {"ok", "top":[{id, name, reward}]} | {"ok":False,"error"}."""
     world_dir = find_world_dir(cfg)
     if not world_dir:
         return {"ok": False, "error": "каталог мира не найден"}
     raw = _read_json(os.path.join(world_dir, "Data", "users", "rating.json"), default={})
     names = load_user_list(world_dir)
-    rows = [u for u in (raw.get("users") or []) if (u.get("reward") or 0) > 0]
-    rows.sort(key=lambda u: -(u.get("rating") or 0))
+    rows = sorted(raw.get("users") or [], key=lambda u: -(u.get("orderRating") or 0))[:top_n]
     top = [{"id": u.get("userId"),
             "name": names.get(u.get("userId")) or ("id %s" % u.get("userId")),
-            "reward": u.get("reward") or 0} for u in rows[:top_n]]
+            "reward": REWARD_TIERS[i] if i < len(REWARD_TIERS) else 0}
+           for i, u in enumerate(rows)]
     return {"ok": True, "top": top}
 
 

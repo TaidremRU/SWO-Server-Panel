@@ -699,11 +699,11 @@ class Bot:
             })
 
         if (self.cfg.get("players", {}) or {}).get("enabled", True):
-            rt = players.rating_top(self.cfg, top_n=6)
+            rt = players.rating_top(self.cfg, top_n=7)
             if rt.get("ok") and rt["top"]:
                 lines = ["%s **%s** — %d ⚡" % (self._DISC_MEDALS.get(i, "%d." % i), row["name"], row["reward"])
                          for i, row in enumerate(rt["top"], 1)]
-                fields.append({"name": "🏆 Топ-6 сезона", "value": "\n".join(lines), "inline": False})
+                fields.append({"name": "🏆 Топ-7 сезона", "value": "\n".join(lines), "inline": False})
 
         embed = {
             "title": self._mon_name,
