@@ -251,14 +251,25 @@ class Discord:
                 "-d", json.dumps(body, ensure_ascii=False), "-w", "\n%{http_code}", url]
         return self._run(cmd)
 
-    def _curl_multipart(self, method, url, parts):
-        """``parts``: [(field, filepath, mimetype), ...]."""
+    def _curl_multipart(self, method, url, fields, files):
+        """``fields``: [(name, path_to_content_file), ...] — обычные поля формы
+        (значение читается из файла через ``<``, БЕЗ filename/content-type).
+        ``files``: [(name, path, mime), ...] — настоящие файлы-вложения (``@``,
+        с filename — так их видит Discord).
+
+        Критично не путать: если ``payload_json`` отправить через ``@`` (как
+        файл), curl проставит ему ``filename=`` — и Discord примет его как ЕЩЁ
+        ОДНО вложение вместо спец-поля с телом сообщения. Итог — embed вообще
+        не обновляется, а на каждой правке в сообщение добавляется новый
+        JSON-файл поверх старых (см. память по этому багу)."""
         cmd = [CURL, "-s", "--max-time", str(self.timeout)]
         if self.proxy_arg:
             cmd += ["--socks5-hostname", self.proxy_arg]
         cmd += ["-X", method]
-        for field, path, mime in parts:
-            cmd += ["-F", "%s=@%s;type=%s" % (field, path, mime)]
+        for name, path in fields:
+            cmd += ["-F", "%s=<%s" % (name, path)]
+        for name, path, mime in files:
+            cmd += ["-F", "%s=@%s;type=%s" % (name, path, mime)]
         cmd += ["-w", "\n%{http_code}", url]
         return self._run(cmd)
 
@@ -272,10 +283,11 @@ class Discord:
         try:
             json.dump(payload, jf, ensure_ascii=False)
             jf.close()
-            return self._curl_multipart(method, url, [
-                ("payload_json", jf.name, "application/json"),
-                ("files[0]", image_path, "image/png"),
-            ])
+            return self._curl_multipart(
+                method, url,
+                fields=[("payload_json", jf.name)],
+                files=[("files[0]", image_path, "image/png")],
+            )
         finally:
             try:
                 os.unlink(jf.name)

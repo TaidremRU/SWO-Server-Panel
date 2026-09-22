@@ -699,11 +699,11 @@ class Bot:
             })
 
         if (self.cfg.get("players", {}) or {}).get("enabled", True):
-            rt = players.rating_top(self.cfg, top_n=7)
+            rt = players.rating_top(self.cfg, top_n=6)
             if rt.get("ok") and rt["top"]:
                 lines = ["%s **%s** — %d ⚡" % (self._DISC_MEDALS.get(i, "%d." % i), row["name"], row["reward"])
                          for i, row in enumerate(rt["top"], 1)]
-                fields.append({"name": "🏆 Топ-7 сезона", "value": "\n".join(lines), "inline": False})
+                fields.append({"name": "🏆 Топ-6 сезона", "value": "\n".join(lines), "inline": False})
 
         embed = {
             "title": self._mon_name,
@@ -741,23 +741,31 @@ class Bot:
     @staticmethod
     def _render_online_chart(series, w=560, h=170):
         """PNG (bytes) с графиком онлайна ``[{t, n}]`` — заливка+линия на прозрачном
-        фоне (одинаково читается и на светлой, и на тёмной теме Discord)."""
+        фоне (одинаково читается и на светлой, и на тёмной теме Discord), с осью Y
+        (число игроков, горизонтальная сетка) и подписями часов по оси X."""
         from PIL import Image, ImageDraw, ImageFont
-        pad_l, pad_r, pad_t, pad_b = 10, 10, 10, 20
         n = len(series)
         vmax = max(1, max(p["n"] for p in series))
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
         try:
             font = ImageFont.truetype(r"C:\Windows\Fonts\segoeui.ttf", 11)
         except Exception:  # noqa: BLE001
             font = ImageFont.load_default()
+        y_ticks = sorted(set(round(vmax * k / 4) for k in range(5)))  # 0..vmax, до 5 отметок
+        pad_l = 8 + max(len(str(t)) for t in y_ticks) * 7 + 6
+        pad_r, pad_t, pad_b = 10, 10, 20
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
         plot_w, plot_h = w - pad_l - pad_r, h - pad_t - pad_b
 
         def xy(i, v):
             x = pad_l + plot_w * i / max(1, n - 1)
             y = pad_t + plot_h * (1 - v / vmax)
             return x, y
+
+        for t in y_ticks:
+            _, ty = xy(0, t)
+            d.line([(pad_l, ty), (pad_l + plot_w, ty)], fill=(120, 126, 135, 60), width=1)
+            d.text((4, ty - 5), str(t), fill=(148, 155, 164, 255), font=font)
 
         pts = [xy(i, p["n"]) for i, p in enumerate(series)]
         if len(pts) > 1:

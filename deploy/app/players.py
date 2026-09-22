@@ -521,7 +521,7 @@ def online_series_recent(cfg, hours=24):
     return {"ok": True, "series": series, "peak": peak, "now": now_online}
 
 
-def rating_top(cfg, top_n=7):
+def rating_top(cfg, top_n=6):
     """Топ сезонного рейтинга (``Data/users/rating.json``) — только те, у кого
     есть награда (``reward`` > 0), по убыванию ``rating``.
     -> {"ok", "top":[{id, name, reward}]} | {"ok":False,"error"}."""
