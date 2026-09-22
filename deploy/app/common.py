@@ -205,3 +205,61 @@ class Telegram:
 
     def answer_callback(self, cbid, text=None):
         return self.call("answerCallbackQuery", callback_query_id=cbid, text=text)
+
+
+class Discord:
+    """Минимальный клиент вебхука Discord поверх curl.exe (прокси — опционально,
+    как и у ``Telegram``: нужен только если Discord заблокирован с этой VM)."""
+
+    def __init__(self, webhook_url, proxy=None, timeout=15):
+        self.webhook_url = webhook_url.rstrip("/")
+        self.proxy_arg = None
+        if proxy:
+            p = urllib.parse.urlparse(proxy)
+            self.proxy_arg = "{}:{}".format(p.hostname, p.port or 1080)
+        self.timeout = timeout
+
+    def _curl(self, method, url, body):
+        cmd = [CURL, "-s", "--max-time", str(self.timeout)]
+        if self.proxy_arg:
+            cmd += ["--socks5-hostname", self.proxy_arg]
+        cmd += ["-X", method, "-H", "Content-Type: application/json",
+                "-d", json.dumps(body, ensure_ascii=False), "-w", "\n%{http_code}", url]
+        try:
+            out = subprocess.run(cmd, capture_output=True, timeout=self.timeout + 15)
+        except subprocess.TimeoutExpired:
+            return 0, {"error": "curl timeout"}
+        except Exception as e:  # noqa: BLE001
+            return 0, {"error": "curl spawn: %s" % e}
+        if out.returncode != 0:
+            return 0, {"error": "curl rc=%d %s" % (out.returncode, out.stderr.decode("utf-8", "replace")[:200])}
+        raw = out.stdout.decode("utf-8", "replace")
+        body_raw, _, code_raw = raw.rpartition("\n")
+        try:
+            code = int(code_raw.strip())
+        except ValueError:
+            code = 0
+        data = None
+        if body_raw.strip():
+            try:
+                data = json.loads(body_raw)
+            except Exception:  # noqa: BLE001
+                data = {"raw": body_raw[:300]}
+        return code, data
+
+    def post(self, embed):
+        """Новое сообщение с ``embed``. -> (ok, message_id|None, error|None)."""
+        code, data = self._curl("POST", self.webhook_url + "?wait=true", {"embeds": [embed]})
+        if not (200 <= code < 300):
+            return False, None, "http %d: %s" % (code, data)
+        mid = (data or {}).get("id")
+        if not mid:
+            return False, None, "нет id сообщения в ответе"
+        return True, mid, None
+
+    def edit(self, message_id, embed):
+        """Правка ранее отправленного сообщения по его id. -> (ok, error|None)."""
+        code, data = self._curl("PATCH", "%s/messages/%s" % (self.webhook_url, message_id), {"embeds": [embed]})
+        if 200 <= code < 300:
+            return True, None
+        return False, "http %d: %s" % (code, data)

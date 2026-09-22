@@ -95,6 +95,12 @@ SETTINGS_SCHEMA = [
         ("monitor.misses_before_alert", "Промахов до алерта", "Misses before alert", "int", ""),
         ("monitor.repeat_alert_seconds", "Повтор алерта, с", "Repeat alert, s", "int", "0 = без напоминаний"),
     ]),
+    ("discord", "Discord-стата", "Discord stats", [
+        ("discord.enabled", "Включена", "Enabled", "bool", ""),
+        ("discord.webhook_url", "Webhook URL", "Webhook URL", "secret", "вебхук канала Discord (Настройки канала → Интеграции → Вебхуки)"),
+        ("discord.interval_seconds", "Интервал, с", "Interval, s", "int", "мин. 60; одно сообщение правится на месте, не спамит"),
+        ("discord.proxy", "Прокси", "Proxy", "str", "socks5h://host:port; пусто = без прокси (нужен, только если Discord заблокирован с этой VM)"),
+    ]),
     ("players", "Данные локального сервера", "Local server data", [
         ("players.enabled", "Читать файлы сервера", "Read server files", "bool", ""),
         ("players.world", "Имя мира", "World name", "str", "пусто = автовыбор по свежести analytics.txt"),
@@ -1464,8 +1470,8 @@ class WebUI:
                 "ok": True, "sections": sections,
                 "game_accounts": accs, "active_account": self.cfg.get("active_account") or "",
                 "login_flow_json": json.dumps(lf, ensure_ascii=False, indent=2),
-                "restart_hint_ru": "watchdog, монитор сервера, роли/язык/алерты применяются сразу; "
-                                   "остальное (веб-панель, players.*, serverlist.*, поля Telegram-"
+                "restart_hint_ru": "watchdog, монитор сервера, Discord-стата, роли/язык/алерты применяются "
+                                   "сразу; остальное (веб-панель, players.*, serverlist.*, поля Telegram-"
                                    "подключения) — после перезапуска задачи (кнопка «Перезапустить "
                                    "задачу» на вкладке «Действия»).",
             })
@@ -1544,6 +1550,10 @@ class WebUI:
             self.bot.apply_monitor(self.cfg.get("monitor", {}))
         except Exception:  # noqa: BLE001
             logging.exception("webui: apply_monitor after settings")
+        try:
+            self.bot.apply_discord(self.cfg.get("discord", {}))
+        except Exception:  # noqa: BLE001
+            logging.exception("webui: apply_discord after settings")
         try:
             if self.wd:
                 self.wd.apply()

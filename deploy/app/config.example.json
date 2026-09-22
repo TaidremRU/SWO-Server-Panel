@@ -47,6 +47,14 @@
     "repeat_alert_seconds": 3600
   },
 
+  "_discord_comment": "Авто-обновляемая стата (embed) в Discord-канале через вебхук — без отдельного бота. Одно сообщение правится на месте раз в interval_seconds (id хранится в state.json). Использует monitor.server_name для подсветки/поиска. proxy — только если Discord заблокирован с этой VM (как telegram.proxy).",
+  "discord": {
+    "enabled": false,
+    "webhook_url": "",
+    "interval_seconds": 300,
+    "proxy": ""
+  },
+
   "watchdog": {
     "enabled": true,
     "auto_start_steam": true,

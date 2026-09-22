@@ -103,6 +103,8 @@ class Bot:
 
         # фоновый монитор наличия сервера в списке Steam-лобби
         self.apply_monitor(cfg.get("monitor", {}) or {})
+        # авто-обновляемая стата в Discord (вебхук)
+        self.apply_discord(cfg.get("discord", {}) or {})
 
     def apply_monitor(self, mon=None):
         """Пересчитать параметры фонового монитора сервера из конфига.
@@ -118,6 +120,18 @@ class Bot:
         self._mon_interval = max(60, int(mon.get("interval_seconds", 300)))
         self._mon_misses_before = max(1, int(mon.get("misses_before_alert", 2)))
         self._mon_repeat = int(mon.get("repeat_alert_seconds", 3600))  # 0 = без напоминаний
+
+    def apply_discord(self, disc=None):
+        """Пересчитать параметры Discord-статы из конфига (см. ``apply_monitor``).
+
+        Вызывается из ``__init__`` и веб-панелью после правки ``config.json`` —
+        применяется на лету, без перезапуска супервизора.
+        """
+        disc = disc if disc is not None else (self.cfg.get("discord", {}) or {})
+        self._disc_webhook = (disc.get("webhook_url") or "").strip()
+        self._disc_enabled = bool(disc.get("enabled")) and bool(self._disc_webhook)
+        self._disc_proxy = (disc.get("proxy") or "").strip() or None
+        self._disc_interval = max(60, int(disc.get("interval_seconds", 300)))
 
     def apply_roles(self, tg):
         """Пересчитать роли и язык из telegram-блока конфига.
@@ -177,6 +191,7 @@ class Bot:
         logging.info("bot: старт")
         threading.Thread(target=self._sender_loop, name="sender", daemon=True).start()
         threading.Thread(target=self._monitor_loop, name="srvmonitor", daemon=True).start()
+        threading.Thread(target=self._discord_loop, name="discordstat", daemon=True).start()
         r = self.tg.get_updates(0, 0)
         if r.get("ok") and r.get("result"):
             self._offset = r["result"][-1]["update_id"] + 1
@@ -641,6 +656,65 @@ class Bot:
 
         with self.state.lock:
             self.state.data["monitor_astral"] = new_st
+        self.state.save()
+
+    # ---------- авто-обновляемая стата в Discord ----------
+    def _discord_loop(self):
+        if self._stop.wait(min(self._disc_interval, 90)):
+            return
+        while not self._stop.is_set():
+            if self._disc_enabled:
+                try:
+                    self._discord_tick()
+                except Exception:  # noqa: BLE001
+                    logging.exception("discordstat: ошибка обновления")
+            if self._stop.wait(self._disc_interval):
+                return
+
+    def _discord_embed(self):
+        ok, res, src = serverlist.fetch(self.cfg)
+        hl_target = self._mon_name.lower().replace(" ", "")
+        srv = None
+        if ok:
+            srv = next((s for s in res if hl_target in (s.get("name") or "").lower().replace(" ", "")), None)
+        online = srv is not None
+        fields = []
+        if srv:
+            pl, mx = srv.get("players") or 0, srv.get("max_players") or 0
+            fields.append({"name": "Игроков", "value": "%d / %d" % (pl, mx), "inline": True})
+            if srv.get("map"):
+                fields.append({"name": "Карта", "value": str(srv["map"]), "inline": True})
+            if srv.get("version"):
+                fields.append({"name": "Версия", "value": "v%s" % srv["version"], "inline": True})
+        else:
+            fields.append({
+                "name": "Статус",
+                "value": "не найден в списке лобби" if ok else "список серверов недоступен (%s)" % res,
+                "inline": False,
+            })
+        return {
+            "title": self._mon_name,
+            "description": "🟢 Онлайн" if online else "🔴 Оффлайн",
+            "color": 0x2ecc71 if online else 0xe74c3c,
+            "fields": fields,
+            "footer": {"text": "Обновлено %s" % datetime.datetime.now().strftime("%d.%m %H:%M:%S")},
+        }
+
+    def _discord_tick(self):
+        disc = common.Discord(self._disc_webhook, self._disc_proxy)
+        embed = self._discord_embed()
+        mid = self.state.data.get("discord_stat_msg_id")
+        if mid:
+            ok, err = disc.edit(mid, embed)
+            if ok:
+                return
+            logging.info("discordstat: правка %s не удалась (%s), отправляю новое сообщение", mid, err)
+        ok, mid, err = disc.post(embed)
+        if not ok:
+            logging.warning("discordstat: не удалось отправить (%s)", err)
+            return
+        with self.state.lock:
+            self.state.data["discord_stat_msg_id"] = mid
         self.state.save()
 
     def _help_text(self, lang, role):
