@@ -6,6 +6,7 @@ import logging.handlers
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -219,12 +220,7 @@ class Discord:
             self.proxy_arg = "{}:{}".format(p.hostname, p.port or 1080)
         self.timeout = timeout
 
-    def _curl(self, method, url, body):
-        cmd = [CURL, "-s", "--max-time", str(self.timeout)]
-        if self.proxy_arg:
-            cmd += ["--socks5-hostname", self.proxy_arg]
-        cmd += ["-X", method, "-H", "Content-Type: application/json",
-                "-d", json.dumps(body, ensure_ascii=False), "-w", "\n%{http_code}", url]
+    def _run(self, cmd):
         try:
             out = subprocess.run(cmd, capture_output=True, timeout=self.timeout + 15)
         except subprocess.TimeoutExpired:
@@ -247,9 +243,49 @@ class Discord:
                 data = {"raw": body_raw[:300]}
         return code, data
 
-    def post(self, embed):
-        """Новое сообщение с ``embed``. -> (ok, message_id|None, error|None)."""
-        code, data = self._curl("POST", self.webhook_url + "?wait=true", {"embeds": [embed]})
+    def _curl(self, method, url, body):
+        cmd = [CURL, "-s", "--max-time", str(self.timeout)]
+        if self.proxy_arg:
+            cmd += ["--socks5-hostname", self.proxy_arg]
+        cmd += ["-X", method, "-H", "Content-Type: application/json",
+                "-d", json.dumps(body, ensure_ascii=False), "-w", "\n%{http_code}", url]
+        return self._run(cmd)
+
+    def _curl_multipart(self, method, url, parts):
+        """``parts``: [(field, filepath, mimetype), ...]."""
+        cmd = [CURL, "-s", "--max-time", str(self.timeout)]
+        if self.proxy_arg:
+            cmd += ["--socks5-hostname", self.proxy_arg]
+        cmd += ["-X", method]
+        for field, path, mime in parts:
+            cmd += ["-F", "%s=@%s;type=%s" % (field, path, mime)]
+        cmd += ["-w", "\n%{http_code}", url]
+        return self._run(cmd)
+
+    def _send(self, method, url, payload, image_path):
+        """POST/PATCH ``payload`` как JSON, либо (если задан ``image_path``) как
+        multipart с вложенной картинкой — тогда ``payload["embeds"][0]["image"]["url"]``
+        должен быть ``attachment://<basename(image_path)>``."""
+        if not image_path:
+            return self._curl(method, url, payload)
+        jf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        try:
+            json.dump(payload, jf, ensure_ascii=False)
+            jf.close()
+            return self._curl_multipart(method, url, [
+                ("payload_json", jf.name, "application/json"),
+                ("files[0]", image_path, "image/png"),
+            ])
+        finally:
+            try:
+                os.unlink(jf.name)
+            except OSError:
+                pass
+
+    def post(self, embed, image_path=None):
+        """Новое сообщение с ``embed`` (опционально — с картинкой ``image_path``,
+        см. ``_send``). -> (ok, message_id|None, error|None)."""
+        code, data = self._send("POST", self.webhook_url + "?wait=true", {"embeds": [embed]}, image_path)
         if not (200 <= code < 300):
             return False, None, "http %d: %s" % (code, data)
         mid = (data or {}).get("id")
@@ -257,9 +293,13 @@ class Discord:
             return False, None, "нет id сообщения в ответе"
         return True, mid, None
 
-    def edit(self, message_id, embed):
-        """Правка ранее отправленного сообщения по его id. -> (ok, error|None)."""
-        code, data = self._curl("PATCH", "%s/messages/%s" % (self.webhook_url, message_id), {"embeds": [embed]})
+    def edit(self, message_id, embed, image_path=None):
+        """Правка ранее отправленного сообщения по его id (см. ``post`` про ``image_path``).
+        -> (ok, error|None)."""
+        payload = {"embeds": [embed]}
+        if image_path:
+            payload["attachments"] = []  # иначе старое вложение остаётся висеть рядом с новым
+        code, data = self._send("PATCH", "%s/messages/%s" % (self.webhook_url, message_id), payload, image_path)
         if 200 <= code < 300:
             return True, None
         return False, "http %d: %s" % (code, data)

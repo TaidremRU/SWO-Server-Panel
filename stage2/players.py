@@ -509,6 +509,35 @@ def _online_series(events, bucket_sec=1800, buckets=336):
     return out, peak, (out[-1]["n"] if out else 0)
 
 
+def online_series_recent(cfg, hours=24):
+    """Онлайн-игроки по часам за последние ``hours`` часов (реконструкция из
+    analytics.txt, см. ``_online_series``). -> {"ok", "series":[{t,n}], "peak", "now"}
+    | {"ok":False,"error"}."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    _, events = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+    series, peak, now_online = _online_series(events, bucket_sec=3600, buckets=hours)
+    return {"ok": True, "series": series, "peak": peak, "now": now_online}
+
+
+def rating_top(cfg, top_n=7):
+    """Топ сезонного рейтинга (``Data/users/rating.json``) — только те, у кого
+    есть награда (``reward`` > 0), по убыванию ``rating``.
+    -> {"ok", "top":[{id, name, reward}]} | {"ok":False,"error"}."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    raw = _read_json(os.path.join(world_dir, "Data", "users", "rating.json"), default={})
+    names = load_user_list(world_dir)
+    rows = [u for u in (raw.get("users") or []) if (u.get("reward") or 0) > 0]
+    rows.sort(key=lambda u: -(u.get("rating") or 0))
+    top = [{"id": u.get("userId"),
+            "name": names.get(u.get("userId")) or ("id %s" % u.get("userId")),
+            "reward": u.get("reward") or 0} for u in rows[:top_n]]
+    return {"ok": True, "top": top}
+
+
 def _day(ts):
     return ts.split(" ", 1)[0] if ts else ""
 

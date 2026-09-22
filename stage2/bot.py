@@ -18,6 +18,7 @@
 """
 import datetime
 import html
+import io
 import logging
 import os
 import queue
@@ -27,6 +28,7 @@ import time
 import common
 import gamectl
 import i18n
+import players
 import screenshot
 import serverlist
 import sysinfo
@@ -672,7 +674,9 @@ class Bot:
             if self._stop.wait(self._disc_interval):
                 return
 
-    def _discord_embed(self):
+    _DISC_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    def _discord_embed(self, chart_name=None):
         ok, res, src = serverlist.fetch(self.cfg)
         hl_target = self._mon_name.lower().replace(" ", "")
         srv = None
@@ -693,24 +697,93 @@ class Bot:
                 "value": "не найден в списке лобби" if ok else "список серверов недоступен (%s)" % res,
                 "inline": False,
             })
-        return {
+
+        if (self.cfg.get("players", {}) or {}).get("enabled", True):
+            rt = players.rating_top(self.cfg, top_n=7)
+            if rt.get("ok") and rt["top"]:
+                lines = ["%s **%s** — %d ⚡" % (self._DISC_MEDALS.get(i, "%d." % i), row["name"], row["reward"])
+                         for i, row in enumerate(rt["top"], 1)]
+                fields.append({"name": "🏆 Топ-7 сезона", "value": "\n".join(lines), "inline": False})
+
+        embed = {
             "title": self._mon_name,
             "description": "🟢 Онлайн" if online else "🔴 Оффлайн",
             "color": 0x2ecc71 if online else 0xe74c3c,
             "fields": fields,
             "footer": {"text": "Обновлено %s" % datetime.datetime.now().strftime("%d.%m %H:%M:%S")},
         }
+        if chart_name:
+            embed["image"] = {"url": "attachment://" + chart_name}
+        return embed
+
+    def _discord_chart(self):
+        """Рисует PNG-график онлайна за 24ч и сохраняет в ``logs/discord_chart.png``.
+        -> путь к файлу | None (нет данных / players.enabled=False / ошибка рисования)."""
+        if not (self.cfg.get("players", {}) or {}).get("enabled", True):
+            return None
+        data = players.online_series_recent(self.cfg, hours=24)
+        if not data.get("ok") or not data.get("series"):
+            return None
+        try:
+            png = self._render_online_chart(data["series"])
+        except Exception:  # noqa: BLE001
+            logging.exception("discordstat: не удалось нарисовать график онлайна")
+            return None
+        path = os.path.join(self.cfg.get("base_dir", "."), "logs", "discord_chart.png")
+        try:
+            with open(path, "wb") as f:
+                f.write(png)
+        except OSError:
+            logging.exception("discordstat: не удалось сохранить график")
+            return None
+        return path
+
+    @staticmethod
+    def _render_online_chart(series, w=560, h=170):
+        """PNG (bytes) с графиком онлайна ``[{t, n}]`` — заливка+линия на прозрачном
+        фоне (одинаково читается и на светлой, и на тёмной теме Discord)."""
+        from PIL import Image, ImageDraw, ImageFont
+        pad_l, pad_r, pad_t, pad_b = 10, 10, 10, 20
+        n = len(series)
+        vmax = max(1, max(p["n"] for p in series))
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype(r"C:\Windows\Fonts\segoeui.ttf", 11)
+        except Exception:  # noqa: BLE001
+            font = ImageFont.load_default()
+        plot_w, plot_h = w - pad_l - pad_r, h - pad_t - pad_b
+
+        def xy(i, v):
+            x = pad_l + plot_w * i / max(1, n - 1)
+            y = pad_t + plot_h * (1 - v / vmax)
+            return x, y
+
+        pts = [xy(i, p["n"]) for i, p in enumerate(series)]
+        if len(pts) > 1:
+            poly = pts + [(pts[-1][0], pad_t + plot_h), (pts[0][0], pad_t + plot_h)]
+            d.polygon(poly, fill=(88, 166, 255, 60))
+            d.line(pts, fill=(88, 166, 255, 255), width=2, joint="curve")
+        for i in range(0, n, max(1, n // 6)):
+            x, _ = xy(i, series[i]["n"])
+            lbl = time.strftime("%H:%M", time.localtime(series[i]["t"]))
+            d.text((min(x, w - 34), h - pad_b + 3), lbl, fill=(148, 155, 164, 255), font=font)
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        return buf.getvalue()
 
     def _discord_tick(self):
         disc = common.Discord(self._disc_webhook, self._disc_proxy)
-        embed = self._discord_embed()
+        chart_path = self._discord_chart()
+        chart_name = os.path.basename(chart_path) if chart_path else None
+        embed = self._discord_embed(chart_name)
         mid = self.state.data.get("discord_stat_msg_id")
         if mid:
-            ok, err = disc.edit(mid, embed)
+            ok, err = disc.edit(mid, embed, image_path=chart_path)
             if ok:
                 return
             logging.info("discordstat: правка %s не удалась (%s), отправляю новое сообщение", mid, err)
-        ok, mid, err = disc.post(embed)
+        ok, mid, err = disc.post(embed, image_path=chart_path)
         if not ok:
             logging.warning("discordstat: не удалось отправить (%s)", err)
             return
