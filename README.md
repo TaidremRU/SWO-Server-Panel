@@ -144,6 +144,8 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Логи** — хвост `supervisor.log` (фильтр по уровню, автообновление, скачивание), аудит панели (`webui_audit.log` — кто/когда/что нажал, отдельно от Telegram-аудита) и галерея скринов последовательности входа (`logs/nav/*.png`).
 - **Игроки** — список и онлайн-статус игроков локального сервера + поиск предмета у всех игроков (см. ниже).
 - **Карта** — карта мира, разбор бинарных `.dt`-карт и карта космоса/звёздных систем (см. ниже).
+- **Кланы** — список кланов и полная карточка клана: состав, специализации, клановые и личные технологии (см. ниже).
+- **Микстуры** и **Кулинария** — оптимизаторы рецептов по точным формулам игры (см. ниже).
 
 Интерфейс двуязычный (ru/en, тумблер в шапке, выбор в `localStorage` браузера), тёмная/светлая тема. Отключить панель целиком — `webui.enabled = false` в `config.json`.
 
@@ -196,6 +198,24 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 У игры нет лога исследований/бустеров, поэтому панель **ведёт его сама**: фоновый поток (`players.tech_track` в `config.json`, интервал по умолчанию 600 c) раз в N минут снимает `techList` / `techBooster` / `researchTech` всех игроков и дописывает изменения в `logs\tech_track.jsonl`. События: `tech_gained` (какие техи прибавились), `booster_spent` / `booster_gained`, `research_changed`. Показывается в карточке игрока (по нему) и во вкладке «Статы» (по всем). Работает только «вперёд» — с момента включения.
 
+### Кланы
+
+Вкладка **«Кланы»** (`Data\game\clans.json`, класс игры `ZData.Clan`). Список: состав / максимум, сколько онлайн, рейтинг, Clan Points, лидер, число клановых технологий, торговый терминал. По клику — клан целиком:
+
+- **Состав:** роль (`ClanRole`: Лидер / Офицер / Участник / Капрал), уровень, часы, последняя сессия, сколько техов изучено и сколько часов исследований, что изучает сейчас, специализация, рейтинг, CP. Ник — ссылка на карточку игрока.
+- **Специализации** — матрица 5×5 «позитивная × негативная» (`ClanSlotType`: Бой / Производство / Наука / Фермерство / Пилот), в ячейке — кто её занимает (так их и хранит игра: 25 слотов `slots`, диагональ заблокирована).
+- **Схема клановых технологий** (`isClan` в `tech.json`, изученные — `clan.tech`).
+- **Личные технологии участников** — по умолчанию «покрытие»: сколько участников знают каждую технологию; в списке можно выбрать конкретного участника.
+
+Эндпоинты: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`.
+
+### Микстуры и кулинария
+
+Обе формулы восстановлены декомпиляцией `GameAssembly.dll` (Il2CppDumper + Ghidra) и проверены на всех рецептах, которые реально посчитал сервер (микстуры — 366/366, блюда — 2305/2305), так что оптимизаторы считают точно, а не угадывают. Таблицы ингредиентов генерятся сервером один раз на мир (`Data\product\`), у каждого мира свои.
+
+- **Микстуры** (`buff_balance.json`, `buff_lib.json`): отметить имеющиеся ингредиенты и нужный эффект → полный перебор упорядоченных четвёрок, топ-5. Плюс загрузка клиентского `buff_notepad.json` (память опробованных смесей лежит у игрока, не на сервере).
+- **Кулинария** (`product_balance.json`, `product_genes.json`, `product_lib.json`): 4 ингредиента в сетке 2×2, порядок важен. Сытость = произведение попарных «балансов» по строкам и столбцам сетки × 0.3125; гены блюда = XOR генов ингредиентов. Съеденное блюдо даёт сытость +N, энергию +N/5 и +N/5 к каждому своему гену (Генетика A–D); когда все четыре ≥ 100 — +1 очко генетики. Блюдо сытнее максимума игрока игра съесть не даёт — поэтому в оптимизаторе есть фильтр «макс. сытость» и выбор обязательных генов. Ниже — все блюда, когда-либо приготовленные на сервере (фильтр по ингредиенту, сортировка по сытости).
+
 ### Игроки локального сервера
 
 Вкладка «Игроки» веб-панели (`players.py`). Читает файлы, которые пишет сам локальный сервер игры, из каталога активного мира под `%USERPROFILE%\AppData\LocalLow\Crematorium of Time\SigmaWorld\SigmaWorld\LocalServer\<мир>\`:
@@ -216,6 +236,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Профиль:** уровень, рейтинг, страна, видеокарта, разрешение экрана, всего часов, «последняя сессия N ч назад», бан + когда снят
 - **Клан** (из `Data\game\clans.json`): имя, рейтинг, состав с именами (👑 лидер) и переходами на карточки · **Друзья** (из `friends.json`)
 - **Исследования:** текущее + ~время до конца (по `serverTime` из `Data\game\settings.json`), изучено техов, бустер · **Миссии**
+- **Схема изучения** — всё дерево `Data\tech.json` (SVG): изучено / изучается / доступно / закрыто, подсказка с названием и временем изучения
 - **Позиция:** карта / координаты / точка респавна / список территорий
 - **Аватар:** статы (`paramList`) полосками, навыки, способности с русскими названиями (slug'и из `Data\ability.json`, тексты — из клиентской локализации, как и у блоков/руды выше), склад и «при себе» с названиями предметов (из `Data\items.json`)
 - **Сессии:** всего / часов онлайн / средняя / макс, гистограмма активности по часам суток, последние 15 сессий
@@ -412,6 +433,8 @@ An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webu
 - **Logs** — tail of `supervisor.log` (level filter, auto-refresh, download), the panel audit (`webui_audit.log` — who/when/what, separate from the Telegram audit) and a gallery of login-sequence screenshots (`logs/nav/*.png`).
 - **Players** — local-server player list and online status, plus an item search across all players' inventories (see below).
 - **Map** — the world map, binary `.dt`-map viewer, and the space/star-system map (see below).
+- **Clans** — the clan list and a full clan card: roster, specializations, clan and personal techs (see below).
+- **Mixtures** and **Cooking** — recipe optimizers built on the game's exact formulas (see below).
 
 The interface is bilingual (ru/en, header toggle, choice in the browser `localStorage`), with a dark/light theme. Disable the panel entirely with `webui.enabled = false` in `config.json`.
 
@@ -454,6 +477,24 @@ The **"Map"** tab — everything about maps and the game's binary world data, re
 
 The **"Twinks"** tab detects accounts that connected from the same IP, from `Logs\log_net_ip.txt` (`nick = IP = InterNetwork = port`). Opens after you enter **your own panel password** (IPs + linking accounts are sensitive; the attempt is audited). Shows groups: IP → list of accounts (ID, nickname linking to the card, connection count, first/last seen, the account's other IPs), sorted by group size. The "min accounts per IP" threshold is adjustable (default 2). `config.json → players.twink_ignore_ips` — IPs to skip (e.g. the local relay `127.0.0.2` that all clients go through on the current VM — there are no real client IPs in the log there).
 
+### Clans
+
+The **"Clans"** tab (`Data\game\clans.json`, game class `ZData.Clan`). List: members / max, online count, rating, Clan Points, leader, clan tech count, trade terminal. Click a clan for the full card:
+
+- **Roster:** role (`ClanRole`: Leader / Officer / Member / Corporal), level, hours, last session, techs done and research hours, current research, specialization, rating, CP. Nicknames link to the player card.
+- **Specializations** — a 5×5 "positive × negative" matrix (`ClanSlotType`: Combat / Production / Science / Farming / Pilot), each cell shows who holds it (that's how the game stores them: 25 `slots`, diagonal blocked).
+- **Clan tech scheme** (`isClan` in `tech.json`, researched ones — `clan.tech`).
+- **Members' personal techs** — by default "coverage": how many members know each tech; pick a member from the list to see theirs.
+
+Endpoints: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`.
+
+### Mixtures & cooking
+
+Both formulas were recovered by decompiling `GameAssembly.dll` (Il2CppDumper + Ghidra) and verified against every recipe the server actually computed (mixtures 366/366, dishes 2305/2305) — the optimizers compute exactly, they don't guess. Ingredient tables are generated by the server once per world (`Data\product\`), each world has its own.
+
+- **Mixtures** (`buff_balance.json`, `buff_lib.json`): tick the ingredients you have and the effect you want → full search over ordered 4-ingredient combos, top 5. Plus upload of the client's `buff_notepad.json` (the tried-mix memory lives on the player's machine, not the server).
+- **Cooking** (`product_balance.json`, `product_genes.json`, `product_lib.json`): 4 ingredients in a 2×2 grid, order matters. Satiety = product of the pairwise "balances" along the grid's rows and columns × 0.3125; dish genes = XOR of the ingredients' genes. Eating a dish gives satiety +N, energy +N/5 and +N/5 to each of its genes (Genetics A–D); once all four reach 100 — +1 genetics point. The game refuses a dish above the player's max satiety — hence the "max satiety" filter and the required-genes picker. Below — every dish ever cooked on the server (filter by ingredient, sort by satiety).
+
 ### Local server players
 
 The panel's "Players" tab (`players.py`). Reads the files the game's local server writes itself, from the active world folder under `%USERPROFILE%\AppData\LocalLow\Crematorium of Time\SigmaWorld\SigmaWorld\LocalServer\<world>\`:
@@ -474,6 +515,7 @@ The world folder is set via `config.json → players`: `localserver_root` (empty
 - **Profile:** level, rating, country, GPU, screen resolution, total hours, "last session N h ago", ban + when it lifts
 - **Clan** (from `Data\game\clans.json`): name, rating, members with names (👑 leader) and cross-links · **Friends** (from `friends.json`)
 - **Research:** current + est. time left (via `serverTime` from `Data\game\settings.json`), techs done, booster · **Missions**
+- **Research scheme** — the whole `Data\tech.json` tree (SVG): researched / in progress / available / locked, tooltip with name and research time
 - **Position:** map / coords / respawn point / territory list
 - **Avatar:** stats (`paramList`) as bars, skills, named abilities in Russian (slugs from `Data\ability.json`, display text pulled from the client's own localization, same as blocks/ore above), stash and carried inventory with item names (from `Data\items.json`)
 - **Sessions:** total / hours online / avg / max, activity histogram by hour of day, last 15 sessions
