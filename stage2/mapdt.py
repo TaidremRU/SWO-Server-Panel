@@ -484,6 +484,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                             and len(ctx["containers_list"]) < container_cap):
                         ctx["containers_list"].append({
                             "x": _x, "y": _y, "slot": _slot,
+                            "block": (c["block"] or {}).get("type"),   # чем является клетка: сундук, печь, …
                             "items": [{"type": it["type"], "count": it["count"]} for it in nonzero],
                         })
                 if c["gas"]:
@@ -730,7 +731,7 @@ def list_containers(path, world_dir=None, item_names=None, cap=2000, min_items=1
         total_items += total
         items = [dict(it, name=(item_names or {}).get(it["type"]) or ("#%s" % it["type"]))
                  for it in c["items"]]
-        out.append({"x": c["x"], "y": c["y"], "slot": c["slot"], "items": items, "total": total})
+        out.append({"x": c["x"], "y": c["y"], "slot": c["slot"], "block": c.get("block"), "items": items, "total": total})
     out.sort(key=lambda c: -c["total"])
     return {
         "ok": True,

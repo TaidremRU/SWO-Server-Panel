@@ -78,6 +78,7 @@ _WORDS_EN = {
     "Топливо двигателя": "Engine fuel", "Топливо": "Fuel", "Слотов транспорта": "Vehicle slots", "Одежда": "Clothes",
     "еда": "food", "ингредиент микстур": "mixture ingredient", "растение": "plant", "одежда": "clothes",
     "инструмент": "tool", "строится": "buildable", "оружие техники": "vehicle weapon",
+    "на земле": "on the ground", "хранилище": "storage",
     "каталог мира не найден": "world folder not found", "нет такого предмета": "no such item",
     "нет доступа к этой карте": "no access to this map", "нет такого канала": "no such channel",
     "карта не нарисовалась": "map failed to render", "нет атласа иконок": "no icon atlas",
@@ -844,6 +845,59 @@ class PlayerWeb:
         ev.sort(key=lambda e: -(e["epoch"] or 0))
         return {"ok": True, "events": ev[:300]}
 
+    # ------------------------------------------------------------------ сундуки
+    def _map_containers(self, wd, mp):
+        """Все непустые хранилища карты (разбор map<N>.dt — секунды), кэш 5 мин на всех."""
+        key = ("containers", mp)
+        hit = self._cache.get(key)
+        if hit and time.time() - hit[0] < 300:
+            return hit[1]
+        path = os.path.join(wd, "Data", "maps", "map%d.dt" % mp)
+        d = players.mapdt.list_containers(path, world_dir=wd, item_names=players.load_items(wd), cap=10 ** 6, min_items=1)
+        if d.get("ok"):
+            self._cache[key] = (time.time(), d)
+        return d
+
+    def _api_my_chests(self, uid, q):
+        """Что лежит в хранилищах на МОИХ участках: сундуки и прочие ёмкости + брошенное
+        на землю. Природные клады (slot underground) не показываем — это находка
+        для лопаты, а не «моё»."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd or players.mapdt is None:
+            return {"ok": False, "error": "каталог мира не найден"}
+        raw = players._read_json(players._user_file(wd, uid)) or {}
+        mine = {}
+        for t in raw.get("userTerritories") or []:
+            p = t.get("pos") or {}
+            if t.get("mapId") is not None and p.get("x") is not None:
+                mine.setdefault(t["mapId"], set()).add((int(p["x"]), int(p["y"])))
+        blocks, items = players._load_blocks(wd), players.load_items(wd)
+        names = self._map_names()
+        out = []
+        for mp, blk in sorted(mine.items()):
+            d = self._map_containers(wd, mp)
+            if not d.get("ok"):
+                continue
+            rows = []
+            for c in d.get("containers") or []:
+                if c["slot"] == "underground" or (c["x"] // 8, c["y"] // 8) not in blk:
+                    continue
+                bslug = blocks.get(c.get("block")) if c.get("block") is not None else None
+                what = players.item_label(bslug) if bslug and bslug in players._ITEM_NAMES_RU else \
+                    (players._block_label(bslug) if bslug else "")
+                ground = c["slot"] == "ground_inv"
+                merged = collections.OrderedDict()      # одинаковые стопки в одном хранилище — одной строкой
+                for it in c["items"]:
+                    merged[it["type"]] = merged.get(it["type"], 0) + it["count"]
+                rows.append({"x": c["x"], "y": c["y"], "ground": ground, "block": "" if ground else (bslug or ""),
+                             "what": "на земле" if ground else (what or "хранилище"),
+                             "items": [{"id": items.get(t) or "", "name": players.item_label(items.get(t)) or "#%s" % t, "count": n}
+                                       for t, n in merged.items()],
+                             "total": c["total"]})
+            rows.sort(key=lambda r: (r["ground"], -r["total"]))
+            out.append({"map": mp, "name": names.get(mp) or "карта %s" % mp, "territories": len(blk), "containers": rows})
+        return {"ok": True, "maps": out}
+
     # ------------------------------------------------------------ карта своих участков
     def _my_map_ids(self, uid):
         wd = players.find_world_dir(self.cfg)
@@ -1075,6 +1129,15 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Сундуки":"Chests",
+  "Мои сундуки":"My chests",
+  "Найти предмет в сундуках":"Find an item in chests",
+  "Где (X, Y)":"Where (X, Y)",
+  "Лежит":"Contents",
+  "участков: ":"territories: ",
+  "хранилищ: ":"storages: ",
+  "Всего на моих участках":"Total on my territories",
+  "Сундуки и прочие хранилища на ваших участках, а также брошенное на землю. Данные обновляются раз в 5 минут.":"Chests and other storages on your territories, plus items dropped on the ground. Data refreshes every 5 minutes.",
   "Неверный ник или пароль":"Wrong nickname or password",
   "Слишком много попыток, подождите":"Too many attempts, please wait",
   "Сессия истекла":"Session expired",
@@ -1400,7 +1463,7 @@ function renderLogin(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me",L("Профиль")],["hist",L("История")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
+var TABS=[["me",L("Профиль")],["hist",L("История")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["chests",L("Сундуки")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
 // иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
 var ICONS=null;
 function ico(key,size){
@@ -1431,7 +1494,7 @@ function render(){
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
-  ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
+  ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,chests:tabChests,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
 }
 
 // ---------------------------------------------------------------- профиль
@@ -1813,6 +1876,31 @@ function tabChat(m){
   var qt; q.addEventListener("input",function(){ clearTimeout(qt); qt=setTimeout(fetchC,300); });
   m.appendChild(card(L("Чат"),[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},[L("Только чтение, обновляется раз в 20 секунд.")])]));
   m.appendChild(out); draw();
+}
+
+// ---------------------------------------------------------------- сундуки
+function tabChests(m){
+  var box=el("div"); m.appendChild(box);
+  load(box,"/api/my-chests",function(d){
+    if(!d.maps.length){ box.appendChild(card(L("Мои сундуки"),[el("div",{class:"muted"},[L("У вас пока нет участков.")])])); return; }
+    var q=el("input",{placeholder:L("Найти предмет в сундуках"),style:"width:100%"}), list=el("div");
+    function draw(){
+      list.innerHTML=""; var t=q.value.trim().toLowerCase(), tot={};
+      d.maps.forEach(function(mp){
+        var rows=mp.containers.filter(function(c){ return !t || c.items.some(function(x){ return x.name.toLowerCase().indexOf(t)>=0; }); });
+        rows.forEach(function(c){ c.items.forEach(function(x){ var k=x.name; tot[k]=tot[k]||{id:x.id,name:x.name,n:0}; tot[k].n+=x.count; }); });
+        var body= rows.length? el("div",{class:"scroll",style:"max-height:520px"},[table([L("Что"),L("Где (X, Y)"),L("Лежит")],rows,function(c){
+            return [withIco(c.block,c.what,24), c.x+", "+c.y, el("div",{class:"ibtns"},c.items.map(function(x){ return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))]; })])
+          : el("div",{class:"muted"},[t? L("ничего не нашлось") : L("пусто")]);
+        list.appendChild(card(mp.name+" · "+L("участков: ")+mp.territories+" · "+L("хранилищ: ")+mp.containers.length,[body]));
+      });
+      var all=Object.keys(tot).map(function(k){ return tot[k]; }).sort(function(a,b){ return b.n-a.n; });
+      if(all.length) list.insertBefore(card(L("Всего на моих участках"),[el("div",{class:"ibtns"},all.map(function(x){ return itemBtn(x.id,x.name,x.n,goBook,L("Открыть в справочнике")); }))]), list.firstChild);
+    }
+    var tm; q.addEventListener("input",function(){ clearTimeout(tm); tm=setTimeout(draw,200); });
+    box.appendChild(card(L("Мои сундуки"),[q, el("div",{class:"muted small",style:"margin-top:6px"},[L("Сундуки и прочие хранилища на ваших участках, а также брошенное на землю. Данные обновляются раз в 5 минут.")])]));
+    box.appendChild(list); draw();
+  });
 }
 
 // ---------------------------------------------------------------- клан
