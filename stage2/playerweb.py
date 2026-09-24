@@ -291,6 +291,34 @@ class PlayerWeb:
         with open(self._hist_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"t": int(time.time()), "u": row}, separators=(",", ":")) + "\n")
         logging.info("playerweb: снимок истории (%d игроков)", len(row))
+        self._history_compact()
+
+    def _history_compact(self, full_days=30):
+        """Раз в сутки: старше ``full_days`` дней оставить один снимок в день
+        (почасовые нужны только для свежего; иначе ~0,3 МБ/сутки на 370 игроков)."""
+        if time.time() - getattr(self, "_hist_compacted", 0) < 86400:
+            return
+        self._hist_compacted = time.time()
+        cut = time.time() - full_days * 86400
+        keep, days, dropped = [], set(), 0
+        for ln in players._read_text(self._hist_path).splitlines():
+            try:
+                t = json.loads(ln).get("t", 0)
+            except ValueError:
+                continue
+            if t < cut:
+                day = time.strftime("%Y-%m-%d", time.localtime(t))
+                if day in days:
+                    dropped += 1
+                    continue
+                days.add(day)
+            keep.append(ln)
+        if dropped:
+            tmp = self._hist_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("\n".join(keep) + "\n")
+            os.replace(tmp, self._hist_path)
+            logging.info("playerweb: история прорежена — убрано %d старых почасовых снимков", dropped)
 
     # ------------------------------------------------------------------ helpers
     def _send(self, h, status, ctype, body, extra=None):

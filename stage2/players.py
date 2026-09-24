@@ -815,6 +815,69 @@ _BACKUP_STATE_PARTS = ("analytics.txt", os.path.join("Data", "users"),
                        os.path.join("Data", "units"), os.path.join("Data", "game"), "Logs")
 
 
+_ARH_RX = re.compile(r"^arh(\d+)\.zip$", re.I)
+
+
+def rotate_world_backups(cfg, keep_recent=48, keep_days=14, dry_run=False, now=None):
+    """Ротация архивов, которые игра сама пишет в ``<мир>\\backup\\arhN.zip``
+    (раз в ``timeBackupServer`` секунд из Data\\config.json, старые не удаляет).
+
+    Хранится: ``keep_recent`` самых свежих + по одному (последнему за день) за
+    ``keep_days`` дней; остальное удаляется. Оставшиеся перенумеровываются подряд
+    ``arh0..arhN`` по времени — как бы игра ни выбирала следующий номер (по числу
+    файлов, по максимуму или своим счётчиком), она не перезапишет сохранённый
+    архив. Вызывать в «тихом окне» между бэкапами (см. webui). -> отчёт."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    bdir = os.path.join(world_dir, "backup")
+    now = now or time.time()
+    try:
+        files = []
+        for f in os.listdir(bdir):
+            if _ARH_RX.match(f):
+                st = os.stat(os.path.join(bdir, f))
+                files.append({"name": f, "mtime": st.st_mtime, "size": st.st_size})
+    except OSError:
+        return {"ok": True, "total": 0, "deleted": 0, "freed_mb": 0, "kept": 0, "renamed": 0}
+    files.sort(key=lambda x: -x["mtime"])
+    if any(now - x["mtime"] < 120 for x in files):
+        return {"ok": False, "error": "игра только что писала архив — пропускаю"}
+    keep, days = [], set()
+    for i, x in enumerate(files):
+        day = datetime.fromtimestamp(x["mtime"]).strftime("%Y-%m-%d")
+        if i < keep_recent:
+            keep.append(x)
+            days.add(day)          # сутки, уже покрытые свежими, второй «дневной» не нужен
+        elif now - x["mtime"] <= keep_days * 86400 and day not in days:
+            keep.append(x)
+            days.add(day)
+    kept_names = {x["name"] for x in keep}
+    drop = [x for x in files if x["name"] not in kept_names]
+    rep = {"ok": True, "total": len(files), "kept": len(keep), "deleted": len(drop),
+           "freed_mb": round(sum(x["size"] for x in drop) / 1048576.0, 1),
+           "kept_mb": round(sum(x["size"] for x in keep) / 1048576.0, 1), "renamed": 0, "dry_run": bool(dry_run)}
+    if dry_run:
+        return rep
+    for x in drop:
+        try:
+            os.remove(os.path.join(bdir, x["name"]))
+        except OSError as e:
+            logging.warning("backup-rotate: не удалить %s: %s", x["name"], e)
+    # перенумерация по времени: сначала во временные имена, потом в arh0..arhN
+    order = sorted(keep, key=lambda x: x["mtime"])
+    if [x["name"].lower() for x in order] != ["arh%d.zip" % i for i in range(len(order))]:
+        tmp = []
+        for i, x in enumerate(order):
+            t = "__rot_%d.zip" % i
+            os.rename(os.path.join(bdir, x["name"]), os.path.join(bdir, t))
+            tmp.append(t)
+        for i, t in enumerate(tmp):
+            os.rename(os.path.join(bdir, t), os.path.join(bdir, "arh%d.zip" % i))
+        rep["renamed"] = len(tmp)
+    return rep
+
+
 def make_world_backup(cfg, scope="state"):
     """Zip каталога мира. scope: 'state' (users/units/game/logs + analytics — без
     бинарных карт) или 'full' (всё). -> (path, None) | (None, err). Хранит

@@ -35,6 +35,7 @@
   "_players_comment": "Вкладка «Игроки» веб-панели: список и онлайн-статус игроков локального сервера из файлов игры (analytics.txt + Data\\users\\* + Logs\\game_state.txt). localserver_root пусто = %USERPROFILE%\\AppData\\LocalLow\\Crematorium of Time\\SigmaWorld\\SigmaWorld\\LocalServer. world/world_dir пусто = мир с самым свежим analytics.txt. Пароли игроков (Code) в список/карточку не отдаются. twink_ignore_ips — какие IP не учитывать во вкладке «Твинки» (напр. локальный релей).",
   "players": {
     "enabled": true,
+    "backup_rotation": {"enabled": false, "keep_recent": 48, "keep_days": 14},
     "localserver_root": "",
     "world_dir": "",
     "world": "",

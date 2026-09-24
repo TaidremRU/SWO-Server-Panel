@@ -124,6 +124,10 @@ SETTINGS_SCHEMA = [
         ("players.twink_ignore_ips", "Игнор-IP для твинков", "Twink ignore IPs", "strlist", "через запятую; на релее это 127.0.0.1, 127.0.0.2"),
         ("players.tech_track.enabled", "Трекинг техов/бустеров", "Tech tracking", "bool", ""),
         ("players.tech_track.interval_seconds", "Интервал трекинга, с", "Tracking interval, s", "int", ""),
+        ("players.backup_rotation.enabled", "Ротация бэкапов мира", "World backup rotation", "bool",
+         "игра пишет <мир>\\backup\\arhN.zip раз в timeBackupServer и не удаляет старые; панель хранит свежие + по одному в день"),
+        ("players.backup_rotation.keep_recent", "Хранить свежих архивов", "Keep recent archives", "int", "48 = сутки при бэкапе раз в 30 мин"),
+        ("players.backup_rotation.keep_days", "Хранить по одному в день, дней", "Keep one per day, days", "int", ""),
     ]),
     ("telegram", "Telegram", "Telegram", [
         ("telegram.allowed_user_ids", "Админы (ID)", "Admins (IDs)", "intlist", "полный доступ; нужен ≥1"),
@@ -536,6 +540,10 @@ class WebUI:
             except Exception:  # noqa: BLE001
                 logging.exception("economy: суточный снимок")
             try:
+                self._backup_rotation()
+            except Exception:  # noqa: BLE001
+                logging.exception("backup-rotate: ошибка")
+            try:
                 ev = players.clan_track_scan(self.cfg, self._ct_state, self._ct_events, self._ct_points)
                 if ev:
                     logging.info("clantrack: %d событий", len(ev))
@@ -543,6 +551,31 @@ class WebUI:
                 logging.exception("clantrack: ошибка прохода")
             if self._stop.wait(iv):
                 return
+
+    def _backup_rotation(self):
+        """Ротация архивов игры (players.rotate_world_backups) — не чаще раза в час и
+        только в «тихом окне» 2–20 мин после свежего архива, чтобы не столкнуться
+        с игрой, пишущей следующий."""
+        br = ((self.cfg.get("players") or {}).get("backup_rotation") or {})
+        if not br.get("enabled") or time.time() - getattr(self, "_rot_last", 0) < 3600:
+            return
+        wd = players.find_world_dir(self.cfg)
+        bdir = os.path.join(wd, "backup") if wd else ""
+        try:
+            newest = max(os.path.getmtime(os.path.join(bdir, f)) for f in os.listdir(bdir) if players._ARH_RX.match(f))
+        except (OSError, ValueError):
+            return
+        if not 120 <= time.time() - newest <= 1200:
+            return
+        r = players.rotate_world_backups(self.cfg, int(br.get("keep_recent", 48)), int(br.get("keep_days", 14)))
+        self._rot_last = time.time()
+        if r.get("ok") and r.get("deleted"):
+            logging.info("backup-rotate: удалено %d архивов (%.0f МБ), осталось %d (%.0f МБ), перенумеровано %d",
+                         r["deleted"], r["freed_mb"], r["kept"], r["kept_mb"], r["renamed"])
+            self.audit("-", "system", "РОТАЦИЯ бэкапов мира: удалено %d (%.0f МБ), осталось %d"
+                       % (r["deleted"], r["freed_mb"], r["kept"]))
+        elif not r.get("ok"):
+            logging.info("backup-rotate: %s", r.get("error"))
 
     # ------------------------------------------------------------------- audit
     _AUDIT_MAX_BYTES = 5 * 1024 * 1024  # ротация: .log -> .log.1 (один бэкап)
