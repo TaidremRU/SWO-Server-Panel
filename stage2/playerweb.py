@@ -13,6 +13,7 @@
 import hashlib
 import html
 import http.cookies
+import re
 import collections
 import json
 import logging
@@ -24,6 +25,7 @@ import urllib.parse
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 
+import game_i18n
 import players
 from webui import Throttle, _Handler, _ip_allowed, _parse_nets
 
@@ -47,6 +49,110 @@ def _epoch(ts):
         except ValueError:
             continue
     return 0.0
+
+
+# ---------------------------------------------------------------- английский
+# Серверные ответы собираются на русском (players.* отдаёт подписи из русской
+# локализации). Для lang=en ответ проходит через _tr: точные подписи (предметы,
+# способности, роли, специализации, ветки техов, слова панели) и шаблоны
+# (названия техов «A / B +1», «ветка · тир N», карты, магазины). Ники, кланы и
+# тексты чата не переводятся — такие ключи пропускаются.
+_TECH_FAMILY_EN = {
+    "Строительство": "Building", "Мосты": "Bridges", "Лодки/амфибии": "Boats/amphibians", "Автомобили": "Cars",
+    "Двигатели авто": "Car engines", "Танки": "Tanks", "Хранение": "Storage", "Верстаки/энергия": "Workbenches/energy",
+    "Ракеты": "Rockets", "Ракетные двигатели": "Rocket engines", "Радары": "Radars", "Сборщики": "Collectors",
+    "Кислород/скафандры": "Oxygen/space suits", "Броня": "Armor", "Оружие ближнее/резаки": "Melee weapons/cutters",
+    "Стрелковое": "Firearms", "Тяжёлое оружие": "Heavy weapons", "Корабельные пушки": "Ship guns",
+    "Топоры/пилы": "Axes/saws", "Кирки/буры": "Pickaxes/drills", "Лопаты": "Shovels", "Мотыги": "Hoes",
+    "Медицина/добыча": "Medicine/mining", "Молоты/ремонт": "Hammers/repair", "Ускорители": "Boosters",
+    "Клан": "Clan", "Клан·роботы": "Clan·robots", "Клан·процессоры": "Clan·processors",
+    "Клан·модули PMR": "Clan·PMR modules", "Клан·пульт роботов": "Clan·robot console", "Эндгейм": "Endgame",
+}
+_WORDS_EN = {
+    "Лидер": "Leader", "Офицер": "Officer", "Участник": "Member", "Капрал": "Corporal",
+    "Бой": "Combat", "Производство": "Production", "Наука": "Science", "Фермерство": "Farming", "Пилот": "Pilot",
+    "Космос": "Space", "терминал": "terminal", "магазин": "shop",
+    "В стопке": "Stack", "Прочность": "Durability", "Урон": "Damage", "Скорость атаки": "Attack speed",
+    "Дальность": "Range", "Атак": "Attacks", "Щит": "Shield", "Питательность": "Nutrition", "Сытость": "Satiety",
+    "Энергия": "Energy", "Ускорение добычи": "Mining boost", "Добыча за удар": "Mining per hit",
+    "Топливо двигателя": "Engine fuel", "Топливо": "Fuel", "Слотов транспорта": "Vehicle slots", "Одежда": "Clothes",
+    "еда": "food", "ингредиент микстур": "mixture ingredient", "растение": "plant", "одежда": "clothes",
+    "инструмент": "tool", "строится": "buildable", "оружие техники": "vehicle weapon",
+    "каталог мира не найден": "world folder not found", "нет такого предмета": "no such item",
+    "нет доступа к этой карте": "no access to this map", "нет такого канала": "no such channel",
+    "карта не нарисовалась": "map failed to render", "нет атласа иконок": "no icon atlas",
+}
+_KIND_EN = {"планета": "planet", "спутник": "satellite", "астероид": "asteroid"}
+_TR_SKIP = {"text", "nick", "to", "who", "owner", "clan", "clan_name", "ts", "first_seen", "where_raw"}
+_TR_EXACT = None
+
+
+def _tr_exact():
+    global _TR_EXACT
+    if _TR_EXACT is None:
+        d = dict(_WORDS_EN)
+        d.update(_TECH_FAMILY_EN)
+        for slug, ru in players._ITEM_NAMES_RU.items():
+            if game_i18n.ITEM_EN.get(slug):
+                d.setdefault(ru, game_i18n.ITEM_EN[slug])
+        for slug, ru in players._ABILITY_NAMES_RU.items():
+            if game_i18n.ABILITY_EN.get(slug):
+                d.setdefault(ru, game_i18n.ABILITY_EN[slug])
+        for slug, ru in game_i18n.ITEM_INFO_RU.items():
+            if game_i18n.ITEM_INFO_EN.get(slug):
+                d.setdefault(ru, game_i18n.ITEM_INFO_EN[slug])
+        _TR_EXACT = d
+    return _TR_EXACT
+
+
+_RX_KIND = re.compile(r"^(.*) \((планета|спутник|астероид)\)$")
+_RX_MAP = re.compile(r"^карта (\d+)$")
+_RX_SHOP = re.compile(r"^магазин · (.+) · (-?\d+), (-?\d+)$")
+_RX_TECH = re.compile(r"^([A-Za-z]+\d*) — (.+)$")
+_RX_TIER = re.compile(r"^(.+) · тир (\d+)$")
+_RX_PLUS = re.compile(r"^(.*?)( \+\d+)$")
+
+
+def _tr_str(s):
+    ex = _tr_exact()
+    if s in ex:
+        return ex[s]
+    m = _RX_KIND.match(s)
+    if m:
+        return "%s (%s)" % (m.group(1), _KIND_EN[m.group(2)])
+    m = _RX_MAP.match(s)
+    if m:
+        return "map " + m.group(1)
+    m = _RX_SHOP.match(s)
+    if m:
+        return "shop · %s · %s, %s" % (_tr_str(m.group(1)), m.group(2), m.group(3))
+    m = _RX_TECH.match(s)
+    if m:
+        return "%s — %s" % (m.group(1), _tr_str(m.group(2)))
+    m = _RX_TIER.match(s)
+    if m:
+        fam = m.group(1)
+        fam = _TECH_FAMILY_EN.get(fam) or (("branch " + fam[6:]) if fam.startswith("ветка ") else fam)
+        return "%s · tier %s" % (fam, m.group(2))
+    if " / " in s or _RX_PLUS.match(s):   # название теха: «Деревянная стена / Деревянная дверь +1»
+        m = _RX_PLUS.match(s)
+        body, tail = (m.group(1), m.group(2)) if m else (s, "")
+        parts = [ex.get(p) for p in body.split(" / ")]
+        if all(parts):
+            return " / ".join(parts) + tail
+    if s.startswith("ветка "):
+        return "branch " + s[6:]
+    return s
+
+
+def _tr(obj, key=None):
+    if isinstance(obj, str):
+        return obj if key in _TR_SKIP else _tr_str(obj)
+    if isinstance(obj, list):
+        return [_tr(x, key) for x in obj]
+    if isinstance(obj, dict):
+        return {k: (v if k in _TR_SKIP else _tr(v, k)) for k, v in obj.items()}
+    return obj
 
 
 class PlayerWeb:
@@ -336,6 +442,8 @@ class PlayerWeb:
             if not fn:
                 return self._json(h, {"error": "unknown"}, 404)
             d = fn(s["uid"], q)
+            if (q.get("lang") or [""])[0] == "en" and isinstance(d, dict) and route not in ("chat", "events"):
+                d = _tr(d)
             if isinstance(d, (bytes, bytearray)):
                 ttl = 86400 if route == "item-icons-png" else 60
                 return self._send(h, 200, "image/png", bytes(d), {"Cache-Control": "private, max-age=%d" % ttl})
@@ -558,6 +666,7 @@ class PlayerWeb:
         d = players._read_json(pj) or {}
         # подписи на русском -> slug: многие ответы API отдают предметы по имени
         d["label"] = {players.item_label(k): k for k in d.get("idx") or {}}
+        d["label"].update({game_i18n.ITEM_EN[k]: k for k in d.get("idx") or {} if game_i18n.ITEM_EN.get(k)})
         d["ok"] = True
         d["v"] = int(mt)      # версия в URL картинки: пересобрали атлас — браузер не возьмёт старый из кэша
         self._cache["icons"] = (mt, d)
@@ -649,7 +758,9 @@ class PlayerWeb:
         if mk:
             on_market = {"sell": sum(1 for o in mk["offers"] if any(x["name"] == label for x in o["give"])),
                          "buy": sum(1 for o in mk["offers"] if any(x["name"] == label for x in o["want"]))}
-        return {"ok": True, "id": slug, "name": label, "stats": stats, "recipe": recipe, "machine": mach,
+        en = (q.get("lang") or [""])[0] == "en"
+        info = (game_i18n.ITEM_INFO_EN if en else game_i18n.ITEM_INFO_RU).get(slug) or ""
+        return {"ok": True, "id": slug, "name": label, "info": info, "stats": stats, "recipe": recipe, "machine": mach,
                 "used_in": [{"id": u, "name": players.item_label(u)} for u in uses],
                 "flags": [f for k, f in (("isProduct", "еда"), ("isBuff", "ингредиент микстур"), ("isPlant", "растение"),
                                          ("isClothes", "одежда"), ("tool", "инструмент"), ("build", "строится"),
@@ -917,16 +1028,303 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ico{display:inline-block;flex:0 0 auto;background-repeat:no-repeat;vertical-align:middle}
 .iname{display:inline-flex;align-items:center;gap:6px}
+.ibtn{display:inline-flex;align-items:center;gap:6px;padding:3px 10px 3px 5px;border:1px solid var(--line);border-radius:14px;background:var(--panel2);color:var(--fg);cursor:pointer;font:inherit;line-height:1.3}
+.ibtn:hover{border-color:var(--acc)} .ibtn .n{color:var(--mut);font-size:12px}
+.ibtns{display:flex;flex-wrap:wrap;gap:6px}
 @media (max-width:600px){main{padding:10px}
   nav{flex-wrap:nowrap;overflow-x:auto;padding:6px 10px;scrollbar-width:none} nav::-webkit-scrollbar{display:none}
   nav button{flex:0 0 auto} header{padding:8px 10px}}
 </style>
 </head>
 <body>
-<header><h1 id="ttl">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span></header>
+<header><h1 id="ttl">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="lang" type="button" title="Русский / English"></button></header>
 <nav id="nav" style="display:none"></nav>
 <main id="main"></main>
 <script>
+// ---- язык: RU по умолчанию для ru/uk/be браузеров, иначе EN; строки интерфейса
+// обёрнуты в L("русский текст") -> английский из словаря ниже
+var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||v==="en") return v; }catch(e){}
+  return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
+var LOC=LANG==="en"? "en" : "ru";
+var EN_DICT={
+  "Неверный ник или пароль":"Wrong nickname or password",
+  "Слишком много попыток, подождите":"Too many attempts, please wait",
+  "Сессия истекла":"Session expired",
+  "Ошибка сервера":"Server error",
+  "Нет связи с сервером":"No connection to the server",
+  "Загрузка…":"Loading…",
+  " ч ":" h ",
+  " мин":" min",
+  "Ник в игре":"In-game nickname",
+  "Пароль из игры":"In-game password",
+  " с)":" s)",
+  "Вход для игроков":"Player login",
+  "Ник и пароль — те же, что при входе на сервер.":"Same nickname and password you use to join the server.",
+  "Запомнить меня на 30 дней":"Remember me for 30 days",
+  "Войти":"Log in",
+  "Профиль":"Profile",
+  "История":"History",
+  "Изучение":"Research",
+  "Крафт":"Craft",
+  "Справочник":"Handbook",
+  "Рынок":"Market",
+  "Карта":"Map",
+  "Клан":"Clan",
+  "Чат":"Chat",
+  "Сервер":"Server",
+  "Выйти":"Log out",
+  "Энергия":"Energy",
+  "Сытость":"Satiety",
+  "Здоровье":"Health",
+  "Меткость":"Accuracy",
+  "Скорость движения":"Movement speed",
+  "Скорость действия":"Action speed",
+  "Скорость атаки":"Attack speed",
+  "Генетика A":"Genetics A",
+  "Генетика B":"Genetics B",
+  "Генетика C":"Genetics C",
+  "Генетика D":"Genetics D",
+  "Кислород":"Oxygen",
+  "Очки генетики":"Genetic points",
+  "Опыт":"Experience",
+  "Уровень":"Level",
+  "Очки распределения":"Distribution points",
+  "пусто":"empty",
+  "Предмет":"Item",
+  "Кол-во":"Qty",
+  "Прочность":"Durability",
+  "Статус":"Status",
+  "в игре":"in game",
+  "не в игре":"offline",
+  "Лидер":"Leader",
+  "Офицер":"Officer",
+  "Участник":"Member",
+  "Капрал":"Corporal",
+  "Очки клана":"Clan points",
+  "Рейтинг":"Rating",
+  "Наиграно":"Played",
+  " ч":" h",
+  "Сессий":"Sessions",
+  " · в среднем ":" · avg ",
+  "Первый вход":"First seen",
+  "Бан":"Ban",
+  "ещё ":"",
+  "да":"yes",
+  "Исследования":"Research",
+  "Сейчас изучается":"Researching now",
+  " · осталось ":" · left ",
+  "ничего":"nothing",
+  "Изучено технологий":"Technologies researched",
+  "Вложено времени":"Time invested",
+  "Ускорители":"Boosters",
+  "Аватар":"Avatar",
+  "Способности":"Abilities",
+  "нет":"none",
+  "нет территорий":"no territories",
+  "Где я":"Where I am",
+  "Координаты":"Coordinates",
+  "Точка возрождения":"Respawn point",
+  "Мои территории":"My territories",
+  "Склад":"Storage",
+  "С собой":"Carrying",
+  "Друзья (":"Friends (",
+  "Игрок":"Player",
+  "Последние смерти":"Recent deaths",
+  "Когда":"When",
+  "Что":"What",
+  "Награды за рейтинг":"Rating rewards",
+  "Награда":"Reward",
+  "изучено":"researched",
+  "изучается":"researching",
+  "доступно":"available",
+  "закрыто":"locked",
+  "\nВремя: ":"\nTime: ",
+  "\nОткрывает: ":"\nUnlocks: ",
+  "Нажмите на технологию — покажу путь до неё и сколько осталось.":"Click a technology to see the path to it and how much is left.",
+  "Изучено ":"Researched ",
+  " · доступно сейчас ":" · available now ",
+  " · закрыто ":" · locked ",
+  "Осталось: ":"Left: ",
+  " шаг(ов) · ~":" step(s) · ~",
+  "Открывает: ":"Unlocks: ",
+  "Сейчас":"Now",
+  "Изучается":"Researching",
+  "Осталось":"Left",
+  "Схема изучения":"Research tree",
+  "Что скрафтить?":"What to craft?",
+  "Время крафта: ":"Craft time: ",
+  " с":" s",
+  " · нужно: ":" · needs: ",
+  "Сырьё":"Raw materials",
+  "Ресурс":"Resource",
+  "Нужно":"Needed",
+  "Промежуточное":"Intermediate",
+  "Крафтов":"Crafts",
+  "Технологии":"Technologies",
+  "Технология":"Technology",
+  "У меня":"Mine",
+  "нет · ещё ":"no · ",
+  " шаг(ов), ~":" more step(s), ~",
+  "Раскладка до сырья":"Raw material breakdown",
+  "Посчитать":"Calculate",
+  " за 1":" per 1",
+  " шт":" pcs",
+  "Предмет, например: Железный слиток":"Item, e.g. Iron ingot",
+  "продают":"selling",
+  "просят взамен":"asked in return",
+  "везде":"anywhere",
+  "покупают":"buying",
+  "Цена за 1 шт":"Price per 1 pc",
+  "Товар":"Goods",
+  "Сделка":"Deal",
+  "Платят":"Paid in",
+  "Мин":"Min",
+  "Медиана":"Median",
+  "Макс":"Max",
+  "Лотов":"Lots",
+  "Предложения (":"Offers (",
+  ", показаны первые ":", showing first ",
+  "Отдаёт":"Gives",
+  "Просит":"Asks",
+  "Курс":"Rate",
+  "Продавец":"Seller",
+  "Где":"Where",
+  "моё":"mine",
+  "ничего не нашлось":"nothing found",
+  "предложений нет":"no offers",
+  "Собираю предложения со всех карт — это до пары минут, страница обновится сама…":"Collecting offers from all maps — this can take a couple of minutes, the page will update by itself…",
+  "Обновлено ":"Updated ",
+  "только что":"just now",
+  " мин назад":" min ago",
+  " · всего предложений: ":" · total offers: ",
+  " · обновляю в фоне…":" · refreshing in background…",
+  "Терминалы игроков и магазины на картах. Курс и цены — только для простых лотов «один товар за одну валюту»; сводка цен появляется при поиске.":"Player terminals and shops on maps. Rates and prices only for simple lots \"one item for one currency\"; the price summary appears when you search.",
+  "Терминал":"Terminal",
+  "  · лотов ":"  · lots ",
+  " · продаж ":" · sales ",
+  " · не заходил ":" · idle ",
+  "На складе терминала: ":"In terminal storage: ",
+  "Магазин · ":"Shop · ",
+  "  · слотов ":"  · slots ",
+  "Выручка: ":"Revenue: ",
+  "Отдаю":"I give",
+  "Прошу":"I ask",
+  "Моя торговля":"My trade",
+  "У вас пока нет участков.":"You have no territories yet.",
+  " · участков: ":" · territories: ",
+  " · вы здесь":" · you are here",
+  "мой участок ":"my territory ",
+  "вы здесь":"you are here",
+  "загрузка карты…":"loading map…",
+  "карта не загрузилась":"map failed to load",
+  "Участки на этой карте (":"Territories on this map (",
+  "Участок (X, Y)":"Territory (X, Y)",
+  "Клетки":"Cells",
+  "показать":"show",
+  "Мои участки на карте":"My territories on the map",
+  "повернуть против часовой на 45°":"rotate 45° counter-clockwise",
+  "повернуть по часовой на 45°":"rotate 45° clockwise",
+  "ко мне":"to me",
+  "Видно ":"You see ",
+  " клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы. Карту можно тащить мышью, колесо — масштаб.":" cells around you and your territories — the rest is hidden by fog. Green squares are your territories, the red dot is you. Drag the map with the mouse, wheel to zoom.",
+  "Моя история":"My history",
+  "Панель записывает снимок раз в час с ":"The panel records a snapshot every hour since ",
+  " — графики будут расти со временем.":" — the charts will grow over time.",
+  "Снимки ещё не делались — первый появится в течение часа.":"No snapshots yet — the first one will appear within an hour.",
+  "техов":"techs",
+  "дата":"date",
+  "уровень":"level",
+  "рейтинг":"rating",
+  "часов":"hours",
+  "Вложено в исследования":"Invested in research",
+  " (выходит ":" (yields ",
+  " шт)":" pcs)",
+  "в руках":"by hand",
+  "Время":"Time",
+  "изучена":"researched",
+  "не изучена":"not researched",
+  "не нужна":"not needed",
+  "Станок":"Machine",
+  "Из чего":"From",
+  "Не крафтится — добывается или находится в мире.":"Not craftable — mined or found in the world.",
+  "Используется в (":"Used in (",
+  "На рынке: продают — ":"On the market: selling — ",
+  " лот(ов), просят взамен — ":" lot(s), asked in return — ",
+  "Искать на рынке":"Find on market",
+  "Открыть в справочнике":"Open in handbook",
+  "Справочник предметов":"Item handbook",
+  "Свойства, как получить, какая технология нужна и куда предмет идёт дальше.":"Properties, how to get it, which technology is needed and what it is used for.",
+  "Общий":"General",
+  "Русский":"Russian",
+  "Личные":"Private",
+  "События":"Events",
+  "убит":"killed",
+  "сброс позиции":"position reset",
+  "голод":"starvation",
+  "задохнулся":"suffocated",
+  "газ":"gas",
+  "мох":"moss",
+  "новый игрок":"new player",
+  "смерть":"death",
+  "создан клан":"clan created",
+  "распущен клан":"clan disbanded",
+  "клан переименован":"clan renamed",
+  "Поиск по нику или тексту":"Search by nickname or text",
+  "События сервера":"Server events",
+  "Кто":"Who",
+  "было: ":"was: ",
+  "пока пусто":"nothing yet",
+  " · сообщений: ":" · messages: ",
+  " (последние 300)":" (last 300)",
+  "Сообщения нынешних участников вашего клана.":"Messages from current members of your clan.",
+  "Только ваши личные сообщения — от вас и вам.":"Only your private messages — from you and to you.",
+  "сообщений нет":"no messages",
+  "Только чтение, обновляется раз в 20 секунд.":"Read-only, refreshes every 20 seconds.",
+  "вступил":"joined",
+  "ушёл":"left",
+  "роль":"role",
+  "клан-технология":"clan technology",
+  "переименован":"renamed",
+  "слоты":"slots",
+  "создан":"created",
+  "распущен":"disbanded",
+  "сейчас: ":"now: ",
+  " · график появится, когда накопятся данные":" · the chart will appear once data accumulates",
+  "мало данных":"not enough data",
+  "время":"time",
+  "Вы не состоите в клане.":"You are not in a clan.",
+  "Участников":"Members",
+  "Сейчас в игре":"In game now",
+  "Клан-технологий":"Clan technologies",
+  "Состав":"Members",
+  "Роль":"Role",
+  "Специализация":"Specialization",
+  "Был":"Last seen",
+  "сейчас":"now",
+  " ч назад":" h ago",
+  " дн назад":" d ago",
+  "Рост клана (30 дней)":"Clan growth (30 days)",
+  "очки":"points",
+  "участников":"members",
+  "работает":"running",
+  "не запущен":"not running",
+  "Сейчас онлайн":"Online now",
+  "Пик за сутки":"Peak in 24 h",
+  "Онлайн за 24 часа":"Online over 24 hours",
+  "игроков":"players",
+  "пока нет данных":"no data yet",
+  "Сезонный рейтинг":"Season rating",
+  " ускор.":" boosters",
+  "Торговцы":"Traders",
+  "Продаж":"Sales",
+  "Кланы":"Clans",
+  "За 7 дней":"Last 7 days",
+  "Сейчас на сервере (":"On the server now (",
+  "никого":"nobody"
+};
+function L(s){ return LANG==="en"? (EN_DICT[s]!=null? EN_DICT[s] : s) : s; }
+document.documentElement.lang=LANG;
+
 var S={nick:"",tab:"me"};
 try{ S.tab=localStorage.getItem("swp_tab")||"me"; }catch(e){}
 var $=function(s){ return document.querySelector(s); };
@@ -939,41 +1337,42 @@ function svgEl(tag,a,kids){ var e=document.createElementNS("http://www.w3.org/20
   (kids||[]).forEach(function(c){ if(c!=null) e.appendChild(typeof c==="string"? document.createTextNode(c):c); }); return e; }
 function api(p,body){
   var o={headers:{}}; if(body!==undefined){ o.method="POST"; o.headers["Content-Type"]="application/json"; o.headers["X-Requested-With"]="swp"; o.body=JSON.stringify(body); }
+  if(LANG==="en" && p.indexOf("/api/")===0 && p.indexOf("item-icons-png")<0) p+=(p.indexOf("?")<0?"?":"&")+"lang=en";
   return fetch(p,o).then(function(r){
     if(r.status===401){ S.nick=""; render(); throw {error:"auth"}; }
     return r.json().then(function(j){ if(!r.ok) throw j; return j; }); });
 }
-var ERR={bad_login:"Неверный ник или пароль", throttled:"Слишком много попыток, подождите", auth:"Сессия истекла", internal:"Ошибка сервера"};
-function errText(e){ return (e&&(ERR[e.error]||e.error))||"Нет связи с сервером"; }
+var ERR={bad_login:L("Неверный ник или пароль"), throttled:L("Слишком много попыток, подождите"), auth:L("Сессия истекла"), internal:L("Ошибка сервера")};
+function errText(e){ return (e&&(ERR[e.error]||e.error))||L("Нет связи с сервером"); }
 function errBox(e){ return el("div",{class:"msg err"},[errText(e)]); }
 function card(title,kids){ return el("div",{class:"card"},[title? el("h3",{},[title]):null].concat(kids)); }
 function table(head,rows,mk){ var t=el("table",{},[el("tr",{},head.map(function(h){ return el("th",{},[h]); }))]);
   rows.forEach(function(r){ t.appendChild(el("tr",{},mk(r).map(function(c){ return el("td",{},[c]); }))); }); return t; }
 function kv(pairs){ var d=el("div",{class:"kv"}); pairs.forEach(function(p){ if(p[1]==null||p[1]==="") return; d.appendChild(el("div",{},[p[0]])); d.appendChild(el("div",{},[p[1]])); }); return d; }
-function load(box,path,draw){ box.innerHTML=""; box.appendChild(el("p",{class:"muted"},["Загрузка…"]));
+function load(box,path,draw){ box.innerHTML=""; box.appendChild(el("p",{class:"muted"},[L("Загрузка…")]));
   api(path).then(function(d){ box.innerHTML=""; draw(d); }).catch(function(e){ box.innerHTML=""; box.appendChild(errBox(e)); }); }
-function fmtMin(m){ if(m==null) return ""; var h=Math.floor(m/60), mm=Math.round(m%60); return h? h+" ч "+mm+" мин" : mm+" мин"; }
+function fmtMin(m){ if(m==null) return ""; var h=Math.floor(m/60), mm=Math.round(m%60); return h? h+L(" ч ")+mm+L(" мин") : mm+L(" мин"); }
 
 // ---------------------------------------------------------------- вход
 function renderLogin(){
   // настоящая <form> с name/autocomplete — браузер сам предложит сохранить ник и пароль
-  var nick=el("input",{name:"username",placeholder:"Ник в игре",autocomplete:"username"});
-  var code=el("input",{name:"password",type:"password",placeholder:"Пароль из игры",autocomplete:"current-password"});
+  var nick=el("input",{name:"username",placeholder:L("Ник в игре"),autocomplete:"username"});
+  var code=el("input",{name:"password",type:"password",placeholder:L("Пароль из игры"),autocomplete:"current-password"});
   var rem=el("input",{type:"checkbox",id:"rem",style:"width:auto;margin:0"});
   try{ rem.checked=localStorage.getItem("swp_rem")!=="0"; }catch(e){ rem.checked=true; }
   var msg=el("div",{class:"msg err",style:"display:none"});
   function go(ev){ ev.preventDefault(); msg.style.display="none";
     try{ localStorage.setItem("swp_rem",rem.checked?"1":"0"); }catch(e){}
     api("/api/login",{nick:nick.value,code:code.value,remember:rem.checked}).then(function(d){ S.nick=d.nick; render(); })
-      .catch(function(e){ msg.textContent=errText(e)+(e.retry? " ("+e.retry+" с)":""); msg.style.display=""; }); }
-  $("#main").appendChild(el("form",{class:"login card",method:"post",action:"#",onsubmit:go},[el("h3",{},["Вход для игроков"]),
-    el("p",{class:"muted small"},["Ник и пароль — те же, что при входе на сервер."]), nick, code,
-    el("label",{for:"rem",class:"row small",style:"margin:0 0 12px;cursor:pointer"},[rem,"Запомнить меня на 30 дней"]),
-    el("button",{class:"pri",type:"submit",style:"width:100%"},["Войти"]), el("div",{style:"margin-top:10px"},[msg])]));
+      .catch(function(e){ msg.textContent=errText(e)+(e.retry? " ("+e.retry+L(" с)"):""); msg.style.display=""; }); }
+  $("#main").appendChild(el("form",{class:"login card",method:"post",action:"#",onsubmit:go},[el("h3",{},[L("Вход для игроков")]),
+    el("p",{class:"muted small"},[L("Ник и пароль — те же, что при входе на сервер.")]), nick, code,
+    el("label",{for:"rem",class:"row small",style:"margin:0 0 12px;cursor:pointer"},[rem,L("Запомнить меня на 30 дней")]),
+    el("button",{class:"pri",type:"submit",style:"width:100%"},[L("Войти")]), el("div",{style:"margin-top:10px"},[msg])]));
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me","Профиль"],["hist","История"],["tech","Изучение"],["craft","Крафт"],["book","Справочник"],["market","Рынок"],["map","Карта"],["clan","Клан"],["chat","Чат"],["server","Сервер"]];
+var TABS=[["me",L("Профиль")],["hist",L("История")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
 // иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
 var ICONS=null;
 function ico(key,size){
@@ -984,67 +1383,76 @@ function ico(key,size){
   return el("span",{class:"ico",style:"background-image:url(/api/item-icons-png?v="+ICONS.v+");width:"+size+"px;height:"+size+"px;background-position:-"+((i%ICONS.cols)*size)+"px -"+(Math.floor(i/ICONS.cols)*size)+"px;"
     +"background-size:"+(ICONS.cols*size)+"px auto"});
 }
+// кнопка-плашка предмета: иконка + название (+ количество); по клику — действие
+function itemBtn(id,name,n,onclick,title){
+  return el("button",{class:"ibtn",type:"button",title:title||null,onclick:function(e){ e.preventDefault(); onclick(id); }},
+    [ico(id,20), name, n!=null? el("span",{class:"n"},["×"+n]) : null]);
+}
+function goBook(id){ try{ localStorage.setItem("swp_book",id); }catch(e){} S.tab="book"; render(); window.scrollTo(0,0); }
+function goCraft(id){ try{ localStorage.setItem("swp_craft_go",id); }catch(e){} S.tab="craft"; render(); window.scrollTo(0,0); }
 function withIco(key,label,size){ var i=ico(key,size); return i? el("span",{class:"iname"},[i,label]) : label; }
+function setLang(v){ try{ localStorage.setItem("swp_lang",v); }catch(e){} location.reload(); }
 function render(){
+  var lb=$("#lang"); if(lb){ lb.textContent=LANG==="en"? "RU" : "EN"; lb.onclick=function(){ setLang(LANG==="en"? "ru" : "en"); }; }
   if(S.nick && ICONS===null){ ICONS={none:true};
     api("/api/item-icons").then(function(d){ ICONS=d; if(!d.none) render(); }).catch(function(){}); }
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
   if(!S.nick){ nav.style.display="none"; return renderLogin(); }
   nav.style.display="";
   who.appendChild(document.createTextNode(S.nick+"  "));
-  who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},["Выйти"]));
+  who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
   ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
 }
 
 // ---------------------------------------------------------------- профиль
-var PARAM={0:"Энергия",1:"Сытость",2:"Здоровье",3:"Меткость",4:"Скорость движения",5:"Скорость действия",6:"Скорость атаки",
-  7:"Генетика A",8:"Генетика B",9:"Генетика C",10:"Генетика D",11:"Кислород",12:"Очки генетики"};
-var LPARAM={0:"Опыт",1:"Уровень",2:"Очки распределения"};
-function invTable(rows){ if(!rows||!rows.length) return el("div",{class:"muted"},["пусто"]);
-  return el("div",{class:"scroll"},[table(["Предмет","Кол-во","Прочность"],rows,function(r){ return [withIco(r.name,r.name,24), r.count, r.durability==null?"":r.durability]; })]); }
+var PARAM={0:L("Энергия"),1:L("Сытость"),2:L("Здоровье"),3:L("Меткость"),4:L("Скорость движения"),5:L("Скорость действия"),6:L("Скорость атаки"),
+  7:L("Генетика A"),8:L("Генетика B"),9:L("Генетика C"),10:L("Генетика D"),11:L("Кислород"),12:L("Очки генетики")};
+var LPARAM={0:L("Опыт"),1:L("Уровень"),2:L("Очки распределения")};
+function invTable(rows){ if(!rows||!rows.length) return el("div",{class:"muted"},[L("пусто")]);
+  return el("div",{class:"scroll"},[table([L("Предмет"),L("Кол-во"),L("Прочность")],rows,function(r){ return [withIco(r.name,r.name,24), r.count, r.durability==null?"":r.durability]; })]); }
 function tabMe(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/me",function(d){
     var p=d.profile, r=d.research;
     var head=card(d.name,[kv([
-      ["Статус", el("span",{class:"pill "+(d.online?"ok":"")},[d.online?"в игре":"не в игре"])],
-      ["Уровень",p.level],["Клан",p.clan_name? p.clan_name+(p.clan_role!=null?" ("+["Лидер","Офицер","Участник","Капрал"][p.clan_role]+")":""):"—"],
-      ["Очки клана",p.clan_point],["Рейтинг",p.rating],["Наиграно",p.playtime_h+" ч"],
-      ["Сессий",d.sessions.total? d.sessions.total+" · в среднем "+d.sessions.avg_min+" мин":""],
-      ["Первый вход",p.first_seen],
-      p.banned? ["Бан", el("span",{class:"pill err"},[p.ban_expires_in_h? "ещё "+p.ban_expires_in_h+" ч":"да"])] : ["",""] ]),
-      el("h3",{style:"margin-top:14px"},["Исследования"]),
-      kv([["Сейчас изучается", r.current? r.current_name+(r.remaining_min!=null?" · осталось "+fmtMin(r.remaining_min):"") : "ничего"],
-        ["Изучено технологий", r.done_count],["Вложено времени", r.invested_h+" ч"],["Ускорители", r.booster]])]);
+      [L("Статус"), el("span",{class:"pill "+(d.online?"ok":"")},[d.online?L("в игре"):L("не в игре")])],
+      [L("Уровень"),p.level],[L("Клан"),p.clan_name? p.clan_name+(p.clan_role!=null?" ("+[L("Лидер"),L("Офицер"),L("Участник"),L("Капрал")][p.clan_role]+")":""):"—"],
+      [L("Очки клана"),p.clan_point],[L("Рейтинг"),p.rating],[L("Наиграно"),p.playtime_h+L(" ч")],
+      [L("Сессий"),d.sessions.total? d.sessions.total+L(" · в среднем ")+d.sessions.avg_min+L(" мин"):""],
+      [L("Первый вход"),p.first_seen],
+      p.banned? [L("Бан"), el("span",{class:"pill err"},[p.ban_expires_in_h? L("ещё ")+p.ban_expires_in_h+L(" ч"):L("да")])] : ["",""] ]),
+      el("h3",{style:"margin-top:14px"},[L("Исследования")]),
+      kv([[L("Сейчас изучается"), r.current? r.current_name+(r.remaining_min!=null?L(" · осталось ")+fmtMin(r.remaining_min):"") : L("ничего")],
+        [L("Изучено технологий"), r.done_count],[L("Вложено времени"), r.invested_h+L(" ч")],[L("Ускорители"), r.booster]])]);
     var params=(d.avatar.params||[]).map(function(x){
       var pct=x.max? Math.max(0,Math.min(100,100*x.val/x.max)):null;
       return el("div",{style:"margin-bottom:6px"},[el("div",{class:"row small",style:"justify-content:space-between"},[
         el("span",{},[PARAM[x.type]||("#"+x.type)]), el("span",{class:"muted"},[(Math.round(x.val*10)/10)+(x.max?" / "+Math.round(x.max*10)/10:"")])]),
         pct!=null? el("div",{class:"bar"},[el("i",{style:"width:"+pct+"%"})]) : null]); });
     var lp=(d.avatar.long_params||[]).map(function(x){ return [LPARAM[x.type]||("#"+x.type), x.val]; });
-    var av=card("Аватар",[kv(lp), el("div",{style:"margin-top:10px"},params)]);
-    var ab=card("Способности"+((d.avatar.abilities||[]).length?" ("+d.avatar.abilities.length+")":""),[(d.avatar.abilities||[]).length?
+    var av=card(L("Аватар"),[kv(lp), el("div",{style:"margin-top:10px"},params)]);
+    var ab=card(L("Способности")+((d.avatar.abilities||[]).length?" ("+d.avatar.abilities.length+")":""),[(d.avatar.abilities||[]).length?
       el("div",{class:"chips grow"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))
-      : el("div",{class:"muted"},["нет"])]);
+      : el("div",{class:"muted"},[L("нет")])]);
     var pos=d.position||{};
-    var terr=(pos.territories||[]).length? el("div",{class:"grow"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map_name,t.x,t.y]; })])
-      : el("div",{class:"muted"},["нет территорий"]);
-    var where=card("Где я",[kv([["Карта",pos.map_name],["Координаты",pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
-      ["Точка возрождения",pos.respawn? pos.respawn.map_name+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
-      el("div",{class:"muted small",style:"margin:10px 0 4px"},["Мои территории"]), terr]);
+    var terr=(pos.territories||[]).length? el("div",{class:"grow"},[table([L("Карта"),"X","Y"],pos.territories,function(t){ return [t.map_name,t.x,t.y]; })])
+      : el("div",{class:"muted"},[L("нет территорий")]);
+    var where=card(L("Где я"),[kv([[L("Карта"),pos.map_name],[L("Координаты"),pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
+      [L("Точка возрождения"),pos.respawn? pos.respawn.map_name+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
+      el("div",{class:"muted small",style:"margin:10px 0 4px"},[L("Мои территории")]), terr]);
     ab.classList.add("fill"); where.classList.add("fill");
     box.appendChild(el("div",{class:"grid"},[head,av,ab,where]));
     box.appendChild(el("div",{class:"grid"},[
-      card("Склад"+(d.avatar.stash_size?" ("+d.avatar.stash.length+" / "+d.avatar.stash_size+")":""),[invTable(d.avatar.stash)]),
-      card("С собой"+(d.avatar.carry_size?" ("+d.avatar.carry.length+" / "+d.avatar.carry_size+")":""),[invTable(d.avatar.carry)])]));
+      card(L("Склад")+(d.avatar.stash_size?" ("+d.avatar.stash.length+" / "+d.avatar.stash_size+")":""),[invTable(d.avatar.stash)]),
+      card(L("С собой")+(d.avatar.carry_size?" ("+d.avatar.carry.length+" / "+d.avatar.carry_size+")":""),[invTable(d.avatar.carry)])]));
     var extra=[];
     var sc=function(t){ return el("div",{class:"scroll",style:"max-height:320px"},[t]); };
-    if(d.friends.length) extra.push(card("Друзья ("+d.friends.length+")",[sc(table(["Игрок","Уровень","Клан"],d.friends,function(f){
-      return [el("span",{},[f.online? el("span",{class:"pill ok",title:"в игре"},["●"]):null," "+f.name]), f.level==null?"":f.level, f.clan||"—"]; }))]));
-    if(d.deaths.length) extra.push(card("Последние смерти",[sc(table(["Когда","Что"],d.deaths,function(x){ return [x.ts,x.event]; }))]));
-    if(d.rewards.length) extra.push(card("Награды за рейтинг",[sc(table(["Когда","Награда"],d.rewards,function(x){ return [x.ts,x.reward]; }))]));
+    if(d.friends.length) extra.push(card(L("Друзья (")+d.friends.length+")",[sc(table([L("Игрок"),L("Уровень"),L("Клан")],d.friends,function(f){
+      return [el("span",{},[f.online? el("span",{class:"pill ok",title:L("в игре")},["●"]):null," "+f.name]), f.level==null?"":f.level, f.clan||"—"]; }))]));
+    if(d.deaths.length) extra.push(card(L("Последние смерти"),[sc(table([L("Когда"),L("Что")],d.deaths,function(x){ return [x.ts,x.event]; }))]));
+    if(d.rewards.length) extra.push(card(L("Награды за рейтинг"),[sc(table([L("Когда"),L("Награда")],d.rewards,function(x){ return [x.ts,x.reward]; }))]));
     if(extra.length) box.appendChild(el("div",{class:"grid"},extra));
   });
 }
@@ -1070,12 +1478,12 @@ function techScheme(nodes,done,cur,hl,onPick){
     svg.appendChild(svgEl("path",{d:d,fill:"none",stroke:h?"var(--warn)":(done[n.parent]?"var(--mut)":"var(--line)"),"stroke-width":h?"2.2":"1.2"})); });
   var cnt={done:0,avail:0,lock:0};
   nodes.forEach(function(n){ var st,fill,stroke;
-    if(done[n.id]){ st="изучено"; fill=stroke="var(--ok)"; cnt.done++; }
-    else if(cur===n.id){ st="изучается"; fill=stroke="var(--warn)"; }
-    else if(!n.parent||!byId[n.parent]||done[n.parent]){ st="доступно"; fill="transparent"; stroke="var(--acc)"; cnt.avail++; }
-    else { st="закрыто"; fill="transparent"; stroke="var(--line)"; cnt.lock++; }
+    if(done[n.id]){ st=L("изучено"); fill=stroke="var(--ok)"; cnt.done++; }
+    else if(cur===n.id){ st=L("изучается"); fill=stroke="var(--warn)"; }
+    else if(!n.parent||!byId[n.parent]||done[n.parent]){ st=L("доступно"); fill="transparent"; stroke="var(--acc)"; cnt.avail++; }
+    else { st=L("закрыто"); fill="transparent"; stroke="var(--line)"; cnt.lock++; }
     var h=hl&&hl[n.id];
-    var tip=n.label+(n.cost_h!=null?"\nВремя: "+n.cost_h+" ч":"")+"\n"+st+((n.unlocks&&n.unlocks.length)?"\nОткрывает: "+n.unlocks.join(", "):"");
+    var tip=n.label+(n.cost_h!=null?L("\nВремя: ")+n.cost_h+L(" ч"):"")+"\n"+st+((n.unlocks&&n.unlocks.length)?L("\nОткрывает: ")+n.unlocks.join(", "):"");
     var g=svgEl("g",{style:"cursor:pointer"},[svgEl("title",{},[tip]),svgEl("rect",{x:cx(n.id),y:cy(n.id),width:C,height:C,rx:3,fill:fill,
       stroke:h?"var(--warn)":stroke,"stroke-width":h?2.4:1.4})]);
     g.addEventListener("click",function(){ onPick(n); }); svg.appendChild(g); });
@@ -1089,50 +1497,53 @@ function tabTech(m){
     nodes.forEach(function(n){ by[n.id]=n; });
     var done={}; (me.research.tech_list||[]).forEach(function(t){ done[t]=true; });
     var holder=el("div",{style:"overflow:auto;max-height:640px;border:1px solid var(--line);border-radius:8px;padding:6px"});
-    var info=el("div",{style:"margin-top:10px"},[el("div",{class:"muted small"},["Нажмите на технологию — покажу путь до неё и сколько осталось."])]);
+    var info=el("div",{style:"margin-top:10px"},[el("div",{class:"muted small"},[L("Нажмите на технологию — покажу путь до неё и сколько осталось.")])]);
     var legend=el("div",{class:"row small muted",style:"margin-bottom:6px"});
     function draw(hl){ holder.innerHTML=""; var s=techScheme(nodes,done,me.research.current,hl,pick); holder.appendChild(s.svg);
-      legend.textContent="Изучено "+s.cnt.done+" / "+nodes.length+" · доступно сейчас "+s.cnt.avail+" · закрыто "+s.cnt.lock; }
+      legend.textContent=L("Изучено ")+s.cnt.done+" / "+nodes.length+L(" · доступно сейчас ")+s.cnt.avail+L(" · закрыто ")+s.cnt.lock; }
     function pick(n){
       var chain=[],c=n,g=0; while(c&&g++<200){ chain.unshift(c); c=c.parent? by[c.parent]:null; }
       var hl={}; chain.forEach(function(x){ hl[x.id]=true; }); draw(hl);
       var miss=chain.filter(function(x){ return !done[x.id]; }), h=0; miss.forEach(function(x){ h+=x.cost_h||0; });
       info.innerHTML="";
       info.appendChild(card(n.label,[
-        el("div",{},[miss.length? "Осталось: "+miss.length+" шаг(ов) · ~"+(Math.round(h*10)/10)+" ч" : el("span",{class:"pill ok"},["изучено"])]),
+        el("div",{},[miss.length? L("Осталось: ")+miss.length+L(" шаг(ов) · ~")+(Math.round(h*10)/10)+L(" ч") : el("span",{class:"pill ok"},[L("изучено")])]),
         el("div",{class:"chips",style:"margin-top:6px"},chain.map(function(x){ return el("span",{class:"chip",style:done[x.id]?"color:var(--ok);border-color:var(--ok)":""},[(done[x.id]?"✓ ":"")+x.label]); })),
-        (n.unlocks&&n.unlocks.length)? el("div",{class:"small",style:"margin-top:8px"},["Открывает: "+n.unlocks.join(", ")]) : null]));
+        (n.unlocks&&n.unlocks.length)? el("div",{class:"small",style:"margin-top:8px"},[L("Открывает: ")+n.unlocks.join(", ")]) : null]));
     }
     draw(null);
-    var cur=me.research.current? card("Сейчас",[kv([["Изучается",me.research.current_name],["Осталось",fmtMin(me.research.remaining_min)]])]) : null;
-    box.appendChild(el("div",{},[cur, card("Схема изучения",[legend,holder,info])]));
+    var cur=me.research.current? card(L("Сейчас"),[kv([[L("Изучается"),me.research.current_name],[L("Осталось"),fmtMin(me.research.remaining_min)]])]) : null;
+    box.appendChild(el("div",{},[cur, card(L("Схема изучения"),[legend,holder,info])]));
   }).catch(function(e){ box.appendChild(errBox(e)); });
 }
 
 // ---------------------------------------------------------------- крафт
 function tabCraft(m){
   var plan=el("div");
-  var inp=el("input",{list:"cr-dl",placeholder:"Что скрафтить?",style:"min-width:240px"}), dl=el("datalist",{id:"cr-dl"});
+  var inp=el("input",{list:"cr-dl",placeholder:L("Что скрафтить?"),style:"min-width:240px"}), dl=el("datalist",{id:"cr-dl"});
   var qty=el("input",{type:"number",min:"1",value:"1",style:"width:80px"}), byName={};
   api("/api/craft-catalog").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});
   function doPlan(item){
     var id=byName[(item||"").toLowerCase()]||item; if(!id) return;
     load(plan,"/api/craft-plan?item="+encodeURIComponent(id)+"&qty="+(parseInt(qty.value)||1),function(d){
       if(!d.ok){ plan.appendChild(errBox(d)); return; }
-      var out=[el("div",{class:"muted small"},["Время крафта: "+Math.round(d.time_s)+" с"+(d.benches.length?" · нужно: "+d.benches.join(", "):"")])];
-      out.push(el("h3",{style:"margin-top:10px"},["Сырьё"]));
-      out.push(table(["Ресурс","Нужно"],d.raw,function(r){ return [withIco(r.id,r.name),r.count]; }));
-      if(d.intermediate.length){ out.push(el("h3",{style:"margin-top:10px"},["Промежуточное"]));
-        out.push(table(["Предмет","Нужно","Крафтов"],d.intermediate,function(r){ return [withIco(r.id,r.name),r.need,r.crafts||""]; })); }
-      if(d.techs.length){ out.push(el("h3",{style:"margin-top:10px"},["Технологии"]));
-        out.push(table(["Технология","У меня"],d.techs,function(x){ return [x.label, x.known? el("span",{class:"pill ok"},["изучено"])
-          : el("span",{class:"pill warn"},["нет · ещё "+x.missing_chain+" шаг(ов), ~"+x.missing_h+" ч"])]; })); }
-      var c=card(d.name+" × "+d.qty,out), ic=ico(d.item,32); if(ic){ ic.style.marginRight="8px"; c.firstChild.insertBefore(ic,c.firstChild.firstChild); }
-      plan.appendChild(c);
+      var out=[el("div",{class:"muted small"},[L("Время крафта: ")+Math.round(d.time_s)+L(" с")+(d.benches.length?L(" · нужно: ")+d.benches.join(", "):"")])];
+      out.push(el("h3",{style:"margin-top:10px"},[L("Сырьё")]));
+      out.push(table([L("Ресурс"),L("Нужно")],d.raw,function(r){ return [itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")),r.count]; }));
+      if(d.intermediate.length){ out.push(el("h3",{style:"margin-top:10px"},[L("Промежуточное")]));
+        out.push(table([L("Предмет"),L("Нужно"),L("Крафтов")],d.intermediate,function(r){ return [itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")),r.need,r.crafts||""]; })); }
+      if(d.techs.length){ out.push(el("h3",{style:"margin-top:10px"},[L("Технологии")]));
+        out.push(table([L("Технология"),L("У меня")],d.techs,function(x){ return [x.label, x.known? el("span",{class:"pill ok"},[L("изучено")])
+          : el("span",{class:"pill warn"},[L("нет · ещё ")+x.missing_chain+L(" шаг(ов), ~")+x.missing_h+L(" ч")])]; })); }
+      out.unshift(el("div",{style:"margin-bottom:8px"},[itemBtn(d.item,d.name,d.qty,goBook,L("Открыть в справочнике"))]));
+      plan.appendChild(card("",out));
     });
   }
-  m.appendChild(card("Раскладка до сырья",[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},["Посчитать"])]),
+  m.appendChild(card(L("Раскладка до сырья"),[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},[L("Посчитать")])]),
     el("div",{style:"margin-top:10px"},[plan])]));
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") doPlan(inp.value); });
+  var go=""; try{ go=localStorage.getItem("swp_craft_go")||""; localStorage.removeItem("swp_craft_go"); }catch(e){}
+  if(go) doPlan(go);
 }
 
 // ---------------------------------------------------------------- рынок
@@ -1140,13 +1551,13 @@ function fmtItems(a){ return (a||[]).map(function(x){ return x.name+" ×"+x.coun
 function itemsEl(a){ if(!a||!a.length) return "—";
   return el("span",{style:"display:inline-flex;flex-wrap:wrap;gap:4px 10px"},a.map(function(x){ return withIco(x.name,x.name+" ×"+x.count,18); })); }
 function median(a){ a=a.slice().sort(function(x,y){ return x-y; }); var n=a.length; return n? (n%2? a[(n-1)/2] : (a[n/2-1]+a[n/2])/2) : null; }
-function num(v){ return v==null? "" : (v>=100? Math.round(v).toLocaleString("ru") : String(Math.round(v*100)/100)); }
+function num(v){ return v==null? "" : (v>=100? Math.round(v).toLocaleString(LOC) : String(Math.round(v*100)/100)); }
 // курс простого лота: «N валюты за 1 шт», а если товар дешёвый — «1 валюты = N шт»
 function rate(o){ if(o.unit==null||!o.unit||o.give.length!==1||o.want.length!==1) return "";
-  return o.unit>=1? num(o.unit)+" "+o.want[0].name+" за 1" : "1 "+o.want[0].name+" = "+num(1/o.unit)+" шт"; }
+  return o.unit>=1? num(o.unit)+" "+o.want[0].name+L(" за 1") : "1 "+o.want[0].name+" = "+num(1/o.unit)+L(" шт"); }
 function tabMarket(m){
-  var q=el("input",{placeholder:"Предмет, например: Железный слиток",style:"min-width:260px;flex:1"});
-  var mode=el("select",{},[el("option",{value:"give"},["продают"]),el("option",{value:"want"},["просят взамен"]),el("option",{value:"any"},["везде"])]);
+  var q=el("input",{placeholder:L("Предмет, например: Железный слиток"),style:"min-width:260px;flex:1"});
+  var mode=el("select",{},[el("option",{value:"give"},[L("продают")]),el("option",{value:"want"},[L("просят взамен")]),el("option",{value:"any"},[L("везде")])]);
   var info=el("div",{class:"muted small",style:"margin-top:6px"}), sum=el("div"), list=el("div"), data=null;
   try{ q.value=localStorage.getItem("swp_mq")||""; }catch(e){}
   function has(arr,t){ return (arr||[]).some(function(x){ return x.name.toLowerCase().indexOf(t)>=0; }); }
@@ -1159,44 +1570,44 @@ function tabMarket(m){
     if(t){  // сводка цен по искомому предмету: простые лоты «1 товар за 1 вид оплаты»
       var g={}; rows.forEach(function(o){ if(o.unit==null||!o.unit||o.give.length!==1||o.want.length!==1) return;
         var gv=o.give[0], wn=o.want[0], r;
-        if(gv.name.toLowerCase().indexOf(t)>=0) r={item:gv.name, cur:wn.name, p:wn.count/gv.count, side:"продают"};
-        else if(wn.name.toLowerCase().indexOf(t)>=0) r={item:wn.name, cur:gv.name, p:gv.count/wn.count, side:"покупают"};
+        if(gv.name.toLowerCase().indexOf(t)>=0) r={item:gv.name, cur:wn.name, p:wn.count/gv.count, side:L("продают")};
+        else if(wn.name.toLowerCase().indexOf(t)>=0) r={item:wn.name, cur:gv.name, p:gv.count/wn.count, side:L("покупают")};
         else return;
         var k=r.side+"|"+r.item+"|"+r.cur; (g[k]=g[k]||{item:r.item,cur:r.cur,side:r.side,u:[]}).u.push(r.p); });
       var ps=Object.keys(g).map(function(k){ return g[k]; }).sort(function(a,b){ return b.u.length-a.u.length; });
-      if(ps.length) sum.appendChild(card("Цена за 1 шт",[table(["Товар","Сделка","Платят","Мин","Медиана","Макс","Лотов"],ps,function(x){
+      if(ps.length) sum.appendChild(card(L("Цена за 1 шт"),[table([L("Товар"),L("Сделка"),L("Платят"),L("Мин"),L("Медиана"),L("Макс"),L("Лотов")],ps,function(x){
         return [withIco(x.item,x.item,18),x.side,withIco(x.cur,x.cur,18),num(Math.min.apply(null,x.u)),num(median(x.u)),num(Math.max.apply(null,x.u)),x.u.length]; })]));
     }
     rows.sort(function(a,b){ return (a.unit==null)-(b.unit==null) || (a.unit||0)-(b.unit||0); });
     var shown=rows.slice(0,300);
-    list.appendChild(card("Предложения ("+rows.length+(rows.length>shown.length?", показаны первые "+shown.length:"")+")",[
-      rows.length? el("div",{class:"scroll",style:"max-height:600px"},[table(["Отдаёт","Просит","Курс","Продавец","Где"],shown,function(o){
+    list.appendChild(card(L("Предложения (")+rows.length+(rows.length>shown.length?L(", показаны первые ")+shown.length:"")+")",[
+      rows.length? el("div",{class:"scroll",style:"max-height:600px"},[table([L("Отдаёт"),L("Просит"),L("Курс"),L("Продавец"),L("Где")],shown,function(o){
         return [itemsEl(o.give),itemsEl(o.want),rate(o),
-          el("span",{},[o.owner+(o.clan?" ["+o.clan+"]":""), o.mine? el("span",{class:"pill ok",style:"margin-left:6px"},["моё"]):null]), o.where]; })])
-      : el("div",{class:"muted"},[t? "ничего не нашлось" : "предложений нет"])]));
+          el("span",{},[o.owner+(o.clan?" ["+o.clan+"]":""), o.mine? el("span",{class:"pill ok",style:"margin-left:6px"},[L("моё")]):null]), o.where]; })])
+      : el("div",{class:"muted"},[t? L("ничего не нашлось") : L("предложений нет")])]));
   }
   function fetchM(){
     api("/api/market").then(function(d){
       if(S.tab!=="market") return;
-      if(d.pending){ info.textContent="Собираю предложения со всех карт — это до пары минут, страница обновится сама…"; setTimeout(fetchM,4000); return; }
-      data=d; info.textContent="Обновлено "+(d.age_s<90? "только что" : Math.round(d.age_s/60)+" мин назад")+" · всего предложений: "+d.offers.length
-        +(d.refreshing? " · обновляю в фоне…" : ""); draw();
+      if(d.pending){ info.textContent=L("Собираю предложения со всех карт — это до пары минут, страница обновится сама…"); setTimeout(fetchM,4000); return; }
+      data=d; info.textContent=L("Обновлено ")+(d.age_s<90? L("только что") : Math.round(d.age_s/60)+L(" мин назад"))+L(" · всего предложений: ")+d.offers.length
+        +(d.refreshing? L(" · обновляю в фоне…") : ""); draw();
     }).catch(function(e){ info.textContent=""; list.innerHTML=""; list.appendChild(errBox(e)); });
   }
   var tmr; q.addEventListener("input",function(){ clearTimeout(tmr); tmr=setTimeout(draw,200); }); mode.addEventListener("change",draw);
-  m.appendChild(card("Рынок",[el("div",{class:"row"},[q,mode]),info,
-    el("div",{class:"muted small"},["Терминалы игроков и магазины на картах. Курс и цены — только для простых лотов «один товар за одну валюту»; сводка цен появляется при поиске."])]));
+  m.appendChild(card(L("Рынок"),[el("div",{class:"row"},[q,mode]),info,
+    el("div",{class:"muted small"},[L("Терминалы игроков и магазины на картах. Курс и цены — только для простых лотов «один товар за одну валюту»; сводка цен появляется при поиске.")])]));
   var own=el("div"); m.insertBefore(own, m.firstChild);
   api("/api/my-trade").then(function(d){ if(d.pending||(!d.terminals.length&&!d.shops.length&&!d.offers.length)) return;
     var k=[];
-    d.terminals.forEach(function(t){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Терминал"]),
-      el("span",{class:"muted"},["  · лотов "+t.lots+" · продаж "+t.sales+(t.idle_h!=null?" · не заходил "+t.idle_h+" ч":"")]),
-      el("div",{class:"small"},["На складе терминала: ",itemsEl(t.storage)])])); });
-    d.shops.forEach(function(sh){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Магазин · "+sh.where]),
-      el("span",{class:"muted"},["  · слотов "+sh.slots+" · продаж "+sh.sales]),
-      el("div",{class:"small"},["Выручка: ",itemsEl(sh.storage)])])); });
-    if(d.offers.length) k.push(el("div",{class:"scroll",style:"max-height:260px"},[table(["Отдаю","Прошу","Курс","Где"],d.offers,function(o){ return [itemsEl(o.give),itemsEl(o.want),rate(o),o.where]; })]));
-    own.appendChild(card("Моя торговля",k));
+    d.terminals.forEach(function(t){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},[L("Терминал")]),
+      el("span",{class:"muted"},[L("  · лотов ")+t.lots+L(" · продаж ")+t.sales+(t.idle_h!=null?L(" · не заходил ")+t.idle_h+L(" ч"):"")]),
+      el("div",{class:"small"},[L("На складе терминала: "),itemsEl(t.storage)])])); });
+    d.shops.forEach(function(sh){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},[L("Магазин · ")+sh.where]),
+      el("span",{class:"muted"},[L("  · слотов ")+sh.slots+L(" · продаж ")+sh.sales]),
+      el("div",{class:"small"},[L("Выручка: "),itemsEl(sh.storage)])])); });
+    if(d.offers.length) k.push(el("div",{class:"scroll",style:"max-height:260px"},[table([L("Отдаю"),L("Прошу"),L("Курс"),L("Где")],d.offers,function(o){ return [itemsEl(o.give),itemsEl(o.want),rate(o),o.where]; })]));
+    own.appendChild(card(L("Моя торговля"),k));
   }).catch(function(){});
   m.appendChild(sum); m.appendChild(list); fetchM();
 }
@@ -1205,10 +1616,10 @@ function tabMarket(m){
 function tabMap(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/my-maps",function(d){
-    if(!d.maps.length){ box.appendChild(card("Карта",[el("div",{class:"muted"},["У вас пока нет участков."])])); return; }
+    if(!d.maps.length){ box.appendChild(card(L("Карта"),[el("div",{class:"muted"},[L("У вас пока нет участков.")])])); return; }
     var sel=el("select",{}), zoom=6, rot=315, cur=null, sc=1;
     try{ var r0=parseInt(localStorage.getItem("swp_rot")); if(!isNaN(r0)) rot=r0; }catch(e){}
-    d.maps.forEach(function(x,i){ sel.appendChild(el("option",{value:i},[x.name+" · участков: "+x.territories.length+(x.here?" · вы здесь":"")])); });
+    d.maps.forEach(function(x,i){ sel.appendChild(el("option",{value:i},[x.name+L(" · участков: ")+x.territories.length+(x.here?L(" · вы здесь"):"")])); });
     // как в админке: картинка поворачивается целиком (вместе с метками) внутри
     // «сцены» размером с диагональ, чтобы повёрнутые углы не обрезались
     var img=el("img",{alt:"",style:"display:block;image-rendering:pixelated;max-width:none;width:100%;height:100%"});
@@ -1226,10 +1637,10 @@ function tabMap(m){
       zl.textContent="×"+zoom; rl.textContent=(((rot%360)+360)%360)+"°";
       [].slice.call(layer.querySelectorAll(".mk")).forEach(function(e){ e.remove(); });
       var k=sc*zoom;
-      cur.territories.forEach(function(t){ layer.appendChild(el("div",{class:"mk",title:"мой участок "+t.x+", "+t.y,
+      cur.territories.forEach(function(t){ layer.appendChild(el("div",{class:"mk",title:L("мой участок ")+t.x+", "+t.y,
         style:"position:absolute;left:"+(t.x*8*k)+"px;top:"+((cur.h-t.y*8-8)*k)+"px;width:"+(8*k)+"px;height:"+(8*k)+"px;"
           +"background:rgba(80,255,120,.25);outline:2px solid #3fff7a;box-sizing:border-box"})); });
-      if(d.me.map===cur.map && d.me.x!=null) layer.appendChild(el("div",{class:"mk",title:"вы здесь",
+      if(d.me.map===cur.map && d.me.x!=null) layer.appendChild(el("div",{class:"mk",title:L("вы здесь"),
         style:"position:absolute;left:"+(d.me.x*k-6)+"px;top:"+((cur.h-d.me.y)*k-6)+"px;width:12px;height:12px;border-radius:50%;background:#ff3b30;border:2px solid #fff;box-shadow:0 0 4px #000"}));
     }
     // клетка игры -> точка в «сцене» с учётом поворота (ось Y картинки — вверх, как в игре)
@@ -1245,14 +1656,14 @@ function tabMap(m){
       var t=cur.territories; if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); focus(cx/t.length,cy/t.length); } }
     function keep(fn){ var c=center(); fn(); place(); focus(c.x,c.y); }
     function show(){
-      cur=d.maps[+sel.value]; st.textContent="загрузка карты…"; img.removeAttribute("src");
+      cur=d.maps[+sel.value]; st.textContent=L("загрузка карты…"); img.removeAttribute("src");
       img.onload=function(){ st.textContent=""; place(); focusMine(); };
-      img.onerror=function(){ st.textContent="карта не загрузилась"; };
+      img.onerror=function(){ st.textContent=L("карта не загрузилась"); };
       img.src="/api/my-map-image?map="+cur.map;
       tlist.innerHTML="";
-      if(cur.territories.length) tlist.appendChild(card("Участки на этой карте ("+cur.territories.length+")",[el("div",{class:"scroll",style:"max-height:260px"},[
-        table(["#","Участок (X, Y)","Клетки",""],cur.territories,function(t){ return [cur.territories.indexOf(t)+1, t.x+", "+t.y,
-          (t.x*8)+"–"+(t.x*8+7)+", "+(t.y*8)+"–"+(t.y*8+7), el("button",{onclick:function(){ focus(t.x*8+4,t.y*8+4); view.scrollIntoView({block:"nearest"}); }},["показать"])]; })])]));
+      if(cur.territories.length) tlist.appendChild(card(L("Участки на этой карте (")+cur.territories.length+")",[el("div",{class:"scroll",style:"max-height:260px"},[
+        table(["#",L("Участок (X, Y)"),L("Клетки"),""],cur.territories,function(t){ return [cur.territories.indexOf(t)+1, t.x+", "+t.y,
+          (t.x*8)+"–"+(t.x*8+7)+", "+(t.y*8)+"–"+(t.y*8+7), el("button",{onclick:function(){ focus(t.x*8+4,t.y*8+4); view.scrollIntoView({block:"nearest"}); }},[L("показать")])]; })])]));
     }
     function setRot(v){ keep(function(){ rot=v; try{ localStorage.setItem("swp_rot",String(rot)); }catch(e){} }); }
     // протяжка как в админке: тащим зажатой ЛКМ (или пальцем), колесо — масштаб под курсором
@@ -1273,13 +1684,13 @@ function tabMap(m){
       zoom=nz; place(); var p=toStage(c.x,c.y); view.scrollLeft=p.x-ox; view.scrollTop=p.y-oy;
     },{passive:false});
     sel.addEventListener("change",show);
-    box.appendChild(card("Мои участки на карте",[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
-      el("button",{title:"повернуть против часовой на 45°",onclick:function(){ setRot(rot-45); }},["↺"]), rl,
-      el("button",{title:"повернуть по часовой на 45°",onclick:function(){ setRot(rot+45); }},["↻"]),
+    box.appendChild(card(L("Мои участки на карте"),[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
+      el("button",{title:L("повернуть против часовой на 45°"),onclick:function(){ setRot(rot-45); }},["↺"]), rl,
+      el("button",{title:L("повернуть по часовой на 45°"),onclick:function(){ setRot(rot+45); }},["↻"]),
       el("button",{onclick:function(){ keep(function(){ zoom=Math.max(1,zoom-1); }); }},["−"]), zl,
       el("button",{onclick:function(){ keep(function(){ zoom=Math.min(16,zoom+1); }); }},["+"]),
-      el("button",{onclick:focusMine},["ко мне"]), st]),
-      el("div",{class:"muted small",style:"margin-bottom:6px"},["Видно "+d.fog_radius+" клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы. Карту можно тащить мышью, колесо — масштаб."]), view]));
+      el("button",{onclick:focusMine},[L("ко мне")]), st]),
+      el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Видно ")+d.fog_radius+L(" клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы. Карту можно тащить мышью, колесо — масштаб.")]), view]));
     box.appendChild(tlist); show();
   });
 }
@@ -1289,59 +1700,61 @@ function tabHist(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/history",function(d){
     var s=function(k){ return d.points.map(function(p){ return {t:p.t,v:p[k]}; }).filter(function(p){ return p.v!=null; }); };
-    box.appendChild(card("Моя история",[el("div",{class:"muted small"},[d.since? "Панель записывает снимок раз в час с "+new Date(d.since*1000).toLocaleDateString("ru")+" — графики будут расти со временем."
-      : "Снимки ещё не делались — первый появится в течение часа."])]));
+    box.appendChild(card(L("Моя история"),[el("div",{class:"muted small"},[d.since? L("Панель записывает снимок раз в час с ")+new Date(d.since*1000).toLocaleDateString(LOC)+L(" — графики будут расти со временем.")
+      : L("Снимки ещё не делались — первый появится в течение часа.")])]));
     box.appendChild(el("div",{class:"grid"},[
-      card("",[chart(d.techs,{title:"Изучено технологий",y:"техов",x:"дата"})]),
-      card("",[chart(s("level"),{title:"Уровень",y:"уровень",x:"дата"})]),
-      card("",[chart(s("rating"),{title:"Рейтинг",y:"рейтинг",x:"дата"})]),
-      card("",[chart(s("play_h"),{title:"Наиграно",y:"часов",x:"дата"})]),
-      card("",[chart(s("research_h"),{title:"Вложено в исследования",y:"часов",x:"дата"})])]));
+      card("",[chart(d.techs,{title:L("Изучено технологий"),y:L("техов"),x:L("дата")})]),
+      card("",[chart(s("level"),{title:L("Уровень"),y:L("уровень"),x:L("дата")})]),
+      card("",[chart(s("rating"),{title:L("Рейтинг"),y:L("рейтинг"),x:L("дата")})]),
+      card("",[chart(s("play_h"),{title:L("Наиграно"),y:L("часов"),x:L("дата")})]),
+      card("",[chart(s("research_h"),{title:L("Вложено в исследования"),y:L("часов"),x:L("дата")})])]));
   });
 }
 
 // ---------------------------------------------------------------- справочник
 function tabBook(m){
-  var inp=el("input",{list:"bk-dl",placeholder:"Предмет",style:"min-width:260px;flex:1"}), dl=el("datalist",{id:"bk-dl"}), out=el("div"), byName={};
+  var inp=el("input",{list:"bk-dl",placeholder:L("Предмет"),style:"min-width:260px;flex:1"}), dl=el("datalist",{id:"bk-dl"}), out=el("div"), byName={};
   function open(id){ try{ localStorage.setItem("swp_book",id); }catch(e){}
     load(out,"/api/handbook?item="+encodeURIComponent(id),function(d){
       if(!d.ok){ out.appendChild(errBox(d)); return; }
       inp.value=d.name;
-      function lnk(x){ var a=el("a",{href:"#",onclick:function(e){ e.preventDefault(); open(x.id); }},[x.name]), i=ico(x.id,18);
-        return i? el("span",{class:"iname"},[i,a]) : a; }
-      function list(a){ var w=el("span"); a.forEach(function(x,i){ if(i) w.appendChild(document.createTextNode(", ")); w.appendChild(x); }); return w; }
+      function lnk(x,n){ return itemBtn(x.id,x.name,n,open); }
       var k=[];
       if(d.flags.length) k.push(el("div",{class:"chips",style:"margin-bottom:8px"},d.flags.map(function(f){ return el("span",{class:"chip"},[f]); })));
       if(d.stats.length) k.push(kv(d.stats));
       if(d.recipe){ var r=d.recipe;
-        k.push(el("h3",{style:"margin-top:12px"},["Крафт"+(r.out>1?" (выходит "+r.out+" шт)":"")]));
-        k.push(kv([["Нужно",list(r.res.map(function(x){ return el("span",{},[lnk(x)," ×"+x.n]); }))],["Где",r.workbench||"в руках"],["Время",r.time+" с"],
-          ["Технология",r.tech? el("span",{},[r.tech+" ", el("span",{class:"pill "+(r.tech_known?"ok":"warn")},[r.tech_known?"изучена":"не изучена"])]) : "не нужна"]])); }
-      if(d.machine.length){ k.push(el("h3",{style:"margin-top:12px"},["Станок"]));
-        k.push(table(["Станок","Из чего","Энергия"],d.machine,function(x){ return [lnk({id:x.machine_id,name:x.machine}),lnk({id:x.from_id,name:x.from}),x.energy==null?"":x.energy]; })); }
-      if(!d.recipe&&!d.machine.length) k.push(el("div",{class:"muted",style:"margin-top:10px"},["Не крафтится — добывается или находится в мире."]));
-      if(d.used_in.length){ k.push(el("h3",{style:"margin-top:12px"},["Используется в ("+d.used_in.length+")"]));
-        k.push(el("div",{class:"scroll",style:"max-height:200px"},[list(d.used_in.map(lnk))])); }
-      if(d.on_market) k.push(el("div",{class:"small",style:"margin-top:12px"},["На рынке: продают — "+d.on_market.sell+" лот(ов), просят взамен — "+d.on_market.buy+" ",
-        el("a",{href:"#",onclick:function(e){ e.preventDefault(); try{ localStorage.setItem("swp_mq",d.name); }catch(_){} S.tab="market"; render(); }},["открыть на рынке"])]));
-      var big=ico(d.id,64); if(big) k.unshift(el("div",{style:"margin-bottom:8px"},[big]));
+        k.push(el("h3",{style:"margin-top:12px"},[L("Крафт")+(r.out>1?L(" (выходит ")+r.out+L(" шт)"):"")]));
+        k.push(kv([[L("Нужно"),el("div",{class:"ibtns"},r.res.map(function(x){ return lnk(x,x.n); }))],[L("Где"),r.workbench||L("в руках")],[L("Время"),r.time+L(" с")],
+          [L("Технология"),r.tech? el("span",{},[r.tech+" ", el("span",{class:"pill "+(r.tech_known?"ok":"warn")},[r.tech_known?L("изучена"):L("не изучена")])]) : L("не нужна")]])); }
+      if(d.machine.length){ k.push(el("h3",{style:"margin-top:12px"},[L("Станок")]));
+        k.push(table([L("Станок"),L("Из чего"),L("Энергия")],d.machine,function(x){ return [lnk({id:x.machine_id,name:x.machine}),lnk({id:x.from_id,name:x.from}),x.energy==null?"":x.energy]; })); }
+      if(!d.recipe&&!d.machine.length) k.push(el("div",{class:"muted",style:"margin-top:10px"},[L("Не крафтится — добывается или находится в мире.")]));
+      if(d.used_in.length){ k.push(el("h3",{style:"margin-top:12px"},[L("Используется в (")+d.used_in.length+")"]));
+        k.push(el("div",{class:"ibtns scroll",style:"max-height:220px"},d.used_in.map(function(x){ return lnk(x); }))); }
+      if(d.on_market) k.push(el("div",{class:"small",style:"margin-top:12px"},[L("На рынке: продают — ")+d.on_market.sell+L(" лот(ов), просят взамен — ")+d.on_market.buy]));
+      // шапка карточки: крупная иконка, описание из игры и кнопки переходов
+      var acts=el("div",{class:"row"},[
+        (d.recipe||d.machine.length)? el("button",{onclick:function(){ goCraft(d.id); }},[L("Раскладка до сырья")]) : null,
+        el("button",{onclick:function(){ try{ localStorage.setItem("swp_mq",d.name); }catch(_){} S.tab="market"; render(); window.scrollTo(0,0); }},[L("Искать на рынке")])]);
+      k.unshift(el("div",{class:"row",style:"margin-bottom:10px;align-items:flex-start;gap:14px"},[ico(d.id,64),
+        el("div",{style:"flex:1;min-width:200px"},[d.info? el("div",{style:"margin-bottom:8px"},[d.info]) : null, acts])]));
       out.appendChild(card(d.name,k));
     }); }
   api("/api/handbook").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});
   inp.addEventListener("change",function(){ var id=byName[inp.value.trim().toLowerCase()]; if(id) open(id); });
-  m.appendChild(card("Справочник предметов",[el("div",{class:"row"},[inp,dl]),el("div",{class:"muted small",style:"margin-top:6px"},["Свойства, как получить, какая технология нужна и куда предмет идёт дальше."])]));
+  m.appendChild(card(L("Справочник предметов"),[el("div",{class:"row"},[inp,dl]),el("div",{class:"muted small",style:"margin-top:6px"},[L("Свойства, как получить, какая технология нужна и куда предмет идёт дальше.")])]));
   m.appendChild(out);
   var last=""; try{ last=localStorage.getItem("swp_book")||""; }catch(e){}
   if(last) open(last);
 }
 
 // ---------------------------------------------------------------- чат и события
-var CH=[["global","Общий"],["global2","Global (EN)"],["ru","Русский"],["clan","Клан"],["private","Личные"],["events","События"]];
-var EVD={kill:"убит",reset_position:"сброс позиции",satiety:"голод",oxygen:"задохнулся",gas:"газ",moss:"мох"};
-var EVK={register:"новый игрок",death:"смерть",clan_created:"создан клан",clan_disbanded:"распущен клан",clan_renamed:"клан переименован"};
+var CH=[["global",L("Общий")],["global2","Global (EN)"],["ru",L("Русский")],["clan",L("Клан")],["private",L("Личные")],["events",L("События")]];
+var EVD={kill:L("убит"),reset_position:L("сброс позиции"),satiety:L("голод"),oxygen:L("задохнулся"),gas:L("газ"),moss:L("мох")};
+var EVK={register:L("новый игрок"),death:L("смерть"),clan_created:L("создан клан"),clan_disbanded:L("распущен клан"),clan_renamed:L("клан переименован")};
 function tabChat(m){
   var ch="global"; try{ ch=localStorage.getItem("swp_ch")||"global"; }catch(e){}
-  var bar=el("div",{class:"row"}), q=el("input",{placeholder:"Поиск по нику или тексту",style:"width:100%"}), out=el("div"), tmr=null;
+  var bar=el("div",{class:"row"}), q=el("input",{placeholder:L("Поиск по нику или тексту"),style:"width:100%"}), out=el("div"), tmr=null;
   function draw(){
     bar.innerHTML="";
     CH.forEach(function(c){ bar.appendChild(el("button",{class:ch===c[0]?"pri":"",onclick:function(){ ch=c[0]; try{ localStorage.setItem("swp_ch",ch); }catch(e){} draw(); }},[c[1]])); });
@@ -1355,38 +1768,38 @@ function tabChat(m){
       if(S.tab!=="chat") return;
       out.innerHTML="";
       if(ch==="events"){
-        out.appendChild(card("События сервера",[d.events.length? el("div",{class:"scroll",style:"max-height:65vh"},[table(["Когда","Что","Кто",""],d.events,function(e){
-          return [e.ts, EVK[e.kind]||e.kind, e.who, e.kind==="death"? (EVD[e.detail]||e.detail) : e.kind==="clan_renamed"&&e.detail? "было: "+e.detail : e.detail]; })]) : el("div",{class:"muted"},["пока пусто"])]));
+        out.appendChild(card(L("События сервера"),[d.events.length? el("div",{class:"scroll",style:"max-height:65vh"},[table([L("Когда"),L("Что"),L("Кто"),""],d.events,function(e){
+          return [e.ts, EVK[e.kind]||e.kind, e.who, e.kind==="death"? (EVD[e.detail]||e.detail) : e.kind==="clan_renamed"&&e.detail? L("было: ")+e.detail : e.detail]; })]) : el("div",{class:"muted"},[L("пока пусто")])]));
       } else {
         var rows=d.messages.map(function(r){ return el("div",{style:"padding:3px 0;border-bottom:1px solid var(--line)"},[
           el("span",{class:"muted small"},[r.ts+"  "]),
           el("b",{style:r.out?"color:var(--acc)":""},[r.nick]), r.to? el("span",{class:"muted"},[" → "+r.to]) : null, ": "+r.text]); });
-        out.appendChild(card((CH.filter(function(c){ return c[0]===ch; })[0]||[,""])[1]+" · сообщений: "+d.total+(d.total>300?" (последние 300)":""),[
-          ch==="clan"? el("div",{class:"muted small",style:"margin-bottom:6px"},["Сообщения нынешних участников вашего клана."]) : null,
-          ch==="private"? el("div",{class:"muted small",style:"margin-bottom:6px"},["Только ваши личные сообщения — от вас и вам."]) : null,
-          rows.length? el("div",{class:"scroll",style:"max-height:65vh"},rows) : el("div",{class:"muted"},["сообщений нет"])]));
+        out.appendChild(card((CH.filter(function(c){ return c[0]===ch; })[0]||[,""])[1]+L(" · сообщений: ")+d.total+(d.total>300?L(" (последние 300)"):""),[
+          ch==="clan"? el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Сообщения нынешних участников вашего клана.")]) : null,
+          ch==="private"? el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Только ваши личные сообщения — от вас и вам.")]) : null,
+          rows.length? el("div",{class:"scroll",style:"max-height:65vh"},rows) : el("div",{class:"muted"},[L("сообщений нет")])]));
       }
       tmr=setTimeout(fetchC,20000);
     }).catch(function(e){ out.innerHTML=""; out.appendChild(errBox(e)); });
   }
   var qt; q.addEventListener("input",function(){ clearTimeout(qt); qt=setTimeout(fetchC,300); });
-  m.appendChild(card("Чат",[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},["Только чтение, обновляется раз в 20 секунд."])]));
+  m.appendChild(card(L("Чат"),[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},[L("Только чтение, обновляется раз в 20 секунд.")])]));
   m.appendChild(out); draw();
 }
 
 // ---------------------------------------------------------------- клан
-var CE={joined:"вступил",left:"ушёл",role:"роль",tech:"клан-технология",renamed:"переименован",slots:"слоты",created:"создан",disbanded:"распущен"};
+var CE={joined:L("вступил"),left:L("ушёл"),role:L("роль"),tech:L("клан-технология"),renamed:L("переименован"),slots:L("слоты"),created:L("создан"),disbanded:L("распущен")};
 // Линейный график с осями: Y — 3 деления (мин/середина/макс), X — время.
 function chart(pts,o){
   o=o||{}; var wide=o.wide && window.innerWidth>700;   // на телефоне широкий график стал бы мелким
   var W=wide?1100:520,H=wide?230:220,L=44,R=10,T=10,B=34;
   var box=el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[o.title||""])]);
-  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},[pts.length? "сейчас: "+pts[0].v+" · график появится, когда накопятся данные" : "мало данных"])); return box; }
+  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},[pts.length? L("сейчас: ")+pts[0].v+L(" · график появится, когда накопятся данные") : L("мало данных")])); return box; }
   var t0=pts[0].t,t1=pts[pts.length-1].t,lo=Infinity,hi=-Infinity; pts.forEach(function(p){ lo=Math.min(lo,p.v); hi=Math.max(hi,p.v); });
   if(o.zero) lo=Math.min(0,lo);
   if(hi===lo){ hi+=1; if(!o.zero) lo-=1; }
   function X(t){ return L+(W-L-R)*(t-t0)/((t1-t0)||1); } function Y(v){ return T+(H-T-B)*(1-(v-lo)/(hi-lo)); }
-  var fmt=function(v){ return Math.abs(v)>=1000? Math.round(v).toLocaleString("ru") : String(Math.round(v*10)/10); };
+  var fmt=function(v){ return Math.abs(v)>=1000? Math.round(v).toLocaleString(LOC) : String(Math.round(v*10)/10); };
   var kids=[];
   [lo,(lo+hi)/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:L,x2:W-R,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-dasharray":"3 3"}));
     kids.push(svgEl("text",{x:L-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[fmt(v)])); });
@@ -1401,7 +1814,7 @@ function chart(pts,o){
   var d=pts.map(function(p,i){ return (i?"L":"M")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1); }).join(" ");
   kids.push(svgEl("path",{d:d+" L"+X(t1)+" "+(H-B)+" L"+X(t0)+" "+(H-B)+" Z",fill:"var(--acc)","fill-opacity":"0.12",stroke:"none"}));
   kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2"}));
-  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[o.x||"время"]));
+  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[o.x||L("время")]));
   kids.push(svgEl("text",{x:12,y:(T+H-B)/2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)",transform:"rotate(-90 12 "+((T+H-B)/2)+")"},[o.y||""]));
   box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:auto;display:block"},kids));
   return box;
@@ -1409,18 +1822,18 @@ function chart(pts,o){
 function tabClan(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/clan",function(d){
-    if(d.none){ box.appendChild(card("Клан",[el("div",{class:"muted"},["Вы не состоите в клане."])])); return; }
-    box.appendChild(card(d.name,[kv([["Участников",d.size+(d.max?" / "+d.max:"")],["Сейчас в игре",d.online],["Рейтинг",d.rating],
-      ["Очки клана",d.clan_point],["Клан-технологий",d.tech.length]]),
+    if(d.none){ box.appendChild(card(L("Клан"),[el("div",{class:"muted"},[L("Вы не состоите в клане.")])])); return; }
+    box.appendChild(card(d.name,[kv([[L("Участников"),d.size+(d.max?" / "+d.max:"")],[L("Сейчас в игре"),d.online],[L("Рейтинг"),d.rating],
+      [L("Очки клана"),d.clan_point],[L("Клан-технологий"),d.tech.length]]),
       d.tech_named.length? el("div",{class:"chips",style:"margin-top:8px"},d.tech_named.map(function(x){ return el("span",{class:"chip"},[x.label]); })) : null]));
-    box.appendChild(card("Состав",[el("div",{class:"scroll"},[table(["Игрок","Роль","Уровень","Специализация","Был"],d.members,function(x){
+    box.appendChild(card(L("Состав"),[el("div",{class:"scroll"},[table([L("Игрок"),L("Роль"),L("Уровень"),L("Специализация"),L("Был")],d.members,function(x){
       return [el("span",{},[x.online? el("span",{class:"pill ok"},["●"]):null," "+x.name]), x.role_name, x.level==null?"":x.level,
         x.spec? "+"+x.spec.positive+" / −"+x.spec.negative : "",
-        x.online? "сейчас" : (x.last_seen_h==null? "" : x.last_seen_h<48? x.last_seen_h+" ч назад" : Math.round(x.last_seen_h/24)+" дн назад")]; })])]));
+        x.online? L("сейчас") : (x.last_seen_h==null? "" : x.last_seen_h<48? x.last_seen_h+L(" ч назад") : Math.round(x.last_seen_h/24)+L(" дн назад"))]; })])]));
     var h=d.history||{};
     if(h.series&&h.series.length>1){ var s=function(k){ return h.series.map(function(p){ return {t:p.t,v:p[k]}; }); };
-      box.appendChild(card("Рост клана (30 дней)",[el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[chart(s("rating"),{title:"Рейтинг",y:"рейтинг",x:"дата"}),chart(s("cp"),{title:"Очки клана",y:"очки",x:"дата"}),chart(s("size"),{title:"Состав",y:"участников",x:"дата",zero:true})])])); }
-    if(h.events&&h.events.length) box.appendChild(card("События",[el("div",{class:"scroll small"},h.events.slice(0,100).map(function(e){
+      box.appendChild(card(L("Рост клана (30 дней)"),[el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[chart(s("rating"),{title:L("Рейтинг"),y:L("рейтинг"),x:L("дата")}),chart(s("cp"),{title:L("Очки клана"),y:L("очки"),x:L("дата")}),chart(s("size"),{title:L("Состав"),y:L("участников"),x:L("дата"),zero:true})])])); }
+    if(h.events&&h.events.length) box.appendChild(card(L("События"),[el("div",{class:"scroll small"},h.events.slice(0,100).map(function(e){
       return el("div",{},[el("span",{class:"muted"},[e.ts+"  "]), (CE[e.kind]||e.kind)+" ", e.name||"",
         e.kind==="role"? " "+e.was+" → "+e.role : e.kind==="tech"? " "+(e.label||e.tech) : ""]); }))]));
   });
@@ -1430,19 +1843,19 @@ function tabClan(m){
 function tabServer(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/server",function(d){
-    box.appendChild(card("Сервер",[kv([["Статус",el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?"работает":"не запущен"])],
-      ["Сейчас онлайн",d.online.length],["Пик за сутки",d.online_peak]]),
-      el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:"Онлайн за 24 часа",y:"игроков",x:"время",zero:true,wide:true})])]));
-    function top(title,rows,col){ return card(title,[rows.length? table(["#","Игрок",col],rows,function(r){ return [rows.indexOf(r)+1, r.name, r.v]; })
-      : el("div",{class:"muted"},["пока нет данных"])]); }
+    box.appendChild(card(L("Сервер"),[kv([[L("Статус"),el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?L("работает"):L("не запущен")])],
+      [L("Сейчас онлайн"),d.online.length],[L("Пик за сутки"),d.online_peak]]),
+      el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:L("Онлайн за 24 часа"),y:L("игроков"),x:L("время"),zero:true,wide:true})])]));
+    function top(title,rows,col){ return card(title,[rows.length? table(["#",L("Игрок"),col],rows,function(r){ return [rows.indexOf(r)+1, r.name, r.v]; })
+      : el("div",{class:"muted"},[L("пока нет данных")])]); }
     box.appendChild(el("div",{class:"grid"},[
-      card("Сезонный рейтинг",[d.rating.length? table(["#","Игрок","Награда"],d.rating,function(r){ return [d.rating.indexOf(r)+1,r.name,r.reward? r.reward+" ускор.":""]; }) : el("div",{class:"muted"},["пока нет данных"])]),
-      top("Торговцы",d.traders,"Продаж"),
-      card("Кланы",[d.clans.length? table(["Клан","Рейтинг","За 7 дней"],d.clans,function(c){ return [c.name,c.rating,c.growth==null?"":(c.growth>0?"+":"")+c.growth]; })
-        : el("div",{class:"muted"},["пока нет данных"])])]));
-    box.appendChild(card("Сейчас на сервере ("+d.online.length+")",[d.online.length?
-      el("div",{class:"scroll"},[table(["#","Игрок","Уровень","Клан"],d.online,function(p){ return [d.online.indexOf(p)+1,p.name,p.level==null?"":p.level,p.clan||"—"]; })])
-      : el("div",{class:"muted"},["никого"])]));
+      card(L("Сезонный рейтинг"),[d.rating.length? table(["#",L("Игрок"),L("Награда")],d.rating,function(r){ return [d.rating.indexOf(r)+1,r.name,r.reward? r.reward+L(" ускор."):""]; }) : el("div",{class:"muted"},[L("пока нет данных")])]),
+      top(L("Торговцы"),d.traders,L("Продаж")),
+      card(L("Кланы"),[d.clans.length? table([L("Клан"),L("Рейтинг"),L("За 7 дней")],d.clans,function(c){ return [c.name,c.rating,c.growth==null?"":(c.growth>0?"+":"")+c.growth]; })
+        : el("div",{class:"muted"},[L("пока нет данных")])])]));
+    box.appendChild(card(L("Сейчас на сервере (")+d.online.length+")",[d.online.length?
+      el("div",{class:"scroll"},[table(["#",L("Игрок"),L("Уровень"),L("Клан")],d.online,function(p){ return [d.online.indexOf(p)+1,p.name,p.level==null?"":p.level,p.clan||"—"]; })])
+      : el("div",{class:"muted"},[L("никого")])]));
   });
 }
 
