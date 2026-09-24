@@ -300,10 +300,25 @@ class PlayerWeb:
                        "stash": inv(a.get("stash")), "carry": inv(a.get("carry")),
                        "stash_size": a.get("stash_size"), "carry_size": a.get("carry_size")},
             "sessions": {k: (d.get("sessions") or {}).get(k) for k in ("total", "total_h", "avg_min", "max_min")},
-            "friends": [{"name": f.get("name")} for f in d.get("friends") or []],
-            "deaths": ((d.get("activity") or {}).get("deaths") or [])[:10],
-            "rewards": ((d.get("activity") or {}).get("rewards") or [])[:10],
+            "friends": self._friends(d.get("friends") or []),
+            "deaths": ((d.get("activity") or {}).get("deaths") or [])[:20],
+            "rewards": ((d.get("activity") or {}).get("rewards") or [])[:50],
         }
+
+    def _friends(self, rows):
+        """Друзья — как «Сейчас на сервере»: ник, уровень, клан, в игре ли."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd or not rows:
+            return []
+        clans, online = players.load_clans(wd), players._online_now(wd)
+        out = []
+        for f in rows:
+            raw = players._read_json(players._user_file(wd, f["id"])) or {} if f.get("id") is not None else {}
+            c = clans.get(raw.get("clanId") or 0)
+            out.append({"name": f.get("name"), "level": raw.get("unitLevel"),
+                        "clan": c["name"] if c else "", "online": bool(online.get(f["id"]))})
+        out.sort(key=lambda x: (not x["online"], -(x["level"] or 0), (x["name"] or "").lower()))
+        return out
 
     _KIND_RU = {"planet": "планета", "satellite": "спутник", "asteroid": "астероид"}
 
@@ -547,9 +562,11 @@ function tabMe(m){
       card("Склад"+(d.avatar.stash_size?" ("+d.avatar.stash.length+" / "+d.avatar.stash_size+")":""),[invTable(d.avatar.stash)]),
       card("С собой"+(d.avatar.carry_size?" ("+d.avatar.carry.length+" / "+d.avatar.carry_size+")":""),[invTable(d.avatar.carry)])]));
     var extra=[];
-    if(d.friends.length) extra.push(card("Друзья",[el("div",{class:"chips"},d.friends.map(function(f){ return el("span",{class:"chip"},[f.name]); }))]));
-    if(d.deaths.length) extra.push(card("Последние смерти",[table(["Когда","Что"],d.deaths,function(x){ return [x.ts,x.event]; })]));
-    if(d.rewards.length) extra.push(card("Награды за рейтинг",[table(["Когда","Награда"],d.rewards,function(x){ return [x.ts,x.reward]; })]));
+    var sc=function(t){ return el("div",{class:"scroll",style:"max-height:320px"},[t]); };
+    if(d.friends.length) extra.push(card("Друзья ("+d.friends.length+")",[sc(table(["Игрок","Уровень","Клан"],d.friends,function(f){
+      return [el("span",{},[f.online? el("span",{class:"pill ok",title:"в игре"},["●"]):null," "+f.name]), f.level==null?"":f.level, f.clan||"—"]; }))]));
+    if(d.deaths.length) extra.push(card("Последние смерти",[sc(table(["Когда","Что"],d.deaths,function(x){ return [x.ts,x.event]; }))]));
+    if(d.rewards.length) extra.push(card("Награды за рейтинг",[sc(table(["Когда","Награда"],d.rewards,function(x){ return [x.ts,x.reward]; }))]));
     if(extra.length) box.appendChild(el("div",{class:"grid"},extra));
   });
 }
