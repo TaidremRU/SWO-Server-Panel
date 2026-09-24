@@ -435,8 +435,13 @@ class PlayerWeb:
             path, _, qs = h.path.partition("?")
             q = urllib.parse.parse_qs(qs)
             if path in ("/", "/index.html") and method == "GET":
+                try:        # версия иконки в адресе: сменили в админке — браузер не держит старую
+                    favv = int(os.path.getmtime(os.path.join(self._base, "favicon.img")))
+                except OSError:
+                    favv = 0
                 return self._send(h, 200, "text/html; charset=utf-8",
-                                  PAGE.replace("__TITLE__", html.escape(self._title())), {"Cache-Control": "no-store"})
+                                  PAGE.replace("__TITLE__", html.escape(self._title())).replace("__FAVV__", str(favv)),
+                                  {"Cache-Control": "no-store"})
             if path == "/admin" or path.startswith("/admin/"):
                 if not (self.web and self._pcfg().get("admin_proxy")):
                     return self._send(h, 404, "text/plain; charset=utf-8", "not found")
@@ -1177,7 +1182,8 @@ PAGE = r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
-header h1{font-size:16px;margin:0}
+header h1{font-size:16px;margin:0;display:flex;align-items:center;gap:8px}
+#logo{width:28px;height:28px;border-radius:6px;object-fit:contain}
 header .sp{flex:1}
 nav{display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--line)}
 nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
@@ -1229,7 +1235,7 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 </style>
 </head>
 <body>
-<header><h1 id="ttl">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="admbtn" type="button" style="display:none"></button><button id="lang" type="button" title="Русский / English"></button></header>
+<header><h1 id="ttl"><img id="logo" src="/favicon.ico?v=__FAVV__" alt="" onerror="this.remove()">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="admbtn" type="button" style="display:none"></button><button id="lang" type="button" title="Русский / English"></button></header>
 <nav id="nav" style="display:none"></nav>
 <main id="main"></main>
 <script>

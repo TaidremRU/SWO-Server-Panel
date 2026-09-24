@@ -2489,7 +2489,8 @@ html{scrollbar-color:var(--line) var(--panel);scrollbar-width:thin}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
 a{color:var(--acc)}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
-header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+#hlogo{width:26px;height:26px;border-radius:6px;object-fit:contain}
 header .sp{flex:1}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--mut);display:inline-block;margin-right:6px}
 .dot.ok{background:var(--ok)} .dot.err{background:var(--err)}
@@ -3164,7 +3165,7 @@ function header(){
   var langBtn=el("button",{class:"small",onclick:function(){ S.lang=S.lang==="ru"?"en":"ru"; localStorage.setItem("sw_lang",S.lang); render(); }},[S.lang==="ru"?"EN":"RU"]);
   var thBtn=el("button",{class:"small",title:"theme",onclick:toggleTheme},["◐"]);
   var out=[ el("span",{id:"conn",class:"dot "+(S.conn===false?"err":(S.conn?"ok":""))}),
-            el("h1",{},[S.title||t("title")]), el("span",{class:"sp"}),
+            el("h1",{},[el("img",{id:"hlogo",src:"/favicon.ico?v="+(S.favV||0),alt:"",onerror:function(){ this.remove(); }}), S.title||t("title")]), el("span",{class:"sp"}),
             el("span",{class:"muted small"},[(S.user||"")+(S.role&&S.role!=="admin"? " · "+t("role_"+S.role) : "")]), diskBadge(), langBtn, thBtn,
             el("button",{class:"small",onclick:doLogout},[t("logout")]) ];
   return el("header",{},out);
@@ -6068,6 +6069,7 @@ function logNav(body){
 // ---- название и иконка панели (config: webui.title + favicon.img в base_dir) ----
 function applyBrand(title, favV){
   if(title){ S.title=title; document.title=title; }
+  if(favV!=null){ S.favV=favV; var hl=document.getElementById("hlogo"); if(hl) hl.src="/favicon.ico?v="+favV; }
   var lk=document.getElementById("favicon");
   if(lk) lk.href="/favicon.ico?v="+(favV||0);
 }
