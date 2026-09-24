@@ -29,6 +29,8 @@ SESSION_TTL = 12 * 3600
 REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
 REMEMBER_RECHECK = 60        # как часто сверять, не сменил ли игрок пароль в игре
 LEADERS_CACHE_SEC = 300
+MAP_IMG_CACHE_SEC = 600    # одна картинка карты на всех (без клаймов), участки рисует браузер
+MARKET_CACHE_SEC = 300      # полный проход по картам — десятки секунд, считаем в фоне
 
 
 class PlayerWeb:
@@ -46,6 +48,9 @@ class PlayerWeb:
         self.throttle = Throttle()                                   # по IP
         self.nick_throttle = Throttle(max_fail=8, window=900, block=900)  # по нику (перебор с разных IP)
         self._cache = {}
+        self._market = {"data": None, "ts": 0, "running": False}
+        self._map_img = {}           # map -> (ts, png)
+        self._map_lock = threading.Lock()
         self._srv = None
 
     # ---------------------------------------------------------------- lifecycle
@@ -59,6 +64,11 @@ class PlayerWeb:
         self._srv.daemon_threads = True
         self._srv.webui = self      # _Handler зовёт server.webui.dispatch
         threading.Thread(target=self._srv.serve_forever, name="playerweb", daemon=True).start()
+        # рынок собирается минуты на больших мирах — прогреть заранее, чтобы первый игрок не ждал
+        self._market["running"] = True
+        t = threading.Timer(60, self._market_build)
+        t.daemon = True
+        t.start()
         logging.info("playerweb: панель игроков на http://%s:%d/", host, port)
 
     def stop(self):
@@ -219,6 +229,8 @@ class PlayerWeb:
             if not fn:
                 return self._json(h, {"error": "unknown"}, 404)
             d = fn(s["uid"], q)
+            if isinstance(d, (bytes, bytearray)):
+                return self._send(h, 200, "image/png", bytes(d), {"Cache-Control": "private, max-age=60"})
             return self._json(h, d, 200 if d.get("ok") else 404)
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: %s %s", method, getattr(h, "path", "?"))
@@ -353,6 +365,99 @@ class PlayerWeb:
     def _api_craft_plan(self, uid, q):
         g = lambda k: (q.get(k) or [""])[0]
         return players.craft_plan(self.cfg, g("item")[:80], g("qty") or 1, uid, None)
+
+    # ------------------------------------------------------------------ рынок
+    def _market_build(self):
+        """Из trade_report — только то, что и так видно в игре у терминала/магазина:
+        что продают, за что, продавец и его клан, где стоит магазин. Без выручки,
+        склада терминала, простоя и онлайна продавцов."""
+        try:
+            d = players.trade_report(self.cfg)
+            if d.get("ok"):
+                names = self._map_names()
+                offers = []
+                for o in d.get("offers") or []:
+                    where = "терминал"
+                    if o.get("src") == "shop":
+                        parts = (o.get("where") or "").replace("map ", "").replace(" @ ", ",").split(",")
+                        try:
+                            mp, x, y = (int(v) for v in parts[:3])
+                            where = "магазин · %s · %d, %d" % ("Космос" if mp == 0 else names.get(mp) or "карта %d" % mp, x, y)
+                        except ValueError:
+                            where = "магазин"
+                    offers.append({"src": o.get("src"), "owner_id": (o.get("owner") or {}).get("id"),
+                                   "owner": (o.get("owner") or {}).get("name"), "clan": (o.get("owner") or {}).get("clan"),
+                                   "where": where, "unit": o.get("unit"),
+                                   "give": [{"name": x["name"], "count": x["count"]} for x in o.get("give") or []],
+                                   "want": [{"name": x["name"], "count": x["count"]} for x in o.get("want") or []]})
+                self._market.update(data={"ok": True, "offers": offers}, ts=time.time())
+            else:
+                logging.warning("playerweb: рынок — %s", d.get("error"))
+        except Exception:  # noqa: BLE001
+            logging.exception("playerweb: рынок")
+        finally:
+            self._market["running"] = False
+
+    def _api_market(self, uid, q):
+        m = self._market
+        now = time.time()
+        if now - m["ts"] > MARKET_CACHE_SEC and not m["running"]:
+            m["running"] = True
+            threading.Thread(target=self._market_build, name="pw-market", daemon=True).start()
+        if not m["data"]:
+            return {"ok": True, "pending": True}
+        out = []
+        for o in m["data"]["offers"]:
+            o = dict(o)
+            o["mine"] = o.pop("owner_id") == uid
+            out.append(o)
+        return {"ok": True, "offers": out, "age_s": int(now - m["ts"]), "refreshing": m["running"]}
+
+    # ------------------------------------------------------------ карта своих участков
+    def _my_map_ids(self, uid):
+        wd = players.find_world_dir(self.cfg)
+        raw = players._read_json(players._user_file(wd, uid)) if wd else {}
+        ids = [t.get("mapId") for t in raw.get("userTerritories") or []]
+        if raw.get("mapId") is not None:
+            ids.append(raw.get("mapId"))
+        return wd, raw, [m for m in dict.fromkeys(ids) if m not in (None, 0)]
+
+    def _api_my_maps(self, uid, q):
+        wd, raw, ids = self._my_map_ids(uid)
+        names = self._map_names()
+        out = []
+        for mp in ids:
+            dim = players.map_dim(wd, mp)
+            if not dim:
+                continue
+            out.append({"map": mp, "name": names.get(mp) or "карта %s" % mp, "w": dim["w"], "h": dim["h"],
+                        "here": mp == raw.get("mapId"),
+                        "territories": [{"x": (t.get("pos") or {}).get("x"), "y": (t.get("pos") or {}).get("y")}
+                                        for t in raw.get("userTerritories") or [] if t.get("mapId") == mp]})
+        out.sort(key=lambda x: -len(x["territories"]))
+        pos = ((players._read_json(os.path.join(wd, "Data", "units", "unit%s.json" % raw["unitId"])) or {}).get("pos")
+               if raw.get("unitId") is not None else None) or {}
+        return {"ok": True, "maps": out, "me": {"map": raw.get("mapId"), "x": pos.get("x"), "y": pos.get("y")}}
+
+    def _api_my_map_image(self, uid, q):
+        """PNG карты без клаймов — одна на всех, раз в MAP_IMG_CACHE_SEC (отрисовка
+        большой карты — десятки секунд). Свои участки браузер рисует поверх. Отдаём
+        только карты, где у игрока есть участки или где он сейчас."""
+        try:
+            mp = int((q.get("map") or [""])[0])
+        except ValueError:
+            return {"ok": False, "error": "bad map"}
+        if mp not in self._my_map_ids(uid)[2]:
+            return {"ok": False, "error": "нет доступа к этой карте"}
+        with self._map_lock:     # не рисовать одну карту параллельно
+            hit = self._map_img.get(mp)
+            if hit and time.time() - hit[0] < MAP_IMG_CACHE_SEC:
+                return hit[1]
+            png, _fn, _meta = players.mapdt_image(self.cfg, mp, claims=False)
+            if not isinstance(png, (bytes, bytearray)):
+                return png or {"ok": False}
+            self._map_img[mp] = (time.time(), bytes(png))
+            return bytes(png)
 
     def _my_clan_id(self, uid):
         wd = players.find_world_dir(self.cfg)
@@ -505,7 +610,7 @@ function renderLogin(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me","Профиль"],["tech","Изучение"],["craft","Крафт"],["clan","Клан"],["server","Сервер"]];
+var TABS=[["me","Профиль"],["tech","Изучение"],["craft","Крафт"],["market","Рынок"],["map","Карта"],["clan","Клан"],["server","Сервер"]];
 function render(){
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
   if(!S.nick){ nav.style.display="none"; return renderLogin(); }
@@ -514,7 +619,7 @@ function render(){
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},["Выйти"]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
-  ({me:tabMe,tech:tabTech,craft:tabCraft,clan:tabClan,server:tabServer}[S.tab]||tabMe)(m);
+  ({me:tabMe,tech:tabTech,craft:tabCraft,market:tabMarket,map:tabMap,clan:tabClan,server:tabServer}[S.tab]||tabMe)(m);
 }
 
 // ---------------------------------------------------------------- профиль
@@ -651,6 +756,105 @@ function tabCraft(m){
   }
   m.appendChild(card("Раскладка до сырья",[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},["Посчитать"])]),
     el("div",{style:"margin-top:10px"},[plan])]));
+}
+
+// ---------------------------------------------------------------- рынок
+function fmtItems(a){ return (a||[]).map(function(x){ return x.name+" ×"+x.count; }).join(", ")||"—"; }
+function median(a){ a=a.slice().sort(function(x,y){ return x-y; }); var n=a.length; return n? (n%2? a[(n-1)/2] : (a[n/2-1]+a[n/2])/2) : null; }
+function num(v){ return v==null? "" : (v>=100? Math.round(v).toLocaleString("ru") : String(Math.round(v*100)/100)); }
+// курс простого лота: «N валюты за 1 шт», а если товар дешёвый — «1 валюты = N шт»
+function rate(o){ if(o.unit==null||!o.unit||o.give.length!==1||o.want.length!==1) return "";
+  return o.unit>=1? num(o.unit)+" "+o.want[0].name+" за 1" : "1 "+o.want[0].name+" = "+num(1/o.unit)+" шт"; }
+function tabMarket(m){
+  var q=el("input",{placeholder:"Предмет, например: Железный слиток",style:"min-width:260px;flex:1"});
+  var mode=el("select",{},[el("option",{value:"give"},["продают"]),el("option",{value:"want"},["просят взамен"]),el("option",{value:"any"},["везде"])]);
+  var info=el("div",{class:"muted small",style:"margin-top:6px"}), sum=el("div"), list=el("div"), data=null;
+  try{ q.value=localStorage.getItem("swp_mq")||""; }catch(e){}
+  function has(arr,t){ return (arr||[]).some(function(x){ return x.name.toLowerCase().indexOf(t)>=0; }); }
+  function draw(){
+    sum.innerHTML=""; list.innerHTML=""; if(!data) return;
+    try{ localStorage.setItem("swp_mq",q.value); }catch(e){}
+    var t=q.value.trim().toLowerCase(), md=mode.value;
+    var rows=data.offers.filter(function(o){ if(!t) return true;
+      return md==="give"? has(o.give,t) : md==="want"? has(o.want,t) : (has(o.give,t)||has(o.want,t)); });
+    if(t){  // сводка цен по искомому предмету: простые лоты «1 товар за 1 вид оплаты»
+      var g={}; rows.forEach(function(o){ if(o.unit==null||!o.unit||o.give.length!==1||o.want.length!==1) return;
+        var gv=o.give[0], wn=o.want[0], r;
+        if(gv.name.toLowerCase().indexOf(t)>=0) r={item:gv.name, cur:wn.name, p:wn.count/gv.count, side:"продают"};
+        else if(wn.name.toLowerCase().indexOf(t)>=0) r={item:wn.name, cur:gv.name, p:gv.count/wn.count, side:"покупают"};
+        else return;
+        var k=r.side+"|"+r.item+"|"+r.cur; (g[k]=g[k]||{item:r.item,cur:r.cur,side:r.side,u:[]}).u.push(r.p); });
+      var ps=Object.keys(g).map(function(k){ return g[k]; }).sort(function(a,b){ return b.u.length-a.u.length; });
+      if(ps.length) sum.appendChild(card("Цена за 1 шт",[table(["Товар","Сделка","Платят","Мин","Медиана","Макс","Лотов"],ps,function(x){
+        return [x.item,x.side,x.cur,num(Math.min.apply(null,x.u)),num(median(x.u)),num(Math.max.apply(null,x.u)),x.u.length]; })]));
+    }
+    rows.sort(function(a,b){ return (a.unit==null)-(b.unit==null) || (a.unit||0)-(b.unit||0); });
+    var shown=rows.slice(0,300);
+    list.appendChild(card("Предложения ("+rows.length+(rows.length>shown.length?", показаны первые "+shown.length:"")+")",[
+      rows.length? el("div",{class:"scroll",style:"max-height:600px"},[table(["Отдаёт","Просит","Курс","Продавец","Где"],shown,function(o){
+        return [fmtItems(o.give),fmtItems(o.want),rate(o),
+          el("span",{},[o.owner+(o.clan?" ["+o.clan+"]":""), o.mine? el("span",{class:"pill ok",style:"margin-left:6px"},["моё"]):null]), o.where]; })])
+      : el("div",{class:"muted"},[t? "ничего не нашлось" : "предложений нет"])]));
+  }
+  function fetchM(){
+    api("/api/market").then(function(d){
+      if(S.tab!=="market") return;
+      if(d.pending){ info.textContent="Собираю предложения со всех карт — это до пары минут, страница обновится сама…"; setTimeout(fetchM,4000); return; }
+      data=d; info.textContent="Обновлено "+(d.age_s<90? "только что" : Math.round(d.age_s/60)+" мин назад")+" · всего предложений: "+d.offers.length
+        +(d.refreshing? " · обновляю в фоне…" : ""); draw();
+    }).catch(function(e){ info.textContent=""; list.innerHTML=""; list.appendChild(errBox(e)); });
+  }
+  var tmr; q.addEventListener("input",function(){ clearTimeout(tmr); tmr=setTimeout(draw,200); }); mode.addEventListener("change",draw);
+  m.appendChild(card("Рынок",[el("div",{class:"row"},[q,mode]),info,
+    el("div",{class:"muted small"},["Терминалы игроков и магазины на картах. Курс и цены — только для простых лотов «один товар за одну валюту»; сводка цен появляется при поиске."])]));
+  m.appendChild(sum); m.appendChild(list); fetchM();
+}
+
+// ---------------------------------------------------------------- карта своих участков
+function tabMap(m){
+  var box=el("div"); m.appendChild(box);
+  load(box,"/api/my-maps",function(d){
+    if(!d.maps.length){ box.appendChild(card("Карта",[el("div",{class:"muted"},["У вас пока нет участков."])])); return; }
+    var sel=el("select",{}), zoom=1, cur=null, sc=1;
+    d.maps.forEach(function(x,i){ sel.appendChild(el("option",{value:i},[x.name+" · участков: "+x.territories.length+(x.here?" · вы здесь":"")])); });
+    var img=el("img",{alt:"",style:"display:block;image-rendering:pixelated;max-width:none"});
+    var layer=el("div",{style:"position:relative;display:inline-block"},[img]);
+    var view=el("div",{style:"overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:8px;background:#000"},[layer]);
+    var tlist=el("div"), note=el("span",{class:"muted small"});
+    function place(){
+      if(!img.naturalWidth) return;
+      sc=img.naturalWidth/cur.w; img.style.width=(img.naturalWidth*zoom)+"px";
+      [].slice.call(layer.querySelectorAll(".mk")).forEach(function(e){ e.remove(); });
+      var k=sc*zoom;
+      cur.territories.forEach(function(t){ layer.appendChild(el("div",{class:"mk",title:"мой участок "+t.x+", "+t.y,
+        style:"position:absolute;left:"+(t.x*8*k)+"px;top:"+((cur.h-t.y*8-8)*k)+"px;width:"+(8*k)+"px;height:"+(8*k)+"px;"
+          +"background:rgba(80,255,120,.35);outline:2px solid #3fff7a;box-sizing:border-box"})); });
+      if(d.me.map===cur.map && d.me.x!=null) layer.appendChild(el("div",{class:"mk",title:"вы здесь",
+        style:"position:absolute;left:"+(d.me.x*k-6)+"px;top:"+((cur.h-d.me.y)*k-6)+"px;width:12px;height:12px;border-radius:50%;background:#ff3b30;border:2px solid #fff;box-shadow:0 0 4px #000"}));
+    }
+    // x, y — клетки игры; картинка нарисована с осью Y вверх (как в игре), поэтому строка = h - y
+    function focus(x,y){ var k=sc*zoom; view.scrollLeft=x*k-view.clientWidth/2; view.scrollTop=(cur.h-y)*k-view.clientHeight/2; }
+    function focusMine(){ var t=cur.territories;
+      if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); focus(cx/t.length,cy/t.length); }
+      else if(d.me.map===cur.map) focus(d.me.x,d.me.y); }
+    function setZoom(z){ var k0=sc*zoom, mx=(view.scrollLeft+view.clientWidth/2)/k0, my=cur.h-(view.scrollTop+view.clientHeight/2)/k0;
+      zoom=Math.max(1,Math.min(8,z)); place(); focus(mx,my); note.textContent="×"+zoom; }
+    function show(){
+      cur=d.maps[+sel.value]; zoom=4; note.textContent="×"+zoom; img.removeAttribute("src");
+      img.onload=function(){ place(); focusMine(); };
+      img.src="/api/my-map-image?map="+cur.map;
+      tlist.innerHTML="";
+      if(cur.territories.length) tlist.appendChild(card("Участки на этой карте ("+cur.territories.length+")",[el("div",{class:"scroll",style:"max-height:260px"},[
+        table(["#","Участок (X, Y)","Клетки",""],cur.territories,function(t){ return [cur.territories.indexOf(t)+1, t.x+", "+t.y,
+          (t.x*8)+"–"+(t.x*8+7)+", "+(t.y*8)+"–"+(t.y*8+7), el("button",{onclick:function(){ focus(t.x*8+4,t.y*8+4); view.scrollIntoView({block:"nearest"}); }},["показать"])]; })])]));
+    }
+    sel.addEventListener("change",show);
+    box.appendChild(card("Мои участки на карте",[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
+      el("button",{onclick:function(){ setZoom(zoom-1); }},["−"]), el("button",{onclick:function(){ setZoom(zoom+1); }},["+"]), note,
+      el("button",{onclick:focusMine},["к моим участкам"])]),
+      el("div",{class:"muted small",style:"margin-bottom:6px"},["Зелёные квадраты — ваши участки, красная точка — вы. Первая загрузка карты может занять до минуты."]), view]));
+    box.appendChild(tlist); show();
+  });
 }
 
 // ---------------------------------------------------------------- клан
