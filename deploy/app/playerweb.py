@@ -435,6 +435,9 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden} .bar>i{display:block;height:100%;background:var(--acc)}
 .login{max-width:340px;margin:60px auto} .login input{width:100%;margin-bottom:10px}
 .scroll{max-height:420px;overflow:auto}
+/* карточка-колонка: .grow забирает всю оставшуюся высоту (ряд грида тянет карточки до самой высокой) */
+.card.fill{display:flex;flex-direction:column}
+.card.fill>.grow{flex:1 1 0;min-height:80px;max-height:none;overflow:auto;align-content:flex-start}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 @media (max-width:600px){main{padding:10px}}
 </style>
@@ -530,14 +533,15 @@ function tabMe(m){
     var lp=(d.avatar.long_params||[]).map(function(x){ return [LPARAM[x.type]||("#"+x.type), x.val]; });
     var av=card("Аватар",[kv(lp), el("div",{style:"margin-top:10px"},params)]);
     var ab=card("Способности"+((d.avatar.abilities||[]).length?" ("+d.avatar.abilities.length+")":""),[(d.avatar.abilities||[]).length?
-      el("div",{class:"chips scroll",style:"max-height:360px"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))
+      el("div",{class:"chips grow"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))
       : el("div",{class:"muted"},["нет"])]);
     var pos=d.position||{};
-    var terr=(pos.territories||[]).length? el("div",{class:"scroll",style:"max-height:200px"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map_name,t.x,t.y]; })])
+    var terr=(pos.territories||[]).length? el("div",{class:"grow"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map_name,t.x,t.y]; })])
       : el("div",{class:"muted"},["нет территорий"]);
     var where=card("Где я",[kv([["Карта",pos.map_name],["Координаты",pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
       ["Точка возрождения",pos.respawn? pos.respawn.map_name+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
       el("div",{class:"muted small",style:"margin:10px 0 4px"},["Мои территории"]), terr]);
+    ab.classList.add("fill"); where.classList.add("fill");
     box.appendChild(el("div",{class:"grid"},[head,av,ab,where]));
     box.appendChild(el("div",{class:"grid"},[
       card("Склад"+(d.avatar.stash_size?" ("+d.avatar.stash.length+" / "+d.avatar.stash_size+")":""),[invTable(d.avatar.stash)]),
