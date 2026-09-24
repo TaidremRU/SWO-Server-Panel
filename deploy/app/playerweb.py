@@ -276,19 +276,24 @@ class PlayerWeb:
             return {"ok": True, "none": True}
         d = players.clan_detail(self.cfg, cid)
         if d.get("ok"):
+            # техи/исследования/часы участников — их личное, в панель игрока не отдаём
+            d.pop("coverage", None)
+            d["members"] = [{k: m.get(k) for k in ("id", "name", "role", "role_name", "rating", "clan_point",
+                                                   "online", "level", "last_seen_h", "spec")}
+                            for m in d.get("members") or []]
             d["history"] = players.clan_history(self.cfg, cid, self._ct_events, self._ct_points, 30)
         return d
 
     def _api_server(self, uid, q):
         snap = self.state.data.get("last_snapshot") or {}
         wd = players.find_world_dir(self.cfg)
-        online, total = [], 0
+        online = []
         if wd:
             names = players.load_user_list(wd)
-            total = len(names)
             online = sorted(names.get(u) or ("id %s" % u) for u, on in players._online_now(wd).items() if on)
         lb = self._cached("leaders", LEADERS_CACHE_SEC,
                           lambda: players.leaderboards(self.cfg, self._tt_log, self._ct_points))
+        ser = self._cached("online24", 120, lambda: players.online_series_recent(self.cfg, 24))
         rt = self._cached("rating", LEADERS_CACHE_SEC, lambda: players.rating_top(self.cfg, 10))
         # «id N» — аккаунта уже нет в user_list (удалён) — игрокам такие строки ни к чему
         strip = lambda rows: [{"name": r.get("name"), "v": r.get("v")} for r in rows or []
@@ -297,10 +302,10 @@ class PlayerWeb:
             "ok": True,
             "game_up": bool((snap.get("game") or {}).get("running")),
             "snapshot_age": int(time.time() - snap["ts"]) if snap.get("ts") else None,
-            "online": online, "players_total": total,
+            "online": online,
+            "online_series": [{"t": p["t"], "v": p["n"]} for p in ser.get("series") or []],
+            "online_peak": ser.get("peak"),
             "rating": [{"name": r["name"], "reward": r["reward"]} for r in rt.get("top") or []],
-            "research_week": strip(lb.get("research_week")),
-            "research_total": strip(lb.get("research_total")),
             "traders": strip(lb.get("traders")),
             "clans": [{"name": c.get("name"), "rating": c.get("rating"), "growth": c.get("growth")}
                       for c in lb.get("clans") or []],
@@ -436,9 +441,9 @@ function tabMe(m){
     var lp=(d.avatar.long_params||[]).map(function(x){ return [LPARAM[x.type]||("#"+x.type), x.val]; });
     var av=card("Аватар",[kv(lp)].concat([el("div",{style:"margin-top:10px"},params)],
       (d.avatar.abilities||[]).length? [el("div",{class:"muted small",style:"margin-top:8px"},["Способности"]),
-        el("div",{class:"chips"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))] : []));
+        el("div",{class:"chips scroll",style:"max-height:120px"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))] : []));
     var pos=d.position||{};
-    var terr=(pos.territories||[]).length? table(["Карта","X","Y"],pos.territories,function(t){ return [t.map,t.x,t.y]; })
+    var terr=(pos.territories||[]).length? el("div",{class:"scroll",style:"max-height:200px"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map,t.x,t.y]; })])
       : el("div",{class:"muted"},["нет территорий"]);
     var where=card("Где я",[kv([["Карта",pos.map],["Координаты",pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
       ["Точка возрождения",pos.respawn? "карта "+pos.respawn.map+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
@@ -553,13 +558,32 @@ function tabCraft(m){
 
 // ---------------------------------------------------------------- клан
 var CE={joined:"вступил",left:"ушёл",role:"роль",tech:"клан-технология",renamed:"переименован",slots:"слоты",created:"создан",disbanded:"распущен"};
-function spark(pts,title){
-  var W=300,H=70,P=4, box=el("div",{style:"flex:1;min-width:200px"},[el("div",{class:"small muted"},[title+(pts.length?": "+pts[pts.length-1].v:"")])]);
-  if(pts.length<2) return box;
+// Линейный график с осями: Y — 3 деления (мин/середина/макс), X — время.
+function chart(pts,o){
+  o=o||{}; var W=520,H=200,L=44,R=10,T=10,B=34;
+  var box=el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[o.title||""])]);
+  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},["мало данных"])); return box; }
   var t0=pts[0].t,t1=pts[pts.length-1].t,lo=Infinity,hi=-Infinity; pts.forEach(function(p){ lo=Math.min(lo,p.v); hi=Math.max(hi,p.v); });
-  if(hi===lo){ hi++; lo--; }
-  var d=pts.map(function(p,i){ return (i?"L":"M")+(P+(W-2*P)*(p.t-t0)/((t1-t0)||1)).toFixed(1)+" "+(H-P-(H-2*P)*(p.v-lo)/(hi-lo)).toFixed(1); }).join(" ");
-  box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,preserveAspectRatio:"none",style:"width:100%;height:70px"},[svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2","vector-effect":"non-scaling-stroke"})]));
+  if(o.zero) lo=Math.min(0,lo);
+  if(hi===lo){ hi+=1; if(!o.zero) lo-=1; }
+  function X(t){ return L+(W-L-R)*(t-t0)/((t1-t0)||1); } function Y(v){ return T+(H-T-B)*(1-(v-lo)/(hi-lo)); }
+  var fmt=function(v){ return Math.abs(v)>=1000? Math.round(v).toLocaleString("ru") : String(Math.round(v*10)/10); };
+  var kids=[];
+  [lo,(lo+hi)/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:L,x2:W-R,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-dasharray":"3 3"}));
+    kids.push(svgEl("text",{x:L-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[fmt(v)])); });
+  var span=t1-t0, n=4;
+  for(var i=0;i<=n;i++){ var t=t0+span*i/n, d=new Date(t*1000);
+    var lab= span>2*86400? (d.getDate()+"."+String(d.getMonth()+1).padStart(2,"0")) : (String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"));
+    kids.push(svgEl("line",{x1:X(t),x2:X(t),y1:H-B,y2:H-B+4,stroke:"var(--mut)"}));
+    kids.push(svgEl("text",{x:X(t),y:H-B+16,"text-anchor":i===0?"start":i===n?"end":"middle","font-size":"11",fill:"var(--mut)"},[lab])); }
+  kids.push(svgEl("line",{x1:L,x2:W-R,y1:H-B,y2:H-B,stroke:"var(--mut)"}));
+  kids.push(svgEl("line",{x1:L,x2:L,y1:T,y2:H-B,stroke:"var(--mut)"}));
+  var d=pts.map(function(p,i){ return (i?"L":"M")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1); }).join(" ");
+  kids.push(svgEl("path",{d:d+" L"+X(t1)+" "+(H-B)+" L"+X(t0)+" "+(H-B)+" Z",fill:"var(--acc)","fill-opacity":"0.12",stroke:"none"}));
+  kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2"}));
+  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[o.x||"время"]));
+  kids.push(svgEl("text",{x:12,y:(T+H-B)/2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)",transform:"rotate(-90 12 "+((T+H-B)/2)+")"},[o.y||""]));
+  box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;max-width:640px;height:auto;display:block"},kids));
   return box;
 }
 function tabClan(m){
@@ -569,13 +593,13 @@ function tabClan(m){
     box.appendChild(card(d.name,[kv([["Участников",d.size+(d.max?" / "+d.max:"")],["Сейчас в игре",d.online],["Рейтинг",d.rating],
       ["Очки клана",d.clan_point],["Клан-технологий",d.tech.length]]),
       d.tech_named.length? el("div",{class:"chips",style:"margin-top:8px"},d.tech_named.map(function(x){ return el("span",{class:"chip"},[x.label]); })) : null]));
-    box.appendChild(card("Состав",[el("div",{class:"scroll"},[table(["Игрок","Роль","Уровень","Специализация","Техов","Изучает","Был"],d.members,function(x){
+    box.appendChild(card("Состав",[el("div",{class:"scroll"},[table(["Игрок","Роль","Уровень","Специализация","Был"],d.members,function(x){
       return [el("span",{},[x.online? el("span",{class:"pill ok"},["●"]):null," "+x.name]), x.role_name, x.level==null?"":x.level,
-        x.spec? "+"+x.spec.positive+" / −"+x.spec.negative : "", x.tech_count, x.researching,
+        x.spec? "+"+x.spec.positive+" / −"+x.spec.negative : "",
         x.online? "сейчас" : (x.last_seen_h==null? "" : x.last_seen_h<48? x.last_seen_h+" ч назад" : Math.round(x.last_seen_h/24)+" дн назад")]; })])]));
     var h=d.history||{};
     if(h.series&&h.series.length>1){ var s=function(k){ return h.series.map(function(p){ return {t:p.t,v:p[k]}; }); };
-      box.appendChild(card("Рост клана (30 дней)",[el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[spark(s("rating"),"Рейтинг"),spark(s("cp"),"Очки клана"),spark(s("size"),"Состав")])])); }
+      box.appendChild(card("Рост клана (30 дней)",[el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[chart(s("rating"),{title:"Рейтинг",y:"рейтинг",x:"дата"}),chart(s("cp"),{title:"Очки клана",y:"очки",x:"дата"}),chart(s("size"),{title:"Состав",y:"участников",x:"дата",zero:true})])])); }
     if(h.events&&h.events.length) box.appendChild(card("События",[el("div",{class:"scroll small"},h.events.slice(0,100).map(function(e){
       return el("div",{},[el("span",{class:"muted"},[e.ts+"  "]), (CE[e.kind]||e.kind)+" ", e.name||"",
         e.kind==="role"? " "+e.was+" → "+e.role : e.kind==="tech"? " "+(e.label||e.tech) : ""]); }))]));
@@ -587,17 +611,17 @@ function tabServer(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/server",function(d){
     box.appendChild(card("Сервер",[kv([["Статус",el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?"работает":"не запущен"])],
-      ["Онлайн",d.online.length+" из "+d.players_total]]),
-      d.online.length? el("div",{class:"chips",style:"margin-top:8px"},d.online.map(function(n){ return el("span",{class:"chip"},[n]); })) : null]));
+      ["Сейчас онлайн",d.online.length],["Пик за сутки",d.online_peak]]),
+      el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:"Онлайн за 24 часа",y:"игроков",x:"время",zero:true})])]));
     function top(title,rows,col){ return card(title,[rows.length? table(["#","Игрок",col],rows,function(r){ return [rows.indexOf(r)+1, r.name, r.v]; })
       : el("div",{class:"muted"},["пока нет данных"])]); }
     box.appendChild(el("div",{class:"grid"},[
       card("Сезонный рейтинг",[d.rating.length? table(["#","Игрок","Награда"],d.rating,function(r){ return [d.rating.indexOf(r)+1,r.name,r.reward? r.reward+" ускор.":""]; }) : el("div",{class:"muted"},["пока нет данных"])]),
-      top("Исследования за неделю",d.research_week,"Техов"),
-      top("Всего часов исследований",d.research_total,"Часов"),
       top("Торговцы",d.traders,"Продаж"),
       card("Кланы",[d.clans.length? table(["Клан","Рейтинг","За 7 дней"],d.clans,function(c){ return [c.name,c.rating,c.growth==null?"":(c.growth>0?"+":"")+c.growth]; })
         : el("div",{class:"muted"},["пока нет данных"])])]));
+    box.appendChild(card("Сейчас на сервере ("+d.online.length+")",[d.online.length? el("div",{class:"chips"},d.online.map(function(n){ return el("span",{class:"chip"},[n]); }))
+      : el("div",{class:"muted"},["никого"])]));
   });
 }
 
