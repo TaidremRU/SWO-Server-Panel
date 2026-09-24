@@ -22,6 +22,7 @@ inv_track_state.json
 # --- веб-панель: локальные креды и аудит ---
 webui_auth.json
 playerweb_remember.json
+playerweb_explored.json
 webui_audit.log
 webui_auth_selftest.json
 

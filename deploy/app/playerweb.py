@@ -13,6 +13,7 @@
 import hashlib
 import html
 import http.cookies
+import collections
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import secrets
 import threading
 import time
 import urllib.parse
+from datetime import datetime
 from http.server import ThreadingHTTPServer
 
 import players
@@ -32,7 +34,19 @@ LEADERS_CACHE_SEC = 300
 MAP_IMG_CACHE_SEC = 600    # сырые пиксели карты (без клаймов) — одни на всех, туман накладывается на каждый запрос
 FOG_RADIUS = 20            # клеток: видно вокруг персонажа и вокруг своих участков
 FOG_RGB = (22, 25, 31)
+SAMPLE_SEC = 120           # фоновый цикл: где бывали онлайн-игроки (открытые места карты), прогрев карт
+HISTORY_SEC = 3600         # почасовой снимок уровня/рейтинга/техов всех игроков для «Моей истории»
 MARKET_CACHE_SEC = 300      # полный проход по картам — десятки секунд, считаем в фоне
+
+
+def _epoch(ts):
+    """Время из журналов: игра пишет «24.09.2026 12:00:00», панель — «2026-09-24 12:00:00»."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(str(ts), fmt).timestamp()
+        except ValueError:
+            continue
+    return 0.0
 
 
 class PlayerWeb:
@@ -53,6 +67,14 @@ class PlayerWeb:
         self._market = {"data": None, "ts": 0, "running": False}
         self._map_img = {}           # map -> (ts, {w, h, pixels})
         self._map_lock = threading.Lock()
+        self._map_busy = set()       # карты, которые сейчас перерисовываются в фоне
+        self._map_seen = {}          # map -> когда её последний раз смотрели (что держать тёплым)
+        self._trade_own = {"terminals": [], "shops": []}   # с id владельцев — наружу только своё
+        self._explored_path = os.path.join(base, "playerweb_explored.json")
+        self._explored = players._read_json(self._explored_path) or {}   # "uid" -> {"map": [[bx, by], ...]}
+        self._elock = threading.Lock()
+        self._hist_path = os.path.join(base, "logs", "player_points.jsonl")
+        self._stop = threading.Event()
         self._srv = None
 
     # ---------------------------------------------------------------- lifecycle
@@ -71,15 +93,98 @@ class PlayerWeb:
         t = threading.Timer(60, self._market_build)
         t.daemon = True
         t.start()
+        threading.Thread(target=self._bg_loop, name="pw-bg", daemon=True).start()
         logging.info("playerweb: панель игроков на http://%s:%d/", host, port)
 
     def stop(self):
+        self._stop.set()
         try:
             if self._srv:
                 self._srv.shutdown()
                 self._srv.server_close()
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: ошибка остановки")
+
+    # ------------------------------------------------------------ фоновый цикл
+    def _bg_loop(self):
+        """Раз в SAMPLE_SEC: блоки 8×8, где стоят онлайн-игроки (туман войны
+        запоминает исследованное), прогрев карт онлайн-игроков; раз в час —
+        снимок уровня/рейтинга/техов для «Моей истории»."""
+        if self._stop.wait(30):
+            return
+        last_hist = 0
+        for ln in players._read_text(self._hist_path, tail_bytes=200_000).splitlines()[-1:]:
+            try:
+                last_hist = json.loads(ln).get("t", 0)
+            except ValueError:
+                pass
+        while not self._stop.is_set():
+            warm = set()
+            try:
+                wd = players.find_world_dir(self.cfg)
+                if wd:
+                    warm = self._sample_explored(wd)
+                    if time.time() - last_hist >= HISTORY_SEC:
+                        self._history_snapshot(wd)
+                        last_hist = time.time()
+            except Exception:  # noqa: BLE001
+                logging.exception("playerweb: фоновый цикл")
+            now = time.time()
+            warm |= {m for m, ts in self._map_seen.items() if now - ts < 3600}
+            for mp in sorted(warm):
+                if self._stop.is_set():
+                    return
+                hit = self._map_img.get(mp)
+                if not hit or now - hit[0] >= MAP_IMG_CACHE_SEC - SAMPLE_SEC:
+                    self._map_refresh(mp)
+            if self._stop.wait(SAMPLE_SEC):
+                return
+
+    def _sample_explored(self, wd):
+        """-> карты онлайн-игроков, у которых открыта панель (их стоит держать
+        тёплыми: перерисовка карты — десятки секунд, всё подряд греть накладно)."""
+        maps, changed = set(), False
+        with self._slock:
+            panel_uids = {v["uid"] for v in self._sessions.values()}
+        for u, on in players._online_now(wd).items():
+            if not on:
+                continue
+            raw = players._read_json(players._user_file(wd, u)) or {}
+            pos = self._my_pos(wd, raw)
+            if pos.get("map") in (None, 0) or pos.get("x") is None:
+                continue
+            if u in panel_uids:
+                maps.add(pos["map"])
+                maps.update(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId"))
+            b = [int(pos["x"]) // 8, int(pos["y"]) // 8]
+            with self._elock:
+                lst = self._explored.setdefault(str(u), {}).setdefault(str(pos["map"]), [])
+                if b not in lst:
+                    lst.append(b)
+                    changed = True
+        if changed:
+            with self._elock:
+                tmp = self._explored_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self._explored, f, separators=(",", ":"))
+                os.replace(tmp, self._explored_path)
+        return maps
+
+    def _history_snapshot(self, wd):
+        tcost = players._load_ref(wd, "tech.json", "id", "cost")
+        row = {}
+        for u in players.load_user_list(wd):
+            raw = players._read_json(players._user_file(wd, u)) or {}
+            if not raw:
+                continue
+            techs = raw.get("techList") or []
+            row[str(u)] = [raw.get("unitLevel"), raw.get("addRating"), len(techs),
+                           round(float(raw.get("timeGame") or 0) / 3600.0, 1),
+                           round(sum(tcost.get(t) or 0 for t in techs) / 60.0, 1)]
+        os.makedirs(os.path.dirname(self._hist_path), exist_ok=True)
+        with open(self._hist_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": int(time.time()), "u": row}, separators=(",", ":")) + "\n")
+        logging.info("playerweb: снимок истории (%d игроков)", len(row))
 
     # ------------------------------------------------------------------ helpers
     def _send(self, h, status, ctype, body, extra=None):
@@ -392,6 +497,16 @@ class PlayerWeb:
                                    "where": where, "unit": o.get("unit"),
                                    "give": [{"name": x["name"], "count": x["count"]} for x in o.get("give") or []],
                                    "want": [{"name": x["name"], "count": x["count"]} for x in o.get("want") or []]})
+                it = lambda xs: [{"name": x["name"], "count": x["count"]} for x in xs or []]
+                names = self._map_names()
+                self._trade_own = {
+                    "terminals": [{"owner_id": t["owner"]["id"], "sales": t["sales"], "lots": t["lots"],
+                                   "idle_h": t.get("idle_h"), "storage": it(t.get("storage"))}
+                                  for t in d.get("terminals") or []],
+                    "shops": [{"owner_id": sh["owner"]["id"], "sales": sh["sales"], "slots": sh["slots"],
+                               "where": "%s · %d, %d" % ("Космос" if sh["map"] == 0 else names.get(sh["map"]) or "карта %s" % sh["map"], sh["x"], sh["y"]),
+                               "map": sh["map"], "x": sh["x"], "y": sh["y"], "storage": it(sh.get("storage"))}
+                              for sh in d.get("shops") or []]}
                 self._market.update(data={"ok": True, "offers": offers}, ts=time.time())
             else:
                 logging.warning("playerweb: рынок — %s", d.get("error"))
@@ -415,6 +530,150 @@ class PlayerWeb:
             out.append(o)
         return {"ok": True, "offers": out, "age_s": int(now - m["ts"]), "refreshing": m["running"]}
 
+    def _api_my_trade(self, uid, q):
+        """Своя торговля: терминал, магазины, свои лоты (из того же фонового прохода)."""
+        m = self._market
+        if not m["data"]:
+            return {"ok": True, "pending": True}
+        strip = lambda r: {k: v for k, v in r.items() if k != "owner_id"}
+        mine = [dict(o, mine=True) for o in m["data"]["offers"] if o.get("owner_id") == uid]
+        return {"ok": True, "age_s": int(time.time() - m["ts"]),
+                "terminals": [strip(t) for t in self._trade_own["terminals"] if t["owner_id"] == uid],
+                "shops": [strip(sh) for sh in self._trade_own["shops"] if sh["owner_id"] == uid],
+                "offers": [{k: v for k, v in o.items() if k != "owner_id"} for o in mine]}
+
+    # ------------------------------------------------------------------ история
+    def _api_history(self, uid, q):
+        """Мои графики по часовым снимкам + техи задним числом из журнала трекинга."""
+        pts = []
+        for ln in players._read_text(self._hist_path, tail_bytes=30_000_000).splitlines():
+            try:
+                p = json.loads(ln)
+            except ValueError:
+                continue
+            v = (p.get("u") or {}).get(str(uid))
+            if v:
+                pts.append({"t": p["t"], "level": v[0], "rating": v[1], "techs": v[2], "play_h": v[3], "research_h": v[4]})
+        # техи до начала снимков — восстановить назад от первого снимка по tech_gained
+        wd = players.find_world_dir(self.cfg)
+        raw = players._read_json(players._user_file(wd, uid)) if wd else {}
+        n = len(raw.get("techList") or [])
+        gains = []
+        for ln in players._read_text(self._tt_log, tail_bytes=20_000_000).splitlines():
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if e.get("uid") == uid and e.get("kind") == "tech_gained":
+                try:
+                    gains.append((_epoch(e["ts"]), int(e.get("count") or 0)))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        tser, cur = [{"t": int(time.time()), "v": n}], n
+        for ts, c in sorted(gains, reverse=True):
+            tser.append({"t": int(ts), "v": cur})
+            cur -= c
+            tser.append({"t": int(ts) - 1, "v": cur})
+        tser.reverse()
+        return {"ok": True, "points": pts, "techs": tser,
+                "since": pts[0]["t"] if pts else None}
+
+    # ---------------------------------------------------------------- справочник
+    _STAT_RU = [("stack", "В стопке"), ("durability", "Прочность"), ("damage", "Урон"), ("speedAttack", "Скорость атаки"),
+                ("rangeAttack", "Дальность"), ("countAttack", "Атак"), ("shield", "Щит"), ("nutrition", "Питательность"),
+                ("eat", "Сытость"), ("energy", "Энергия"), ("accelerationMining", "Ускорение добычи"),
+                ("countMining", "Добыча за удар"), ("engineFuel", "Топливо двигателя"), ("itemFuel", "Топливо"),
+                ("transportSlot", "Слотов транспорта"), ("clothes", "Одежда")]
+
+    def _api_handbook(self, uid, q):
+        """Без ?item — список предметов; с ?item=<slug> — карточка: свойства, как
+        получить (рецепт/станок, техи), куда идёт, сколько лотов на рынке."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        by_id, by_name = players._items_full(wd)
+        slug = (q.get("item") or [""])[0][:80]
+        if not slug:
+            return self._cached("handbook", 600, lambda: {"ok": True, "items": sorted(
+                ({"id": d["name"], "name": players.item_label(d["name"])} for d in by_id.values() if d.get("name")),
+                key=lambda x: x["name"].lower())})
+        d = by_name.get(slug)
+        if not d:
+            return {"ok": False, "error": "нет такого предмета"}
+        cd = players._craft_data(wd) or {"recipes": {}, "machine": {}, "uses": {}}
+        known = set((players._read_json(players._user_file(wd, uid)) or {}).get("techList") or [])
+        r = cd["recipes"].get(slug)
+        recipe = None
+        if r:
+            recipe = {"out": r["count"], "time": r["time"], "workbench": players.item_label(r["workbench"]) if r["workbench"] else "",
+                      "tech": players.tech_label(wd, r["tech"]) if r["tech"] else "", "tech_known": (r["tech"] in known) if r["tech"] else None,
+                      "res": [{"id": rid, "name": players.item_label(rid), "n": n} for rid, n in r["res"]]}
+        mach = [{"machine": players.item_label(mid), "machine_id": mid, "from": players.item_label(mat), "from_id": mat, "energy": en}
+                for mid, mat, en in cd["machine"].get(slug) or []]
+        uses = sorted({u for u in cd["uses"].get(slug) or []}, key=lambda u: players.item_label(u).lower())
+        stats = [[lbl, d[k]] for k, lbl in self._STAT_RU if d.get(k) not in (None, 0, False, "")]
+        label = players.item_label(slug)
+        mk = self._market["data"]
+        on_market = None
+        if mk:
+            on_market = {"sell": sum(1 for o in mk["offers"] if any(x["name"] == label for x in o["give"])),
+                         "buy": sum(1 for o in mk["offers"] if any(x["name"] == label for x in o["want"]))}
+        return {"ok": True, "id": slug, "name": label, "stats": stats, "recipe": recipe, "machine": mach,
+                "used_in": [{"id": u, "name": players.item_label(u)} for u in uses],
+                "flags": [f for k, f in (("isProduct", "еда"), ("isBuff", "ингредиент микстур"), ("isPlant", "растение"),
+                                         ("isClothes", "одежда"), ("tool", "инструмент"), ("build", "строится"),
+                                         ("isMachineWeapon", "оружие техники")) if d.get(k)],
+                "on_market": on_market}
+
+    # ---------------------------------------------------------------------- чат
+    def _api_chat(self, uid, q):
+        """Общие каналы — целиком; клановый — только сообщения нынешних участников
+        моего клана (в логе игры клановые чаты всех кланов в одном файле, клан у
+        строки не записан); личные — только мои (от меня и мне)."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        ch = (q.get("ch") or ["global"])[0]
+        qq = ((q.get("q") or [""])[0] or "").strip().lower()[:80]
+        names = players.load_user_list(wd)
+        me = names.get(uid)
+        if ch == "private":
+            rows = []
+            for ln in players._read_text(os.path.join(wd, "Logs", "chat_privat.txt")).splitlines():
+                m = players._PRIV_RX.match(ln)
+                if m and me and (m.group(2) == me or m.group(3) == me):
+                    rows.append({"ts": m.group(1), "nick": m.group(2), "to": m.group(3), "text": m.group(4),
+                                 "out": m.group(2) == me})
+        else:
+            if ch not in ("global", "global2", "ru", "clan"):
+                return {"ok": False, "error": "нет такого канала"}
+            rows = [r for r in players._all_chat(wd) if r["channel"] == ch]
+            if ch == "clan":
+                cid = self._my_clan_id(uid)
+                c = next((x for x in players._clans_raw(wd) if x.get("id") == cid), None) if cid else None
+                mates = {names.get(u.get("userId")) for u in (c or {}).get("users") or []}
+                rows = [r for r in rows if r["nick"] in mates] if c else []
+            rows = [{"ts": r["ts"], "nick": r["nick"], "text": r["text"]} for r in rows]
+        if qq:
+            rows = [r for r in rows if qq in r["text"].lower() or qq in r["nick"].lower()]
+        return {"ok": True, "ch": ch, "total": len(rows), "messages": rows[-300:][::-1]}
+
+    def _api_events(self, uid, q):
+        """Лента сервера: новые игроки, смерти, события кланов (создан/распущен/переименован)."""
+        d = self._cached("events", 60, lambda: players.server_events(self.cfg, 400, ["register", "death"]))
+        ev = [{"ts": e["ts"], "epoch": e["epoch"], "kind": e["kind"], "who": e["actor"], "detail": e.get("detail") or ""}
+              for e in d.get("events") or []]
+        for ln in players._read_text(self._ct_events, tail_bytes=1_000_000).splitlines():
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if e.get("kind") in ("created", "disbanded", "renamed"):
+                ev.append({"ts": e.get("ts"), "epoch": _epoch(e.get("ts")), "kind": "clan_" + e["kind"],
+                           "who": e.get("clan_name") or "", "detail": e.get("was") or ""})
+        ev.sort(key=lambda e: -(e["epoch"] or 0))
+        return {"ok": True, "events": ev[:300]}
+
     # ------------------------------------------------------------ карта своих участков
     def _my_map_ids(self, uid):
         wd = players.find_world_dir(self.cfg)
@@ -422,6 +681,8 @@ class PlayerWeb:
         ids = [t.get("mapId") for t in raw.get("userTerritories") or []]
         if raw.get("mapId") is not None:
             ids.append(raw.get("mapId"))
+        with self._elock:   # и карты, где бывал раньше
+            ids += [int(k) for k, v in (self._explored.get(str(uid)) or {}).items() if v]
         return wd, raw, [m for m in dict.fromkeys(ids) if m not in (None, 0)]
 
     def _api_my_maps(self, uid, q):
@@ -470,21 +731,55 @@ class PlayerWeb:
         wd, raw, ids = self._my_map_ids(uid)
         if mp not in ids:
             return {"ok": False, "error": "нет доступа к этой карте"}
-        with self._map_lock:     # не рисовать одну карту параллельно
-            hit = self._map_img.get(mp)
-            if not hit or time.time() - hit[0] >= MAP_IMG_CACHE_SEC:
-                d = players.map_pixels(self.cfg, mp)
-                if not d.get("ok"):
-                    return d
-                hit = self._map_img[mp] = (time.time(), d)
-        m = hit[1]
+        self._map_seen[mp] = time.time()
+        m = self._map_get(mp)
+        if not m.get("ok"):
+            return m
         rects = [(t["x"] * 8, t["y"] * 8, t["x"] * 8 + 7, t["y"] * 8 + 7)
                  for t in ((tt.get("pos") or {}) for tt in raw.get("userTerritories") or [] if tt.get("mapId") == mp)
                  if t.get("x") is not None and t.get("y") is not None]
         me = self._my_pos(wd, raw)
         if me.get("map") == mp and me.get("x") is not None:
             rects.append((me["x"], me["y"], me["x"], me["y"]))
+        with self._elock:   # где бывал раньше — тоже открыто (центр блока 8×8)
+            rects += [(bx * 8 + 4, by * 8 + 4, bx * 8 + 4, by * 8 + 4)
+                      for bx, by in (self._explored.get(str(uid)) or {}).get(str(mp)) or []]
         return players.mapdt._png_bytes(m["w"], m["h"], self._fog(m["w"], m["h"], m["pixels"], rects, FOG_RADIUS), 1)
+
+    def _map_refresh(self, mp):
+        """Перерисовать карту (десятки секунд) — не больше одной перерисовки на карту."""
+        with self._map_lock:
+            if mp in self._map_busy:
+                return None
+            self._map_busy.add(mp)
+        try:
+            d = players.map_pixels(self.cfg, mp)
+            if d.get("ok"):
+                self._map_img[mp] = (time.time(), d)
+            return d
+        except Exception:  # noqa: BLE001
+            logging.exception("playerweb: карта %s", mp)
+            return None
+        finally:
+            with self._map_lock:
+                self._map_busy.discard(mp)
+
+    def _map_get(self, mp):
+        """Кэш со «старым, пока обновляется»: устаревшая картинка отдаётся сразу,
+        перерисовка идёт в фоне; ждать приходится только самый первый раз."""
+        hit = self._map_img.get(mp)
+        if hit:
+            if time.time() - hit[0] >= MAP_IMG_CACHE_SEC and mp not in self._map_busy:
+                threading.Thread(target=self._map_refresh, args=(mp,), daemon=True).start()
+            return hit[1]
+        for _ in range(600):         # кто-то уже рисует её — дождаться
+            if mp not in self._map_busy:
+                break
+            time.sleep(0.2)
+        hit = self._map_img.get(mp)
+        if hit:
+            return hit[1]
+        return self._map_refresh(mp) or {"ok": False, "error": "карта не нарисовалась"}
 
     @staticmethod
     def _my_pos(wd, raw):
@@ -589,7 +884,9 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .card.fill{display:flex;flex-direction:column}
 .card.fill>.grow{flex:1 1 0;min-height:80px;max-height:none;overflow:auto;align-content:flex-start}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-@media (max-width:600px){main{padding:10px}}
+@media (max-width:600px){main{padding:10px}
+  nav{flex-wrap:nowrap;overflow-x:auto;padding:6px 10px;scrollbar-width:none} nav::-webkit-scrollbar{display:none}
+  nav button{flex:0 0 auto} header{padding:8px 10px}}
 </style>
 </head>
 <body>
@@ -643,7 +940,7 @@ function renderLogin(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me","Профиль"],["tech","Изучение"],["craft","Крафт"],["market","Рынок"],["map","Карта"],["clan","Клан"],["server","Сервер"]];
+var TABS=[["me","Профиль"],["hist","История"],["tech","Изучение"],["craft","Крафт"],["book","Справочник"],["market","Рынок"],["map","Карта"],["clan","Клан"],["chat","Чат"],["server","Сервер"]];
 function render(){
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
   if(!S.nick){ nav.style.display="none"; return renderLogin(); }
@@ -652,7 +949,7 @@ function render(){
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},["Выйти"]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
-  ({me:tabMe,tech:tabTech,craft:tabCraft,market:tabMarket,map:tabMap,clan:tabClan,server:tabServer}[S.tab]||tabMe)(m);
+  ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
 }
 
 // ---------------------------------------------------------------- профиль
@@ -840,6 +1137,18 @@ function tabMarket(m){
   var tmr; q.addEventListener("input",function(){ clearTimeout(tmr); tmr=setTimeout(draw,200); }); mode.addEventListener("change",draw);
   m.appendChild(card("Рынок",[el("div",{class:"row"},[q,mode]),info,
     el("div",{class:"muted small"},["Терминалы игроков и магазины на картах. Курс и цены — только для простых лотов «один товар за одну валюту»; сводка цен появляется при поиске."])]));
+  var own=el("div"); m.insertBefore(own, m.firstChild);
+  api("/api/my-trade").then(function(d){ if(d.pending||(!d.terminals.length&&!d.shops.length&&!d.offers.length)) return;
+    var k=[];
+    d.terminals.forEach(function(t){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Терминал"]),
+      el("span",{class:"muted"},["  · лотов "+t.lots+" · продаж "+t.sales+(t.idle_h!=null?" · не заходил "+t.idle_h+" ч":"")]),
+      el("div",{class:"small"},["На складе терминала: "+fmtItems(t.storage)])])); });
+    d.shops.forEach(function(sh){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Магазин · "+sh.where]),
+      el("span",{class:"muted"},["  · слотов "+sh.slots+" · продаж "+sh.sales]),
+      el("div",{class:"small"},["Выручка: "+fmtItems(sh.storage)])])); });
+    if(d.offers.length) k.push(el("div",{class:"scroll",style:"max-height:260px"},[table(["Отдаю","Прошу","Курс","Где"],d.offers,function(o){ return [fmtItems(o.give),fmtItems(o.want),rate(o),o.where]; })]));
+    own.appendChild(card("Моя торговля",k));
+  }).catch(function(){});
   m.appendChild(sum); m.appendChild(list); fetchM();
 }
 
@@ -926,13 +1235,102 @@ function tabMap(m){
   });
 }
 
+// ---------------------------------------------------------------- история
+function tabHist(m){
+  var box=el("div"); m.appendChild(box);
+  load(box,"/api/history",function(d){
+    var s=function(k){ return d.points.map(function(p){ return {t:p.t,v:p[k]}; }).filter(function(p){ return p.v!=null; }); };
+    box.appendChild(card("Моя история",[el("div",{class:"muted small"},[d.since? "Панель записывает снимок раз в час с "+new Date(d.since*1000).toLocaleDateString("ru")+" — графики будут расти со временем."
+      : "Снимки ещё не делались — первый появится в течение часа."])]));
+    box.appendChild(el("div",{class:"grid"},[
+      card("",[chart(d.techs,{title:"Изучено технологий",y:"техов",x:"дата"})]),
+      card("",[chart(s("level"),{title:"Уровень",y:"уровень",x:"дата"})]),
+      card("",[chart(s("rating"),{title:"Рейтинг",y:"рейтинг",x:"дата"})]),
+      card("",[chart(s("play_h"),{title:"Наиграно",y:"часов",x:"дата"})]),
+      card("",[chart(s("research_h"),{title:"Вложено в исследования",y:"часов",x:"дата"})])]));
+  });
+}
+
+// ---------------------------------------------------------------- справочник
+function tabBook(m){
+  var inp=el("input",{list:"bk-dl",placeholder:"Предмет",style:"min-width:260px;flex:1"}), dl=el("datalist",{id:"bk-dl"}), out=el("div"), byName={};
+  function open(id){ try{ localStorage.setItem("swp_book",id); }catch(e){}
+    load(out,"/api/handbook?item="+encodeURIComponent(id),function(d){
+      if(!d.ok){ out.appendChild(errBox(d)); return; }
+      inp.value=d.name;
+      function lnk(x){ return el("a",{href:"#",onclick:function(e){ e.preventDefault(); open(x.id); }},[x.name]); }
+      function list(a){ var w=el("span"); a.forEach(function(x,i){ if(i) w.appendChild(document.createTextNode(", ")); w.appendChild(x); }); return w; }
+      var k=[];
+      if(d.flags.length) k.push(el("div",{class:"chips",style:"margin-bottom:8px"},d.flags.map(function(f){ return el("span",{class:"chip"},[f]); })));
+      if(d.stats.length) k.push(kv(d.stats));
+      if(d.recipe){ var r=d.recipe;
+        k.push(el("h3",{style:"margin-top:12px"},["Крафт"+(r.out>1?" (выходит "+r.out+" шт)":"")]));
+        k.push(kv([["Нужно",list(r.res.map(function(x){ return el("span",{},[lnk(x)," ×"+x.n]); }))],["Где",r.workbench||"в руках"],["Время",r.time+" с"],
+          ["Технология",r.tech? el("span",{},[r.tech+" ", el("span",{class:"pill "+(r.tech_known?"ok":"warn")},[r.tech_known?"изучена":"не изучена"])]) : "не нужна"]])); }
+      if(d.machine.length){ k.push(el("h3",{style:"margin-top:12px"},["Станок"]));
+        k.push(table(["Станок","Из чего","Энергия"],d.machine,function(x){ return [lnk({id:x.machine_id,name:x.machine}),lnk({id:x.from_id,name:x.from}),x.energy==null?"":x.energy]; })); }
+      if(!d.recipe&&!d.machine.length) k.push(el("div",{class:"muted",style:"margin-top:10px"},["Не крафтится — добывается или находится в мире."]));
+      if(d.used_in.length){ k.push(el("h3",{style:"margin-top:12px"},["Используется в ("+d.used_in.length+")"]));
+        k.push(el("div",{class:"scroll",style:"max-height:200px"},[list(d.used_in.map(lnk))])); }
+      if(d.on_market) k.push(el("div",{class:"small",style:"margin-top:12px"},["На рынке: продают — "+d.on_market.sell+" лот(ов), просят взамен — "+d.on_market.buy+" ",
+        el("a",{href:"#",onclick:function(e){ e.preventDefault(); try{ localStorage.setItem("swp_mq",d.name); }catch(_){} S.tab="market"; render(); }},["открыть на рынке"])]));
+      out.appendChild(card(d.name,k));
+    }); }
+  api("/api/handbook").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});
+  inp.addEventListener("change",function(){ var id=byName[inp.value.trim().toLowerCase()]; if(id) open(id); });
+  m.appendChild(card("Справочник предметов",[el("div",{class:"row"},[inp,dl]),el("div",{class:"muted small",style:"margin-top:6px"},["Свойства, как получить, какая технология нужна и куда предмет идёт дальше."])]));
+  m.appendChild(out);
+  var last=""; try{ last=localStorage.getItem("swp_book")||""; }catch(e){}
+  if(last) open(last);
+}
+
+// ---------------------------------------------------------------- чат и события
+var CH=[["global","Общий"],["global2","Global (EN)"],["ru","Русский"],["clan","Клан"],["private","Личные"],["events","События"]];
+var EVD={kill:"убит",reset_position:"сброс позиции",satiety:"голод",oxygen:"задохнулся",gas:"газ",moss:"мох"};
+var EVK={register:"новый игрок",death:"смерть",clan_created:"создан клан",clan_disbanded:"распущен клан",clan_renamed:"клан переименован"};
+function tabChat(m){
+  var ch="global"; try{ ch=localStorage.getItem("swp_ch")||"global"; }catch(e){}
+  var bar=el("div",{class:"row"}), q=el("input",{placeholder:"Поиск по нику или тексту",style:"width:100%"}), out=el("div"), tmr=null;
+  function draw(){
+    bar.innerHTML="";
+    CH.forEach(function(c){ bar.appendChild(el("button",{class:ch===c[0]?"pri":"",onclick:function(){ ch=c[0]; try{ localStorage.setItem("swp_ch",ch); }catch(e){} draw(); }},[c[1]])); });
+    q.style.display=ch==="events"?"none":"";
+    fetchC();
+  }
+  function fetchC(){
+    clearTimeout(tmr);
+    var p= ch==="events"? "/api/events" : "/api/chat?ch="+ch+"&q="+encodeURIComponent(q.value.trim());
+    api(p).then(function(d){
+      if(S.tab!=="chat") return;
+      out.innerHTML="";
+      if(ch==="events"){
+        out.appendChild(card("События сервера",[d.events.length? el("div",{class:"scroll",style:"max-height:65vh"},[table(["Когда","Что","Кто",""],d.events,function(e){
+          return [e.ts, EVK[e.kind]||e.kind, e.who, e.kind==="death"? (EVD[e.detail]||e.detail) : e.kind==="clan_renamed"&&e.detail? "было: "+e.detail : e.detail]; })]) : el("div",{class:"muted"},["пока пусто"])]));
+      } else {
+        var rows=d.messages.map(function(r){ return el("div",{style:"padding:3px 0;border-bottom:1px solid var(--line)"},[
+          el("span",{class:"muted small"},[r.ts+"  "]),
+          el("b",{style:r.out?"color:var(--acc)":""},[r.nick]), r.to? el("span",{class:"muted"},[" → "+r.to]) : null, ": "+r.text]); });
+        out.appendChild(card((CH.filter(function(c){ return c[0]===ch; })[0]||[,""])[1]+" · сообщений: "+d.total+(d.total>300?" (последние 300)":""),[
+          ch==="clan"? el("div",{class:"muted small",style:"margin-bottom:6px"},["Сообщения нынешних участников вашего клана."]) : null,
+          ch==="private"? el("div",{class:"muted small",style:"margin-bottom:6px"},["Только ваши личные сообщения — от вас и вам."]) : null,
+          rows.length? el("div",{class:"scroll",style:"max-height:65vh"},rows) : el("div",{class:"muted"},["сообщений нет"])]));
+      }
+      tmr=setTimeout(fetchC,20000);
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(errBox(e)); });
+  }
+  var qt; q.addEventListener("input",function(){ clearTimeout(qt); qt=setTimeout(fetchC,300); });
+  m.appendChild(card("Чат",[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},["Только чтение, обновляется раз в 20 секунд."])]));
+  m.appendChild(out); draw();
+}
+
 // ---------------------------------------------------------------- клан
 var CE={joined:"вступил",left:"ушёл",role:"роль",tech:"клан-технология",renamed:"переименован",slots:"слоты",created:"создан",disbanded:"распущен"};
 // Линейный график с осями: Y — 3 деления (мин/середина/макс), X — время.
 function chart(pts,o){
-  o=o||{}; var W=o.wide?1100:520,H=o.wide?230:200,L=44,R=10,T=10,B=34;
+  o=o||{}; var wide=o.wide && window.innerWidth>700;   // на телефоне широкий график стал бы мелким
+  var W=wide?1100:520,H=wide?230:220,L=44,R=10,T=10,B=34;
   var box=el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[o.title||""])]);
-  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},["мало данных"])); return box; }
+  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},[pts.length? "сейчас: "+pts[0].v+" · график появится, когда накопятся данные" : "мало данных"])); return box; }
   var t0=pts[0].t,t1=pts[pts.length-1].t,lo=Infinity,hi=-Infinity; pts.forEach(function(p){ lo=Math.min(lo,p.v); hi=Math.max(hi,p.v); });
   if(o.zero) lo=Math.min(0,lo);
   if(hi===lo){ hi+=1; if(!o.zero) lo-=1; }
@@ -941,9 +1339,10 @@ function chart(pts,o){
   var kids=[];
   [lo,(lo+hi)/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:L,x2:W-R,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-dasharray":"3 3"}));
     kids.push(svgEl("text",{x:L-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[fmt(v)])); });
-  var span=t1-t0, n=4;
+  var span=t1-t0, n=4, prevLab=null;
   for(var i=0;i<=n;i++){ var t=t0+span*i/n, d=new Date(t*1000);
     var lab= span>2*86400? (d.getDate()+"."+String(d.getMonth()+1).padStart(2,"0")) : (String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"));
+    if(lab===prevLab) continue; prevLab=lab;
     kids.push(svgEl("line",{x1:X(t),x2:X(t),y1:H-B,y2:H-B+4,stroke:"var(--mut)"}));
     kids.push(svgEl("text",{x:X(t),y:H-B+16,"text-anchor":i===0?"start":i===n?"end":"middle","font-size":"11",fill:"var(--mut)"},[lab])); }
   kids.push(svgEl("line",{x1:L,x2:W-R,y1:H-B,y2:H-B,stroke:"var(--mut)"}));
