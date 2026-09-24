@@ -409,8 +409,10 @@ class WebUI:
         self._ct_state = os.path.join(base, "clan_track_state.json")
         self._ct_events = os.path.join(base, "logs", "clan_events.jsonl")
         self._ct_points = os.path.join(base, "logs", "clan_points.jsonl")
-        self._trade_cache = None  # (ts, payload)
-        self._trade_job = None
+        self._econ_hist = os.path.join(base, "logs", "economy_daily.jsonl")
+        self._inv_state = os.path.join(base, "inv_track_state.json")
+        self._susp_log = os.path.join(base, "logs", "suspicious.jsonl")
+        self._heavy = {}  # name -> {"cache": (ts, payload)|None, "job": job|None}
         self._buff_path = os.path.join(base, "buff_notepad.json")
         self._stop = threading.Event()
         self._srv = None
@@ -460,13 +462,37 @@ class WebUI:
         iv = max(120, int(tt.get("interval_seconds", 600)))
         if self._stop.wait(min(iv, 120)):
             return
+        last_scan = None
         while not self._stop.is_set():
             try:
+                prev_research = {k: v.get("research") for k, v in
+                                 ((players._read_json(self._tt_state) or {}).get("users") or {}).items()}
+                now = time.time()
                 ev = players.tech_track_scan(self.cfg, self._tt_state, self._tt_log)
                 if ev:
                     logging.info("techtrack: %d изменений", len(ev))
+                    if last_scan:
+                        sus = players.research_check(self.cfg, ev, prev_research, now - last_scan, self._susp_log)
+                        if sus:
+                            logging.warning("susp: быстрые исследования — %d", len(sus))
+                last_scan = now
             except Exception:  # noqa: BLE001
                 logging.exception("techtrack: ошибка прохода")
+            try:
+                sus = players.inv_track_scan(self.cfg, self._inv_state, self._susp_log)
+                if sus:
+                    logging.warning("susp: всплески инвентаря — %d", len(sus))
+            except Exception:  # noqa: BLE001
+                logging.exception("susp: ошибка прохода инвентарей")
+            try:
+                if players.economy_snapshot_due(self._econ_hist):
+                    d = players.economy_report(self.cfg, self._econ_hist)
+                    if d.get("ok"):
+                        self._heavy.setdefault("economy", {})["cache"] = (time.time(), d)
+                        logging.info("economy: суточный снимок (%s предметов, %.0f c)",
+                                     len(d.get("items") or []), d.get("scan_sec") or 0)
+            except Exception:  # noqa: BLE001
+                logging.exception("economy: суточный снимок")
             try:
                 ev = players.clan_track_scan(self.cfg, self._ct_state, self._ct_events, self._ct_points)
                 if ev:
@@ -1132,38 +1158,74 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 404)
 
-    def _api_trade(self, h, method, q, sess):
-        """Сводка торговли. Первый проход по всем картам долгий (десятки секунд),
-        поэтому: свежий кэш (<2 мин) — сразу {ready, data}; иначе фоновый job
-        (один на всех) — {job}, клиент опрашивает /api/job."""
+    def _heavy_job(self, h, q, name, fn, ttl=120):
+        """Тяжёлый отчёт (проход по всем картам — десятки секунд): свежий кэш —
+        сразу {ready, data}; иначе один общий фоновый job — {job}, клиент
+        опрашивает /api/job. ?force=1 — пересчитать."""
         now = time.time()
+        slot = self._heavy.setdefault(name, {"cache": None, "job": None})
         force = (q.get("force") or [""])[0] == "1"
-        if self._trade_cache and not force and now - self._trade_cache[0] < 120:
-            return self._json(h, {"ready": True, "data": self._trade_cache[1]})
+        if slot.get("cache") and not force and now - slot["cache"][0] < ttl:
+            return self._json(h, {"ready": True, "data": slot["cache"][1]})
         with self._jobs_lock:
-            job = self._trade_job
+            job = slot.get("job")
             if job and not job["done"] and job["id"] in self._jobs:
                 return self._json(h, {"job": job["id"]})
             jid = secrets.token_hex(8)
-            job = {"id": jid, "done": False, "ok": None, "result": None,
-                   "started": now, "finished": None}
+            job = {"id": jid, "done": False, "ok": None, "result": None, "started": now, "finished": None}
             self._jobs[jid] = job
-            self._trade_job = job
+            slot["job"] = job
             while len(self._jobs) > 30:
                 self._jobs.pop(next(iter(self._jobs)))
 
         def run():
             try:
-                d = players.trade_report(self.cfg)
+                d = fn()
             except Exception as e:  # noqa: BLE001
-                logging.exception("webui: trade_report")
+                logging.exception("webui: %s", name)
                 d = {"ok": False, "error": str(e)}
             if d.get("ok"):
-                self._trade_cache = (time.time(), d)
+                slot["cache"] = (time.time(), d)
             job.update(ok=bool(d.get("ok")), result=d, done=True, finished=time.time())
 
-        threading.Thread(target=run, name="trade", daemon=True).start()
+        threading.Thread(target=run, name=name, daemon=True).start()
         return self._json(h, {"job": jid})
+
+    def _api_trade(self, h, method, q, sess):
+        """Сводка торговли (терминалы + магазины на картах)."""
+        return self._heavy_job(h, q, "trade", lambda: players.trade_report(self.cfg))
+
+    def _api_economy(self, h, method, q, sess):
+        """Экономика: сколько чего в мире + динамика по суточным снимкам."""
+        return self._heavy_job(h, q, "economy", lambda: players.economy_report(self.cfg, self._econ_hist), ttl=300)
+
+    def _api_economy_item(self, h, method, q, sess):
+        """GET ?id=N — история общего количества предмета по суточным снимкам."""
+        return self._json(h, players.economy_item_history(self._econ_hist, (q.get("id") or [""])[0]))
+
+    def _api_suspicious(self, h, method, q, sess):
+        """Журнал подозрений — под админ-паролем (связывает аккаунты)."""
+        b = self._body(h)
+        ok, resp = self._reauth(h, sess, "мониторинг нарушений", body=b)
+        if not ok:
+            return resp
+        tr = (self._heavy.get("trade") or {}).get("cache")
+        try:
+            d = players.suspicious_read(self.cfg, self._susp_log, tr[1] if tr else None)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: suspicious_read")
+            return self._json(h, {"error": "internal", "detail": str(e)}, 500)
+        self.audit(h.client_address[0], sess["user"], "НАРУШЕНИЯ: просмотр журнала (%d)" % d.get("total", 0))
+        return self._json(h, d)
+
+    def _api_map_clans(self, h, method, q, sess):
+        """GET ?map=N — легенда «карта по кланам»."""
+        try:
+            d = players.map_clans(self.cfg, (q.get("map") or ["1"])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: map_clans")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
 
     def _api_food_ingredients(self, h, method, q, sess):
         """53 ингредиента кулинарии (Data\\product\\product_genes.json) с генами —
@@ -1243,9 +1305,11 @@ class WebUI:
         claims = (q.get("claims") or ["1"])[0] not in ("0", "false", "no")
         owner = (q.get("owner") or [""])[0]
         force = (q.get("force") or ["0"])[0] not in ("0", "", "false", "no")
+        by_clan = (q.get("clans") or ["0"])[0] == "1"
+        shops = (q.get("shops") or ["0"])[0] == "1"
         try:
-            png, fn, meta = players.mapdt_image(self.cfg, mp, scale=scale,
-                                                claims=claims, owner=owner, force=force)
+            png, fn, meta = players.mapdt_image(self.cfg, mp, scale=scale, claims=claims, owner=owner,
+                                                force=force, by_clan=by_clan, shops=shops)
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: mapdt_image")
             return self._json(h, {"ok": False, "error": str(e)}, 500)
@@ -1991,7 +2055,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -2072,6 +2136,20 @@ var T = {
   tr_owner:"Владелец", tr_give:"Отдаёт", tr_want:"Хочет взамен", tr_rate:"Курс", tr_where:"Где",
   tr_terms_list:"Терминалы игроков", tr_shops_list:"Магазины на картах", tr_lots:"Лотов", tr_sales:"Продаж",
   tr_idle:"Не заходил", tr_storage:"Выручка на складе", tr_loading:"собираю данные по всем картам…",
+  mi_by_clan:"по кланам", mi_shops:"магазины", mi_shops_hint:"Значки магазинов игроков на карте", mi_no_clans:"на этой карте нет земли кланов",
+  mi_blocks:"уч. 8×8", mi_owners:"владельцев", mi_noclan:"без клана",
+  ec_title:"Экономика сервера", ec_intro:"Сколько каждого предмета есть в мире: у игроков (склад + при себе), в сундуках и брошенное на картах (без природных кладов под лопату), в торговле (лоты и выручка терминалов/магазинов). Курс — медиана по предложениям в «Торговле». Динамика — по суточным снимкам, которые панель делает сама (копится с момента включения). Клик по строке — график и главные держатели.",
+  ec_sort:"сортировка:", ec_s_total:"всего", ec_s_players:"у игроков", ec_s_cont:"в сундуках", ec_s_trade:"в торговле",
+  ec_s_holders:"держателей", ec_s_d1:"рост за сутки", ec_s_d7:"рост за неделю",
+  ec_items:"предметов", ec_players:"игроков с инвентарём", ec_snaps:"суточных снимков",
+  ec_total:"Всего", ec_players_col:"У игроков", ec_cont:"В сундуках", ec_trade:"В торговле", ec_holders:"Держателей",
+  ec_top1:"Больше всех", ec_rate:"Курс", ec_d1:"За сутки", ec_d7:"За неделю", ec_hist:"Всего в мире по дням", ec_top:"Главные держатели",
+  sv_title:"Мониторинг нарушений", su_intro:"Панель сама раз в несколько минут сравнивает инвентари и исследования всех игроков. Всплеск — резкий рост монет/бустеров (пороги в config.json → players.suspicious.watch) или любого предмета в 10+ раз; рядом — у кого в то же время столько же убыло (возможная передача), ⚠ — если это связанный аккаунт (общий пароль/IP). Быстрое исследование — техи дороже, чем прошло времени + потрачено бустеров (выдача теха через панель тоже сюда попадёт — сверяйтесь с аудитом). Это подсказки для проверки, не приговор.",
+  su_k_all:"все события", su_k_inv:"всплеск инвентаря", su_k_res:"быстрое исследование", su_only_twink:"только с твинками",
+  su_events:"событий", su_none:"Ничего подозрительного.", su_twink:"твинк", su_donors:"у кого убыло",
+  su_res_txt:"изучил техи на", su_allowed:"возможно", su_boost:"бустеров", su_trade:"Аномальные цены в торговле",
+  su_trade_hint:"Лоты, у которых курс в 10+ раз отличается от медианы той же пары «товар → оплата» (нужно ≥3 предложений). Слишком дёшево — частый способ передать ценности своему твинку.",
+  su_trade_need:"Сначала откройте вкладку «Торговля» — анализ цен берёт её свежие данные.", su_vs_median:"от медианы",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -2182,7 +2260,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2263,6 +2341,20 @@ var T = {
   tr_owner:"Owner", tr_give:"Gives", tr_want:"Wants", tr_rate:"Rate", tr_where:"Where",
   tr_terms_list:"Player terminals", tr_shops_list:"Map shops", tr_lots:"Lots", tr_sales:"Sales",
   tr_idle:"Idle", tr_storage:"Revenue in storage", tr_loading:"collecting data from all maps…",
+  mi_by_clan:"by clan", mi_shops:"shops", mi_shops_hint:"Player shop markers on the map", mi_no_clans:"no clan land on this map",
+  mi_blocks:"8×8 plots", mi_owners:"owners", mi_noclan:"no clan",
+  ec_title:"Server economy", ec_intro:"How much of every item exists: with players (stash + carried), in chests and dropped on maps (natural buried stashes excluded), in trade (terminal/shop lots and revenue). Rate — median across \"Trade\" offers. Trend — from daily snapshots the panel takes itself (accumulates from when it's enabled). Click a row for the chart and top holders.",
+  ec_sort:"sort:", ec_s_total:"total", ec_s_players:"with players", ec_s_cont:"in chests", ec_s_trade:"in trade",
+  ec_s_holders:"holders", ec_s_d1:"24h growth", ec_s_d7:"7d growth",
+  ec_items:"items", ec_players:"players with inventory", ec_snaps:"daily snapshots",
+  ec_total:"Total", ec_players_col:"Players", ec_cont:"Chests", ec_trade:"Trade", ec_holders:"Holders",
+  ec_top1:"Top holder", ec_rate:"Rate", ec_d1:"24h", ec_d7:"7d", ec_hist:"World total by day", ec_top:"Top holders",
+  sv_title:"Violation monitor", su_intro:"Every few minutes the panel diffs every player's inventory and research. Spike — a sharp rise in coins/boosters (thresholds in config.json → players.suspicious.watch) or any item 10×+; next to it — who lost about as much at the same time (possible transfer), ⚠ if that's a linked account (shared password/IP). Fast research — techs costing more than the elapsed time + boosters spent (a tech granted via the panel lands here too — check the audit). These are leads, not verdicts.",
+  su_k_all:"all events", su_k_inv:"inventory spike", su_k_res:"fast research", su_only_twink:"twinks only",
+  su_events:"events", su_none:"Nothing suspicious.", su_twink:"twink", su_donors:"who lost it",
+  su_res_txt:"researched techs worth", su_allowed:"possible", su_boost:"boosters", su_trade:"Abnormal trade prices",
+  su_trade_hint:"Lots whose rate is 10×+ off the median for the same \"goods → payment\" pair (needs ≥3 offers). Too cheap is a common way to pass valuables to a twink.",
+  su_trade_need:"Open the \"Trade\" tab first — price analysis uses its fresh data.", su_vs_median:"vs median",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2483,14 +2575,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","clans","trade","entry","buffs","food","craft","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","suspicious","clans","trade","economy","entry","buffs","food","craft","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -3400,6 +3492,141 @@ function tabTrade(v){
   load(false);
 }
 
+// ---- тяжёлые отчёты: {ready,data} сразу или {job} -> опрос /api/job ----
+function loadHeavy(url, msg, onData){
+  msg.textContent=t("tr_loading");
+  api(url).then(function(r){
+    if(r.ready){ msg.textContent=""; onData(r.data); return; }
+    var iv=setInterval(function(){
+      api("/api/job?id="+r.job).then(function(j){
+        if(!j.done) return;
+        clearInterval(iv); msg.textContent="";
+        onData(j.result||{ok:false});
+      }).catch(function(){ clearInterval(iv); msg.textContent=t("err_net"); });
+    },1500);
+  }).catch(function(e){ msg.textContent=errText(e); });
+}
+function fmtN(v){ return v==null? "—" : Number(v).toLocaleString(); }
+// «1 дорогого ≈ N дешёвого», чтобы не было «≈ 0»
+function rateTxt(name, r){
+  if(!r || !r.median) return "—";
+  return r.median>=1 ? ("1 "+name+" ≈ "+fmtN(Math.round(r.median*100)/100)+" "+r.pay)
+    : ("1 "+r.pay+" ≈ "+fmtN(Math.round(100/r.median)/100)+" "+name);
+}
+function fmtD(v){ if(v==null) return el("span",{class:"muted"},["—"]); if(!v) return "0";
+  return el("span",{style:"color:"+(v>0?"var(--ok)":"var(--err)")},[(v>0?"+":"")+Number(v).toLocaleString()]); }
+
+// ---- экономика ----
+function tabEconomy(v){
+  var q=el("input",{type:"text",placeholder:t("tr_ph"),style:"min-width:220px"});
+  var sortSel=el("select",{},[["total","ec_s_total"],["players","ec_s_players"],["containers","ec_s_cont"],["trade","ec_s_trade"],
+    ["holders","ec_s_holders"],["d1","ec_s_d1"],["d7","ec_s_d7"]].map(function(x){ return el("option",{value:x[0]},[t(x[1])]); }));
+  var msg=el("span",{class:"muted small"},[]);
+  var out=el("div",{style:"margin-top:12px"},[]);
+  var detail=el("div",{},[]);
+  var D=null;
+  function showItem(x){
+    detail.innerHTML="";
+    var card=el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[x.name+" · "+fmtN(x.total)])]);
+    var hist=el("div",{},[el("p",{class:"muted small"},["…"])]);
+    api("/api/economy-item?id="+x.id).then(function(h){
+      hist.innerHTML="";
+      hist.appendChild(lineChart((h.series||[]).map(function(p){ return {t:p.t, v:p.v}; }), t("ec_hist")));
+    }).catch(function(){});
+    card.appendChild(el("div",{class:"row",style:"gap:16px;flex-wrap:wrap;align-items:flex-start"},[
+      el("div",{style:"flex:1;min-width:260px"},[hist]),
+      el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[t("ec_top")]),
+        ltable([t("cl_player"),t("cr_count")], x.top, function(u){ return [plLink(u.id,u.name), fmtN(u.count)]; })])]));
+    if(x.rate) card.appendChild(el("div",{class:"small",style:"margin-top:8px"},[
+      t("ec_rate")+": "+rateTxt(x.name,x.rate)+"  ("+x.rate.n+" "+t("tr_offers")+")"]));
+    detail.appendChild(card);
+    card.scrollIntoView({behavior:"smooth",block:"nearest"});
+  }
+  function render(){
+    out.innerHTML="";
+    if(!D) return;
+    if(!D.ok){ out.appendChild(el("div",{class:"msg err"},[D.error||"error"])); return; }
+    var needle=q.value.trim().toLowerCase(), k=sortSel.value;
+    var rows=D.items.filter(function(x){ return !needle || x.name.toLowerCase().indexOf(needle)>=0 || String(x.id)===needle; });
+    rows=rows.slice().sort(function(a,b){ return (b[k]||0)-(a[k]||0); });
+    out.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[
+      rows.length+" / "+D.items.length+" "+t("ec_items")+" · "+D.players_scanned+" "+t("ec_players")+" · "
+      +t("ec_snaps")+": "+D.snapshots+" · "+t("tr_scan")+" "+D.scan_sec+" s"]));
+    var tb=el("table",{},[el("tr",{},[t("cr_item"),t("ec_total"),t("ec_players_col"),t("ec_cont"),t("ec_trade"),t("ec_holders"),t("ec_top1"),t("ec_rate"),t("ec_d1"),t("ec_d7")]
+      .map(function(x){ return el("th",{},[x]); }))]);
+    rows.slice(0,400).forEach(function(x){
+      tb.appendChild(el("tr",{style:"cursor:pointer",onclick:function(){ showItem(x); }},[
+        el("td",{},[el("a",{class:"pl-link"},[x.name])]), el("td",{},[el("b",{},[fmtN(x.total)])]),
+        el("td",{},[fmtN(x.players)]), el("td",{},[fmtN(x.containers)]), el("td",{},[fmtN(x.trade)]),
+        el("td",{},[String(x.holders)]),
+        el("td",{},[x.top[0]? x.top[0].name+" ("+fmtN(x.top[0].count)+")" : "—"]),
+        el("td",{class:"small"},[rateTxt(x.name,x.rate)]),
+        el("td",{},[fmtD(x.d1)]), el("td",{},[fmtD(x.d7)])]));
+    });
+    out.appendChild(el("div",{class:"card",style:"overflow:auto"},[tb]));
+  }
+  function load(force){ loadHeavy("/api/economy"+(force?"?force=1":""), msg, function(d){ D=d; render(); }); }
+  q.addEventListener("input",render); sortSel.addEventListener("change",render);
+  v.appendChild(el("div",{},[
+    el("div",{class:"card"},[el("h3",{},[t("ec_title")]), el("p",{class:"muted small"},[t("ec_intro")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[q, el("span",{class:"small"},[t("ec_sort")]), sortSel,
+        el("button",{class:"small",onclick:function(){ load(true); }},[t("refresh")]), msg])]),
+    detail, out]));
+  load(false);
+}
+
+// ---- нарушения (под паролем панели) ----
+function tabSuspicious(v){
+  var out=el("div",{},[el("p",{class:"muted"},["…"])]);
+  var kindSel=el("select",{},[["","su_k_all"],["inv_spike","su_k_inv"],["fast_research","su_k_res"]].map(function(x){ return el("option",{value:x[0]},[t(x[1])]); }));
+  var onlyTw=el("input",{type:"checkbox"});
+  var D=null;
+  function render(){
+    out.innerHTML="";
+    if(!D) return;
+    var rows=D.events.filter(function(e){ return (!kindSel.value || e.kind===kindSel.value) && (!onlyTw.checked || e.twink); });
+    out.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[rows.length+" / "+D.total+" "+t("su_events")]));
+    var box=el("div",{class:"card",style:"overflow:auto"},[]);
+    if(!rows.length) box.appendChild(el("div",{class:"muted"},[t("su_none")]));
+    rows.forEach(function(e){
+      var body;
+      if(e.kind==="inv_spike"){
+        body=[el("span",{class:"pill "+(e.twink?"err":"warn")},[e.twink? t("su_twink") : t("su_k_inv")]), " ", plLink(e.uid,e.name),
+          " +"+fmtN(e.gain)+" "+e.item+" ("+fmtN(e.was)+" → "+fmtN(e.now)+")"];
+        if(e.donors && e.donors.length) body.push(el("div",{class:"small muted",style:"margin-left:12px"},[t("su_donors")+": "].concat(
+          e.donors.map(function(d,i){ return el("span",{},[i?", ":"", plLink(d.id,d.name), " −"+fmtN(d.loss)+(d.twink?" ⚠ "+t("su_twink"):"")]); }))));
+      } else if(e.kind==="fast_research"){
+        body=[el("span",{class:"pill warn"},[t("su_k_res")]), " ", plLink(e.uid,e.name),
+          " "+t("su_res_txt")+" "+fmtN(e.cost_min)+" "+t("pd_min")+" / "+t("su_allowed")+" "+fmtN(e.allowed_min)+" "+t("pd_min")
+          +(e.boosters? " ("+t("su_boost")+" "+e.boosters+")":""),
+          el("div",{class:"small muted",style:"margin-left:12px"},[e.techs.join(", ")])];
+      } else body=[e.kind];
+      box.appendChild(el("div",{style:"padding:6px 0;border-bottom:1px solid var(--line)"},[el("span",{class:"lg-t mono"},[e.ts+"  "])].concat(body)));
+    });
+    out.appendChild(box);
+    var tc=el("div",{class:"card",style:"margin-top:12px;overflow:auto"},[el("h3",{},[t("su_trade")]), el("p",{class:"muted small"},[t("su_trade_hint")])]);
+    if(D.trade_anomalies==null) tc.appendChild(el("div",{class:"muted small"},[t("su_trade_need")]));
+    else if(!D.trade_anomalies.length) tc.appendChild(el("div",{class:"muted small"},[t("su_none")]));
+    else tc.appendChild(ltable([t("tr_owner"),t("tr_give"),t("tr_want"),t("su_vs_median"),t("tr_where")], D.trade_anomalies, function(a){
+      return [plLink(a.owner.id,a.owner.name), a.give.map(function(x){ return x.name+" ×"+fmtN(x.count); }).join(", "),
+        a.want.map(function(x){ return x.name+" ×"+fmtN(x.count); }).join(", "),
+        el("b",{style:"color:"+(a.x<1?"var(--err)":"var(--warn)")},["×"+a.x]), a.src==="terminal"? t("tr_src_term") : a.where]; }));
+    out.appendChild(tc);
+  }
+  function load(){
+    gatedApi("/api/suspicious", {}, function(d){ D=d; render(); },
+      function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  kindSel.addEventListener("change",render); onlyTw.addEventListener("change",render);
+  v.appendChild(el("div",{},[
+    el("div",{class:"card",style:"margin-bottom:12px"},[el("h3",{},[t("sv_title")]), el("p",{class:"muted small"},[t("su_intro")]),
+      el("div",{class:"row",style:"gap:10px;flex-wrap:wrap;align-items:center"},[kindSel,
+        el("label",{class:"small"},[onlyTw," "+t("su_only_twink")]),
+        el("button",{class:"small",onclick:load},[t("refresh")])])]),
+    out]));
+  load();
+}
+
 // ---- кланы ----
 var CLAN_SEL=null;
 function tabClans(v){
@@ -4194,6 +4421,9 @@ function mapImageBlock(mapId){
   var wrap=el("div",{style:"position:relative;overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:8px;padding:2px"},[stage]);
   var ownIn=el("input",{type:"number",placeholder:t("mi_owner"),style:"padding:4px 7px;width:100px"});
   var claimsCb=el("input",{type:"checkbox",checked:"checked"});
+  var clansCb=el("input",{type:"checkbox"});
+  var shopsCb=el("input",{type:"checkbox"});
+  var clanLeg=el("div",{class:"chart-legend",style:"margin-top:4px"},[]);
   var rot=315;
   var rotLbl=el("span",{class:"muted small",style:"min-width:34px;display:inline-block;text-align:center"},["315°"]);
   var rotCcw=el("button",{class:"small",title:t("mi_rot_ccw"),onclick:function(){ rot-=45; applyView(); }},["↺"]);
@@ -4223,9 +4453,17 @@ function mapImageBlock(mapId){
   applyView();
   function reload(force){
     stat.textContent=t("mi_wait");
-    var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")+(force?"&force=1":"")+"&_="+Date.now();
+    var u="/api/mapdt-image?map="+mapId+"&claims="+(claimsCb.checked?1:0)+(ownIn.value?"&owner="+encodeURIComponent(ownIn.value.trim()):"")
+      +(clansCb.checked?"&clans=1":"")+(shopsCb.checked?"&shops=1":"")+(force?"&force=1":"")+"&_="+Date.now();
     img.onload=function(){
       stat.textContent=img.naturalWidth+"×"+img.naturalHeight+" px"; applyView();
+      clanLeg.innerHTML="";
+      if(clansCb.checked) api("/api/map-clans?map="+mapId).then(function(c){
+        if(!c.ok) return;
+        if(!c.clans.length) clanLeg.appendChild(el("span",{class:"muted"},[t("mi_no_clans")]));
+        c.clans.forEach(function(x){ clanLeg.appendChild(lgSwatch(x.rgb.join(","), x.name+" · "+x.blocks8+" "+t("mi_blocks")+" · "+x.owners+" "+t("mi_owners"))); });
+        if(c.no_clan_blocks8) clanLeg.appendChild(lgSwatch("205,205,205", t("mi_noclan")+" · "+c.no_clan_blocks8+" "+t("mi_blocks")));
+      }).catch(function(){});
       // рендер картинки на сервере попутно обновляет и кэш сетки владения —
       // к моменту onload он уже свежий, тянем заново только при форс-пересмотре
       if(force) api("/api/mapdt-owners?map="+mapId+"&_="+Date.now()).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
@@ -4235,6 +4473,8 @@ function mapImageBlock(mapId){
   }
   var reviewBtn=el("button",{class:"small",title:t("mi_review_hint"),onclick:function(){ reload(true); }},["⟳ "+t("mi_review")]);
   claimsCb.onchange=function(){ reload(); };
+  clansCb.onchange=function(){ reload(); };
+  shopsCb.onchange=function(){ reload(); };
   ownIn.addEventListener("keydown",function(e){ if(e.key==="Enter") reload(); });
   api("/api/mapdt-owners?map="+mapId).then(function(d){ if(d.ok) OW=d; }).catch(function(){});
   img.addEventListener("mousemove",function(e){
@@ -4251,7 +4491,8 @@ function mapImageBlock(mapId){
     var gx=Math.floor(fx*OW.w), gy=OW.h-1-Math.floor(fy*OW.h);   // картинка зеркалена по Y
     var bx=Math.floor(gx/8), by=Math.floor(gy/8);
     var oi=bx*OW.um_h+by, o=(oi>=0&&oi<OW.grid.length)? OW.grid[oi] : 0;
-    info.show((o? "👤 "+(OW.names[o]||("id "+o)) : t("mi_free"))+"  ("+gx+","+gy+")");
+    var cl=o && OW.clans && OW.clans[o];
+    info.show((o? "👤 "+(OW.names[o]||("id "+o))+(cl? "  ⚑ "+cl : "") : t("mi_free"))+"  ("+gx+","+gy+")");
   });
   img.addEventListener("mouseleave",function(){ info.clear(); });
   var leg=el("div",{class:"chart-legend",style:"margin-top:6px"},[
@@ -4266,10 +4507,12 @@ function mapImageBlock(mapId){
     el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center"},[
       el("b",{},["🗺 "+t("mi_title")]),
       el("label",{class:"small"},[claimsCb," "+t("mi_claims")]),
+      el("label",{class:"small"},[clansCb," "+t("mi_by_clan")]),
+      el("label",{class:"small",title:t("mi_shops_hint")},[shopsCb," "+t("mi_shops")]),
       rotCcw, rotLbl, rotCw, reviewBtn,
       el("span",{class:"muted small"},["🔍"]), zoom,
       ownIn, el("button",{class:"small",onclick:function(){ reload(); }},[t("mi_show")]), stat ]),
-    wrap, info.el, leg ]);
+    wrap, info.el, leg, clanLeg ]);
 }
 function lgSwatch(rgb, label){
   return el("span",{},[el("b",{style:"background:rgb("+rgb+")"},[]), label]);

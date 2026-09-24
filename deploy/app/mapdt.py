@@ -384,7 +384,8 @@ def _load_item_ext(world_dir):
 # --------------------------------------------------------------------- публичное
 def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
           paint=False, block_class=None, claims=True, only_owner=None, owners=False,
-          list_containers=False, container_cap=2000, list_shops=False):
+          list_containers=False, container_cap=2000, list_shops=False,
+          owner_color=None, mark_shops=False):
     """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
 
     ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
@@ -393,6 +394,11 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
     ``paint`` — вернуть ``pixels`` (bytearray w*h*3, строки по y) с цветовой
     картой (вода/суша/горы/природа/постройки), ``block_class`` = {type: cat}.
     ``claims`` — тонировать застолблённую землю; ``only_owner`` — выделить одного.
+
+    ``owner_color`` — {owner_id: (r,g,b)|None}: красить клаймы по этой карте
+    (напр. цвет клана), владельцы без цвета — нейтральным серым.
+    ``mark_shops`` — поставить на картинке значки магазинов (подразумевает
+    ``list_shops``).
 
     ``list_containers`` — вернуть ``containers_list`` = ``[{x, y, slot,
     items:[{type, count}]}]`` для всех НЕпустых контейнеров мира (не более
@@ -407,6 +413,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
 
     item_ext = _load_item_ext(world_dir)
     want = set(want) if want else None
+    list_shops = list_shops or (mark_shops and paint)
     ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap,
            "containers_list": [] if list_containers else None, "container_cap": container_cap,
            "shops": [] if list_shops else None}
@@ -426,6 +433,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
         machines = Counter()
         res_in_blocks = Counter()      # ресурсы внутри блоков (руда в жиле и т.п.)
         container_items = Counter()    # предметы в наземных/подземных контейнерах
+        chest_items = Counter()        # только сундуки (slot "container") и брошенное на землю —
+                                       # без "underground" (природные клады под лопату)
         water = land = 0
         gas_tiles = infection_tiles = 0
         container_count = 0
@@ -469,6 +478,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                     nonzero = [it for it in inv["items"] if it.get("count")]
                     for it in nonzero:
                         container_items[it["type"]] += it["count"]
+                        if _slot != "underground":
+                            chest_items[it["type"]] += it["count"]
                     if (ctx["containers_list"] is not None and nonzero
                             and len(ctx["containers_list"]) < container_cap):
                         ctx["containers_list"].append({
@@ -529,12 +540,28 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                     cur = (px[pi], px[pi + 1], px[pi + 2])
                     if only_owner:
                         nc = _blend(cur, _CLAIM_HL, 0.6) if o == only_owner else _blend(cur, (0, 0, 0), 0.35)
+                    elif owner_color is not None:
+                        k = owner_color.get(o)
+                        nc = _blend(cur, k, 0.55) if k else _blend(cur, (205, 205, 205), 0.3)
                     else:
                         k = pal_of.get(o)
                         if k is None:
                             k = pal_of[o] = _CLAIM_PAL[len(pal_of) % npal]
                         nc = _blend(cur, k, 0.5)
                     px[pi] = nc[0]; px[pi + 1] = nc[1]; px[pi + 2] = nc[2]
+
+        # значки магазинов: белая рамка 5×5 с тёмной серединой
+        if paint and mark_shops:
+            for sh in ctx["shops"]:
+                for ddx in range(-2, 3):
+                    for ddy in range(-2, 3):
+                        xx, yy = sh["x"] + ddx, sh["y"] + ddy
+                        if not (0 <= xx < w and 0 <= yy < h):
+                            continue
+                        edge = abs(ddx) == 2 or abs(ddy) == 2
+                        col = (255, 255, 255) if edge else (20, 20, 20)
+                        pi = ((h - 1 - yy) * w + xx) * 3
+                        px[pi] = col[0]; px[pi + 1] = col[1]; px[pi + 2] = col[2]
 
         oxygen_map = None
         remain = r.rest()
@@ -559,6 +586,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
             "res_in_blocks": [{"type": t, "n": n} for t, n in res_in_blocks.most_common(30)],
             "containers": container_count,
             "container_items": [{"type": t, "n": n} for t, n in container_items.most_common(30)],
+            "container_items_all": dict(container_items),
+            "chest_items_all": dict(chest_items),
             "stone_points": len(stone),
             "stone_types": [{"type": t, "n": n} for t, n in stone_types.most_common()],
             "biom_count": biom,
@@ -597,12 +626,13 @@ def png_bytes(w, h, rgb, scale=1):
 
 
 def render_png(path, world_dir=None, block_class=None, scale=None,
-               claims=True, only_owner=None):
+               claims=True, only_owner=None, owner_color=None, mark_shops=False):
     """Картинка карты (PNG bytes) + мета. ``block_class`` = {block_type: cat}
     (`mtn|ore|wall|floor|built|plant`). ``scale`` = None -> авто (крупная сторона
     ~640, макс x8). -> ``{ok, w, h, scale, png, legend, owners}``."""
     d = parse(path, world_dir=world_dir, keep_grid=False, paint=True,
-              block_class=block_class, claims=claims, only_owner=only_owner)
+              block_class=block_class, claims=claims, only_owner=only_owner,
+              owner_color=owner_color, mark_shops=mark_shops)
     if not d.get("ok"):
         return d
     w, h = d["w"], d["h"]
@@ -617,6 +647,7 @@ def render_png(path, world_dir=None, block_class=None, scale=None,
         "owners": d.get("land_owners") or [],
         "land_total_blocks8": d.get("land_total_blocks8"),
         "owner_grid": d.get("owner_grid"), "um_w": d.get("um_w"), "um_h": d.get("um_h"),
+        "shops": d.get("shops") or [],
     }
 
 

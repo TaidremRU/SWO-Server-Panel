@@ -1048,7 +1048,46 @@ def _block_class(world_dir):
     return out
 
 
-def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False):
+def clan_colors(world_dir):
+    """{clan_id: (r,g,b)} — стабильный цвет клана (по порядку id) и
+    {user_id: clan_id} — для раскраски карты по кланам."""
+    clans = sorted(_clans_raw(world_dir), key=lambda c: c.get("id") or 0)
+    pal = mapdt._CLAIM_PAL if mapdt else [(200, 80, 80)]
+    col, uclan = {}, {}
+    for i, c in enumerate(clans):
+        col[c.get("id")] = pal[i % len(pal)]
+        for u in c.get("users") or []:
+            uclan[u.get("userId")] = c.get("id")
+    return col, uclan
+
+
+def map_clans(cfg, map_id):
+    """Легенда «карта по кланам»: у каких кланов есть земля на карте, сколько
+    блоков 8×8, цвет; + участки без клана. Нужна отрисованная/разобранная карта
+    (берёт сетку владения из кэша mapdt_owners)."""
+    d = mapdt_owners(cfg, map_id)
+    if not d.get("ok"):
+        return d
+    world_dir = find_world_dir(cfg)
+    col, uclan = clan_colors(world_dir)
+    names = {c.get("id"): c.get("name") for c in _clans_raw(world_dir)}
+    area, owners, free = {}, {}, 0
+    for o in d["grid"]:
+        if not o:
+            continue
+        cid = uclan.get(o)
+        if cid is None:
+            free += 1
+            continue
+        area[cid] = area.get(cid, 0) + 1
+        owners.setdefault(cid, set()).add(o)
+    out = [{"id": cid, "name": names.get(cid) or ("clan %s" % cid), "rgb": list(col.get(cid) or (0, 0, 0)),
+            "blocks8": n, "owners": len(owners.get(cid) or ())} for cid, n in area.items()]
+    out.sort(key=lambda x: -x["blocks8"])
+    return {"ok": True, "clans": out, "no_clan_blocks8": free}
+
+
+def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False, by_clan=False, shops=False):
     """PNG-картинка карты: вода/суша/горы/природа/постройки + клаймы.
     ``force=True`` игнорирует кэш по mtime и перерисовывает картинку заново
     (кнопка «пересмотреть» — на случай, если файл обновился, а mtime почему-то
@@ -1073,12 +1112,17 @@ def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False):
     except (TypeError, ValueError):
         owner = 0
     sc = None if scale in (None, "", "auto") else max(1, min(16, int(scale)))
-    ck = (path, sc, bool(claims), owner)
+    ck = (path, sc, bool(claims), owner, bool(by_clan), bool(shops))
     hit = _MAPIMG_CACHE.get(ck)
     if not force and hit and hit[0] == mt:
         return hit[1], "map%d.png" % map_id, {"cached": True}
+    owner_color = None
+    if by_clan:
+        col, uclan = clan_colors(world_dir)
+        owner_color = {u: col.get(c) for u, c in uclan.items()}
     res = mapdt.render_png(path, world_dir=world_dir, block_class=_block_class(world_dir),
-                           scale=sc, claims=claims, only_owner=owner)
+                           scale=sc, claims=claims or bool(by_clan), only_owner=owner,
+                           owner_color=owner_color, mark_shops=bool(shops))
     if not res.get("ok"):
         return res, None, None
     png = res["png"]
@@ -1093,10 +1137,13 @@ def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False):
 def _store_owner_grid(path, mt, world_dir, res):
     grid = list(res["owner_grid"] or [])
     names = load_user_list(world_dir)
+    cnames = {c.get("id"): c.get("name") for c in _clans_raw(world_dir)}
+    _col, uclan = clan_colors(world_dir)
     _MAPOWN_CACHE[path] = (mt, {
         "w": res["w"], "h": res["h"], "um_w": res["um_w"], "um_h": res["um_h"],
         "grid": grid,
         "names": {str(o): (names.get(o) or ("id %d" % o)) for o in set(grid) if o},
+        "clans": {str(o): cnames.get(uclan[o]) for o in set(grid) if o and uclan.get(o) is not None},
     })
     if len(_MAPOWN_CACHE) > 12:
         _MAPOWN_CACHE.pop(next(iter(_MAPOWN_CACHE)))
@@ -2149,16 +2196,19 @@ def clan_history(cfg, cid, events_path, points_path, days=60):
 
 
 # --- торговля: терминалы игроков (terminals.dt2) + магазины на картах (.dt) ----
-_SHOPS_CACHE = {}  # map path -> (mtime, [shop])
+_MAPSCAN_CACHE = {}  # map path -> (mtime, {"shops": [...], "items": {type: n}})
 
 
-def _shops_all(world_dir):
+def _maps_scan(world_dir):
+    """Один проход по всем map*.dt (кэш по mtime каждой карты): магазины и
+    полный счёт предметов в сундуках/контейнерах. Общий для «Торговли» и
+    «Экономики» — первый раз десятки секунд, дальше только изменённые карты."""
     md = os.path.join(world_dir, "Data", "maps")
-    out = []
+    shops, items = [], {}
     try:
         files = sorted(os.listdir(md))
     except OSError:
-        return out
+        return shops, items
     for f in files:
         m = re.match(r"map(\d+)\.dt$", f)
         if not m:
@@ -2168,13 +2218,21 @@ def _shops_all(world_dir):
             mt = os.path.getmtime(fp)
         except OSError:
             continue
-        hit = _SHOPS_CACHE.get(fp)
+        hit = _MAPSCAN_CACHE.get(fp)
         if not hit or hit[0] != mt:
             d = mapdt.parse(fp, world_dir=world_dir, list_shops=True)
-            hit = (mt, [dict(s, map=int(m.group(1))) for s in (d.get("shops") or [])] if d.get("ok") else [])
-            _SHOPS_CACHE[fp] = hit
-        out.extend(hit[1])
-    return out
+            val = {"shops": [dict(s, map=int(m.group(1))) for s in (d.get("shops") or [])],
+                   "items": d.get("chest_items_all") or {}} if d.get("ok") else {"shops": [], "items": {}}
+            hit = (mt, val)
+            _MAPSCAN_CACHE[fp] = hit
+        shops.extend(hit[1]["shops"])
+        for t, n in hit[1]["items"].items():
+            items[t] = items.get(t, 0) + n
+    return shops, items
+
+
+def _shops_all(world_dir):
+    return _maps_scan(world_dir)[0]
 
 
 def trade_report(cfg):
@@ -2231,6 +2289,313 @@ def trade_report(cfg):
     shops.sort(key=lambda x: -x["sales"])
     return {"ok": True, "offers": offers, "terminals": terminals, "shops": shops,
             "scan_sec": round(time.time() - t0, 1)}
+
+
+# --- экономика: сколько чего в мире (игроки + сундуки на картах + торговля) ----
+def _player_items(world_dir):
+    """{uid: {type: count}} — склад (user.Inventory) + при себе (unit.Inventory)."""
+    d = os.path.join(world_dir, "Data", "users")
+    out = {}
+    try:
+        listing = os.listdir(d)
+    except OSError:
+        return out
+    for nm in listing:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        try:
+            uid = int(raw.get("id") if raw.get("id") is not None else m.group(1))
+        except (TypeError, ValueError):
+            continue
+        inv = {}
+        for it in (raw.get("Inventory") or {}).get("items") or []:
+            if it.get("count"):
+                inv[it.get("type")] = inv.get(it.get("type"), 0) + int(it["count"])
+        if raw.get("unitId") is not None:
+            unit = _read_json(os.path.join(world_dir, "Data", "units", "unit%s.json" % raw["unitId"]))
+            for it in (unit.get("Inventory") or {}).get("items") or []:
+                if it.get("count"):
+                    inv[it.get("type")] = inv.get(it.get("type"), 0) + int(it["count"])
+        if inv:
+            out[uid] = inv
+    return out
+
+
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    return (xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0) if n else None
+
+
+def economy_report(cfg, hist_path):
+    """Сводка по каждому предмету: у игроков / в сундуках на картах / в торговле,
+    держатели, медианный курс по предложениям, изменение за 1 и 7 дней (по
+    ежедневным снимкам ``hist_path``; снимок за сегодня дописывается здесь же)."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    t0 = time.time()
+    names = load_user_list(world_dir)
+    items = load_items(world_dir)
+    per = _player_items(world_dir)
+    _shops, cont = _maps_scan(world_dir)
+    tr = trade_report(cfg)
+    in_players, holders = {}, {}
+    for uid, inv in per.items():
+        for t, n in inv.items():
+            in_players[t] = in_players.get(t, 0) + n
+            holders.setdefault(t, []).append((n, uid))
+    in_trade = {}
+
+    def add_tr(lst):
+        for x in lst:
+            in_trade[x["id"]] = in_trade.get(x["id"], 0) + x["count"]
+    for o in tr.get("offers") or []:
+        add_tr(o["give"])
+    for t in (tr.get("terminals") or []) + (tr.get("shops") or []):
+        add_tr(t["storage"])
+    # курс: цена 1 предмета в самой частой валюте его предложений
+    rates = {}
+    for o in tr.get("offers") or []:
+        if o.get("unit"):
+            rates.setdefault(o["give"][0]["id"], {}).setdefault(o["want"][0]["id"], []).append(o["unit"])
+    hist = []
+    for ln in _read_text(hist_path, tail_bytes=6_000_000).splitlines():
+        try:
+            hist.append(json.loads(ln))
+        except ValueError:
+            continue
+    now = time.time()
+
+    def total_at(age_days):
+        best = None
+        for h in hist:
+            if h.get("t", 0) <= now - age_days * 86400 + 3600:
+                best = h
+        return (best or {}).get("totals")
+    ago1, ago7 = total_at(1), total_at(7)
+    all_ids = set(in_players) | set(cont) | set(in_trade)
+    out, totals = [], {}
+    for t in all_ids:
+        pn, cn, tn = in_players.get(t, 0), cont.get(t, 0), in_trade.get(t, 0)
+        tot = pn + cn + tn
+        if not tot:
+            continue
+        totals[str(t)] = tot
+        slug = items.get(t)
+        hs = sorted(holders.get(t, []), reverse=True)
+        rate = None
+        if t in rates:
+            pay, vals = max(rates[t].items(), key=lambda kv: len(kv[1]))
+            ps = items.get(pay)
+            rate = {"pay_id": pay, "pay": item_label(ps) if ps else "#%s" % pay,
+                    "median": round(_median(vals), 4), "n": len(vals)}
+        out.append({
+            "id": t, "name": item_label(slug) if slug else "#%s" % t,
+            "players": pn, "containers": cn, "trade": tn, "total": tot,
+            "holders": len(hs),
+            "top": [{"id": u, "name": names.get(u) or ("id %s" % u), "count": n} for n, u in hs[:5]],
+            "rate": rate,
+            "d1": (tot - (ago1 or {}).get(str(t), 0)) if ago1 is not None else None,
+            "d7": (tot - (ago7 or {}).get(str(t), 0)) if ago7 is not None else None,
+        })
+    out.sort(key=lambda x: -x["total"])
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not hist or hist[-1].get("date") != today:
+        try:
+            os.makedirs(os.path.dirname(hist_path), exist_ok=True)
+            with io.open(hist_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"date": today, "t": int(now), "totals": totals},
+                                   separators=(",", ":")) + "\n")
+            _rotate(hist_path, 20_000_000)
+        except OSError:
+            logging.exception("economy: снимок")
+    return {"ok": True, "items": out, "players_scanned": len(per), "snapshots": len(hist) + (0 if hist and hist[-1].get("date") == today else 1),
+            "scan_sec": round(time.time() - t0, 1)}
+
+
+def economy_snapshot_due(hist_path):
+    """True, если за сегодня ещё нет снимка экономики (фоновый поток зовёт
+    economy_report раз в сутки — чтобы динамика копилась без открытия вкладки)."""
+    tail = _read_text(hist_path, tail_bytes=2_000_000).strip().splitlines()
+    if not tail:
+        return True
+    try:
+        return json.loads(tail[-1]).get("date") != datetime.now().strftime("%Y-%m-%d")
+    except ValueError:
+        return True
+
+
+def economy_item_history(hist_path, item_id):
+    try:
+        key = str(int(item_id))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    series = []
+    for ln in _read_text(hist_path, tail_bytes=20_000_000).splitlines():
+        try:
+            h = json.loads(ln)
+        except ValueError:
+            continue
+        series.append({"t": h.get("t"), "v": (h.get("totals") or {}).get(key, 0)})
+    return {"ok": True, "series": series}
+
+
+# --- мониторинг нарушений: всплески инвентаря, быстрые исследования, цены ----
+_SUSP_WATCH_DEFAULT = {"silver_coin": 50000, "gold_coin": 5000, "platinum_coin": 1000, "tech_booster": 5}
+
+
+def _twink_links(cfg):
+    """{uid: set(uid)} — связанные аккаунты (одинаковый пароль или общий IP)."""
+    try:
+        d = twink_report(cfg, 2)
+    except Exception:  # noqa: BLE001
+        logging.exception("susp: twink_report")
+        return {}
+    links = {}
+    for g in (d.get("code_groups") or []) + (d.get("groups") or []):
+        ids = [a.get("id") for a in g.get("accounts") or [] if a.get("id") is not None]
+        for a in ids:
+            links.setdefault(a, set()).update(x for x in ids if x != a)
+    return links
+
+
+def inv_track_scan(cfg, state_path, log_path):
+    """Сравнить инвентари всех игроков с прошлым проходом. Всплеск = рост
+    предмета из «наблюдаемых» (монеты, бустеры; ``players.suspicious.watch``)
+    выше порога, либо любого предмета на ≥ max(generic_min, 10× было). Для
+    каждого всплеска ищем «доноров» — у кого в тот же интервал этого предмета
+    убыло сопоставимо, и помечаем, если донор — связанный аккаунт (твинк)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return []
+    sc = _cfg_pl(cfg).get("suspicious", {}) or {}
+    watch = dict(_SUSP_WATCH_DEFAULT)
+    watch.update(sc.get("watch") or {})
+    gen_min = int(sc.get("generic_min", 2000))
+    items = load_items(world_dir)
+    slug2id = {v: k for k, v in items.items()}
+    watch_id = {slug2id[k]: v for k, v in watch.items() if k in slug2id}
+    cur = _player_items(world_dir)
+    st = _read_json(state_path) or {}
+    prev = {int(k): {int(t): n for t, n in v.items()} for k, v in (st.get("inv") or {}).items()}
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    events = []
+    if prev:
+        names = load_user_list(world_dir)
+        spikes = []
+        for uid, inv in cur.items():
+            p = prev.get(uid)
+            if p is None:
+                continue
+            for t, n in inv.items():
+                gain = n - p.get(t, 0)
+                if gain <= 0:
+                    continue
+                thr = watch_id.get(t)
+                if (thr is not None and gain >= thr) or gain >= max(gen_min, 10 * p.get(t, 0)):
+                    spikes.append((uid, t, gain, p.get(t, 0), n))
+        links = _twink_links(cfg) if spikes else {}
+        for uid, t, gain, was, now_n in spikes:
+            donors = []
+            for ouid, pinv in prev.items():
+                if ouid == uid:
+                    continue
+                loss = pinv.get(t, 0) - (cur.get(ouid) or {}).get(t, 0)
+                if loss >= gain * 0.5:
+                    donors.append({"id": ouid, "name": names.get(ouid) or ("id %s" % ouid), "loss": loss,
+                                   "twink": ouid in links.get(uid, ())})
+            slug = items.get(t)
+            events.append({"ts": ts, "kind": "inv_spike", "uid": uid, "name": names.get(uid) or ("id %s" % uid),
+                           "item": item_label(slug) if slug else "#%s" % t, "item_id": t,
+                           "gain": gain, "was": was, "now": now_n, "watched": t in watch_id,
+                           "donors": sorted(donors, key=lambda x: -x["loss"])[:5],
+                           "twink": any(x["twink"] for x in donors)})
+    try:
+        tmp = state_path + ".swtmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"updated": ts, "inv": {str(u): {str(t): n for t, n in v.items()} for u, v in cur.items()}},
+                      f, separators=(",", ":"))
+        os.replace(tmp, state_path)
+    except OSError:
+        logging.exception("susp: state")
+    _susp_append(log_path, events)
+    return events
+
+
+def research_check(cfg, tt_events, prev_research, elapsed_s, log_path):
+    """Быстрые исследования: за интервал ``elapsed_s`` игрок получил техи общей
+    стоимостью больше, чем позволяет время + потраченные бустеры (1 бустер =
+    1 ч). Тех, который уже шёл на прошлом проходе, не считаем (он мог почти
+    закончиться). Выдача теха админом тоже попадёт сюда — это видно в аудите."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir or not elapsed_s:
+        return []
+    meta = tech_meta(world_dir)
+    boosts = {}
+    for e in tt_events:
+        if e.get("kind") == "booster_spent":
+            boosts[e["uid"]] = boosts.get(e["uid"], 0) + int(e.get("delta") or 0)
+    events = []
+    for e in tt_events:
+        if e.get("kind") != "tech_gained":
+            continue
+        uid = e["uid"]
+        techs = [t for t in (e.get("techs") or []) if t != prev_research.get(str(uid))]
+        cost = sum((meta.get(t) or {}).get("cost_min") or 0 for t in techs)
+        allowed = elapsed_s / 60.0 + boosts.get(uid, 0) * 60
+        if cost > allowed * 1.3 + 20:
+            events.append({"ts": e["ts"], "kind": "fast_research", "uid": uid, "name": e.get("name"),
+                           "techs": [tech_label(world_dir, t) for t in techs], "cost_min": round(cost),
+                           "allowed_min": round(allowed), "boosters": boosts.get(uid, 0)})
+    _susp_append(log_path, events)
+    return events
+
+
+def _susp_append(log_path, events):
+    if not events:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with io.open(log_path, "a", encoding="utf-8") as f:
+            for e in events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        _rotate(log_path, 3_000_000)
+    except OSError:
+        logging.exception("susp: log")
+
+
+def suspicious_read(cfg, log_path, trade=None, limit=500):
+    """Журнал подозрений + аномальные цены в торговле (курс в 10+ раз от
+    медианы той же пары «товар → оплата», если у пары ≥3 предложений)."""
+    rows = []
+    for ln in _read_text(log_path, tail_bytes=2_000_000).splitlines():
+        try:
+            rows.append(json.loads(ln))
+        except ValueError:
+            continue
+    anomalies = None
+    if trade and trade.get("ok"):
+        pairs = {}
+        for o in trade.get("offers") or []:
+            if o.get("unit"):
+                pairs.setdefault((o["give"][0]["id"], o["want"][0]["id"]), []).append(o)
+        anomalies = []
+        for (_g, _w), lst in pairs.items():
+            if len(lst) < 3:
+                continue
+            med = _median([o["unit"] for o in lst])
+            for o in lst:
+                if med and (o["unit"] < med / 10.0 or o["unit"] > med * 10.0):
+                    anomalies.append({"owner": o["owner"], "src": o["src"], "where": o["where"],
+                                      "give": o["give"], "want": o["want"], "unit": o["unit"],
+                                      "median": round(med, 4), "x": round(o["unit"] / med, 3)})
+        anomalies.sort(key=lambda a: min(a["x"], 1.0 / a["x"] if a["x"] else 0))
+    return {"ok": True, "events": rows[-limit:][::-1], "total": len(rows), "trade_anomalies": anomalies}
 
 
 # --- человеко-читаемые подписи к блокам/абилкам ------------------------------
