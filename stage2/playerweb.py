@@ -493,7 +493,7 @@ class PlayerWeb:
             if not fn:
                 return self._json(h, {"error": "unknown"}, 404)
             d = fn(s["uid"], q)
-            if (q.get("lang") or [""])[0] == "en" and isinstance(d, dict) and route not in ("chat", "events"):
+            if (q.get("lang") or [""])[0] == "en" and isinstance(d, dict) and route != "chat":
                 d = _tr(d)
             if isinstance(d, (bytes, bytearray)):
                 ttl = 86400 if route == "item-icons-png" else 60
@@ -850,10 +850,52 @@ class PlayerWeb:
                 "on_market": on_market}
 
     # ---------------------------------------------------------------------- чат
+    CHAT_PAGE = 60
+
+    def _private_rows(self, wd, me):
+        """Мои личные сообщения (от меня и мне), по порядку файла. Кэш по mtime."""
+        path = os.path.join(wd, "Logs", "chat_privat.txt")
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            return []
+        hit = self._cache.get(("priv", me))
+        if hit and hit[0] == mt:
+            return hit[1]
+        rows = []
+        for ln in players._read_text(path).splitlines():
+            m = players._PRIV_RX.match(ln)
+            if m and me and (m.group(2) == me or m.group(3) == me):
+                out = m.group(2) == me
+                rows.append({"ts": m.group(1), "nick": m.group(2), "to": m.group(3), "text": m.group(4),
+                             "out": out, "with": m.group(3) if out else m.group(2)})
+        self._cache[("priv", me)] = (mt, rows)
+        return rows
+
+    def _page(self, rows, q):
+        """Страница сообщений (по времени, старые сверху): последние CHAT_PAGE;
+        ?before=i — более старые, чем #i; ?after=i — новее #i (для обновления).
+        Каждому сообщению — его номер ``i`` в этом (отфильтрованном) списке."""
+        g = lambda k: (q.get(k) or [""])[0]
+        n = len(rows)
+        try:
+            if g("after") != "":
+                a = int(g("after")) + 1
+                lo, hi = max(0, a), n
+            elif g("before") != "":
+                hi = max(0, min(n, int(g("before"))))
+                lo = max(0, hi - self.CHAT_PAGE)
+            else:
+                lo, hi = max(0, n - self.CHAT_PAGE), n
+        except ValueError:
+            lo, hi = max(0, n - self.CHAT_PAGE), n
+        return {"total": n, "more": lo > 0, "messages": [dict(r, i=k) for k, r in enumerate(rows[lo:hi], lo)]}
+
     def _api_chat(self, uid, q):
         """Общие каналы — целиком; клановый — только сообщения нынешних участников
         моего клана (в логе игры клановые чаты всех кланов в одном файле, клан у
-        строки не записан); личные — только мои (от меня и мне)."""
+        строки не записан); личные — только мои: без ?with — список бесед, с ?with=ник —
+        переписка с ним. Сообщения — страницами (см. _page)."""
         wd = players.find_world_dir(self.cfg)
         if not wd:
             return {"ok": False, "error": "каталог мира не найден"}
@@ -862,12 +904,20 @@ class PlayerWeb:
         names = players.load_user_list(wd)
         me = names.get(uid)
         if ch == "private":
-            rows = []
-            for ln in players._read_text(os.path.join(wd, "Logs", "chat_privat.txt")).splitlines():
-                m = players._PRIV_RX.match(ln)
-                if m and me and (m.group(2) == me or m.group(3) == me):
-                    rows.append({"ts": m.group(1), "nick": m.group(2), "to": m.group(3), "text": m.group(4),
-                                 "out": m.group(2) == me})
+            rows = self._private_rows(wd, me)
+            who = (q.get("with") or [""])[0]
+            if not who:                      # список бесед
+                conv = collections.OrderedDict()
+                for r in rows:
+                    c = conv.setdefault(r["with"], {"with": r["with"], "count": 0, "hit": not qq or qq in r["with"].lower()})
+                    c["count"] += 1
+                    c.update(last_ts=r["ts"], last_text=r["text"], last_out=r["out"])
+                    if qq and qq in r["text"].lower():
+                        c["hit"] = True
+                lst = [c for c in conv.values() if c.pop("hit")]
+                lst.sort(key=lambda c: -_epoch(c["last_ts"]))
+                return {"ok": True, "ch": ch, "conversations": lst}
+            rows = [r for r in rows if r["with"] == who]
         else:
             if ch not in ("global", "global2", "ru", "clan"):
                 return {"ok": False, "error": "нет такого канала"}
@@ -877,26 +927,12 @@ class PlayerWeb:
                 c = next((x for x in players._clans_raw(wd) if x.get("id") == cid), None) if cid else None
                 mates = {names.get(u.get("userId")) for u in (c or {}).get("users") or []}
                 rows = [r for r in rows if r["nick"] in mates] if c else []
-            rows = [{"ts": r["ts"], "nick": r["nick"], "text": r["text"]} for r in rows]
+            rows = [{"ts": r["ts"], "nick": r["nick"], "text": r["text"], "out": r["nick"] == me} for r in rows]
         if qq:
             rows = [r for r in rows if qq in r["text"].lower() or qq in r["nick"].lower()]
-        return {"ok": True, "ch": ch, "total": len(rows), "messages": rows[-300:][::-1]}
-
-    def _api_events(self, uid, q):
-        """Лента сервера: новые игроки, смерти, события кланов (создан/распущен/переименован)."""
-        d = self._cached("events", 60, lambda: players.server_events(self.cfg, 400, ["register", "death"]))
-        ev = [{"ts": e["ts"], "epoch": e["epoch"], "kind": e["kind"], "who": e["actor"], "detail": e.get("detail") or ""}
-              for e in d.get("events") or []]
-        for ln in players._read_text(self._ct_events, tail_bytes=1_000_000).splitlines():
-            try:
-                e = json.loads(ln)
-            except ValueError:
-                continue
-            if e.get("kind") in ("created", "disbanded", "renamed"):
-                ev.append({"ts": e.get("ts"), "epoch": _epoch(e.get("ts")), "kind": "clan_" + e["kind"],
-                           "who": e.get("clan_name") or "", "detail": e.get("was") or ""})
-        ev.sort(key=lambda e: -(e["epoch"] or 0))
-        return {"ok": True, "events": ev[:300]}
+        d = self._page(rows, q)
+        d.update(ok=True, ch=ch)
+        return d
 
     # ------------------------------------------------------------------ сундуки
     def _map_containers(self, wd, mp):
@@ -1161,6 +1197,16 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .card.fill{display:flex;flex-direction:column}
 .card.fill>.grow{flex:1 1 0;min-height:80px;max-height:none;overflow:auto;align-content:flex-start}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chatlog{height:62vh;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.cmsg{max-width:80%;align-self:flex-start;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:5px 10px}
+.cmsg.out{align-self:flex-end;border-color:var(--acc)}
+.cmeta{font-size:12px} .ctext{white-space:pre-wrap;word-break:break-word}
+.conv{display:grid;grid-template-columns:260px 1fr;gap:10px}
+.convlist{max-height:66vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.conv-it{padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer} .conv-it:hover,.conv-it.on{background:var(--panel2)}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.backbtn{display:none}
+@media (max-width:700px){.conv{grid-template-columns:1fr} .conv.open .convlist{display:none} .conv:not(.open) .convpane{display:none} .backbtn{display:inline-block}}
 .ico{display:inline-block;flex:0 0 auto;background-repeat:no-repeat;vertical-align:middle}
 .iname{display:inline-flex;align-items:center;gap:6px}
 .ibtn{display:inline-flex;align-items:center;gap:6px;padding:3px 10px 3px 5px;border:1px solid var(--line);border-radius:14px;background:var(--panel2);color:var(--fg);cursor:pointer;font:inherit;line-height:1.3}
@@ -1168,7 +1214,7 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .ibtns{display:flex;flex-wrap:wrap;gap:6px}
 @media (max-width:600px){main{padding:10px}
   nav{flex-wrap:nowrap;overflow-x:auto;padding:6px 10px;scrollbar-width:none} nav::-webkit-scrollbar{display:none}
-  nav button{flex:0 0 auto} header{padding:8px 10px}}
+  nav button{flex:0 0 auto} header{padding:8px 10px;gap:6px} header h1{font-size:15px} #who .nk{display:none}}
 </style>
 </head>
 <body>
@@ -1182,6 +1228,13 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Английский":"English",
+  "сообщений: ":"messages: ",
+  "это начало переписки":"this is the beginning",
+  "прокрутите вверх — загружу ещё":"scroll up to load more",
+  "вы: ":"you: ",
+  "Выберите собеседника слева.":"Pick a conversation on the left.",
+  "Только чтение. Прокрутите вверх, чтобы загрузить более старые сообщения; новые подгружаются раз в 20 секунд.":"Read-only. Scroll up to load older messages; new ones arrive every 20 seconds.",
   "Админка":"Admin",
   "Новый админский пароль (от 8 символов)":"New admin password (8+ chars)",
   "Админский пароль":"Admin password",
@@ -1413,28 +1466,10 @@ var EN_DICT={
   "Русский":"Russian",
   "Личные":"Private",
   "События":"Events",
-  "убит":"killed",
-  "сброс позиции":"position reset",
-  "голод":"starvation",
-  "задохнулся":"suffocated",
-  "газ":"gas",
-  "мох":"moss",
-  "новый игрок":"new player",
-  "смерть":"death",
-  "создан клан":"clan created",
-  "распущен клан":"clan disbanded",
-  "клан переименован":"clan renamed",
   "Поиск по нику или тексту":"Search by nickname or text",
-  "События сервера":"Server events",
-  "Кто":"Who",
-  "было: ":"was: ",
-  "пока пусто":"nothing yet",
-  " · сообщений: ":" · messages: ",
-  " (последние 300)":" (last 300)",
   "Сообщения нынешних участников вашего клана.":"Messages from current members of your clan.",
   "Только ваши личные сообщения — от вас и вам.":"Only your private messages — from you and to you.",
   "сообщений нет":"no messages",
-  "Только чтение, обновляется раз в 20 секунд.":"Read-only, refreshes every 20 seconds.",
   "вступил":"joined",
   "ушёл":"left",
   "роль":"role",
@@ -1576,7 +1611,7 @@ function render(){
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
   if(!S.nick){ nav.style.display="none"; return renderLogin(); }
   nav.style.display="";
-  who.appendChild(document.createTextNode(S.nick+"  "));
+  who.appendChild(el("span",{class:"nk"},[S.nick+"  "]));
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
@@ -1925,42 +1960,94 @@ function tabBook(m){
   if(last) open(last);
 }
 
-// ---------------------------------------------------------------- чат и события
-var CH=[["global",L("Общий")],["global2","Global (EN)"],["ru",L("Русский")],["clan",L("Клан")],["private",L("Личные")],["events",L("События")]];
-var EVD={kill:L("убит"),reset_position:L("сброс позиции"),satiety:L("голод"),oxygen:L("задохнулся"),gas:L("газ"),moss:L("мох")};
-var EVK={register:L("новый игрок"),death:L("смерть"),clan_created:L("создан клан"),clan_disbanded:L("распущен клан"),clan_renamed:L("клан переименован")};
+// ---------------------------------------------------------------- чат
+// Как в мессенджере: новые снизу, при прокрутке вверх догружаются старые
+// (?before=i), раз в 20 с подтягиваются новые (?after=i). Личные — список
+// собеседников слева, переписка справа (на телефоне — по очереди).
+var CH=[["global",L("Общий")],["global2",L("Английский")],["ru",L("Русский")],["clan",L("Клан")],["private",L("Личные")]];
+function chatLog(url, opt){
+  opt=opt||{};
+  var box=el("div",{class:"chatlog"}), first=null, last=null, busy=false, done=false, tmr=null;
+  var top=el("div",{class:"muted small",style:"text-align:center;padding:6px"},[""]);
+  box.appendChild(top);
+  function msgEl(r){
+    return el("div",{class:"cmsg"+(r.out?" out":"")},[
+      el("div",{class:"cmeta"},[opt.showNick===false? null : el("b",{},[r.nick]), r.to&&opt.showTo? el("span",{},[" → "+r.to]) : null, el("span",{class:"muted"},["  "+r.ts])]),
+      el("div",{class:"ctext"},[r.text])]); }
+  function load(q, place){
+    if(busy) return; busy=true;
+    return api(url+(url.indexOf("?")<0?"?":"&")+q).then(function(d){
+      busy=false; if(S.tab!=="chat"||!box.isConnected&&place!=="init") return;
+      var ms=d.messages||[];
+      if(place==="older"){
+        var h0=box.scrollHeight, frag=document.createDocumentFragment();
+        ms.forEach(function(r){ frag.appendChild(msgEl(r)); });
+        top.after(frag); box.scrollTop+=box.scrollHeight-h0;
+      } else if(place==="newer"){
+        var atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<40;
+        ms.forEach(function(r){ box.appendChild(msgEl(r)); });
+        if(atBottom) box.scrollTop=box.scrollHeight;
+      } else {
+        ms.forEach(function(r){ box.appendChild(msgEl(r)); });
+        setTimeout(function(){ box.scrollTop=box.scrollHeight; },0);
+        if(!ms.length) top.textContent=L("сообщений нет");
+      }
+      if(ms.length){ first=first==null? ms[0].i : Math.min(first, ms[0].i);
+                     last=last==null? ms[ms.length-1].i : Math.max(last, ms[ms.length-1].i); }
+      if(place!=="newer"){ done=!d.more; if(ms.length||place==="older") top.textContent= done? L("это начало переписки") : L("прокрутите вверх — загружу ещё"); }
+      if(opt.onTotal) opt.onTotal(d.total);
+    }).catch(function(e){ busy=false; top.textContent=errText(e); });
+  }
+  box.addEventListener("scroll",function(){ if(box.scrollTop<80 && !done && first!=null) load("before="+first,"older"); });
+  function poll(){ clearTimeout(tmr); tmr=setTimeout(function(){
+      if(!box.isConnected||S.tab!=="chat") return;
+      (last==null? load("","init") : load("after="+last,"newer")); poll(); },20000); }
+  load("","init"); poll();
+  return box;
+}
 function tabChat(m){
   var ch="global"; try{ ch=localStorage.getItem("swp_ch")||"global"; }catch(e){}
-  var bar=el("div",{class:"row"}), q=el("input",{placeholder:L("Поиск по нику или тексту"),style:"width:100%"}), out=el("div"), tmr=null;
+  if(!CH.some(function(c){ return c[0]===ch; })) ch="global";
+  var bar=el("div",{class:"row"}), q=el("input",{placeholder:L("Поиск по нику или тексту"),style:"width:100%"}), out=el("div"), peer=null;
   function draw(){
     bar.innerHTML="";
-    CH.forEach(function(c){ bar.appendChild(el("button",{class:ch===c[0]?"pri":"",onclick:function(){ ch=c[0]; try{ localStorage.setItem("swp_ch",ch); }catch(e){} draw(); }},[c[1]])); });
-    q.style.display=ch==="events"?"none":"";
-    fetchC();
+    CH.forEach(function(c){ bar.appendChild(el("button",{class:ch===c[0]?"pri":"",onclick:function(){ ch=c[0]; peer=null; try{ localStorage.setItem("swp_ch",ch); }catch(e){} draw(); }},[c[1]])); });
+    show();
   }
-  function fetchC(){
-    clearTimeout(tmr);
-    var p= ch==="events"? "/api/events" : "/api/chat?ch="+ch+"&q="+encodeURIComponent(q.value.trim());
-    api(p).then(function(d){
-      if(S.tab!=="chat") return;
-      out.innerHTML="";
-      if(ch==="events"){
-        out.appendChild(card(L("События сервера"),[d.events.length? el("div",{class:"scroll",style:"max-height:65vh"},[table([L("Когда"),L("Что"),L("Кто"),""],d.events,function(e){
-          return [e.ts, EVK[e.kind]||e.kind, e.who, e.kind==="death"? (EVD[e.detail]||e.detail) : e.kind==="clan_renamed"&&e.detail? L("было: ")+e.detail : e.detail]; })]) : el("div",{class:"muted"},[L("пока пусто")])]));
-      } else {
-        var rows=d.messages.map(function(r){ return el("div",{style:"padding:3px 0;border-bottom:1px solid var(--line)"},[
-          el("span",{class:"muted small"},[r.ts+"  "]),
-          el("b",{style:r.out?"color:var(--acc)":""},[r.nick]), r.to? el("span",{class:"muted"},[" → "+r.to]) : null, ": "+r.text]); });
-        out.appendChild(card((CH.filter(function(c){ return c[0]===ch; })[0]||[,""])[1]+L(" · сообщений: ")+d.total+(d.total>300?L(" (последние 300)"):""),[
-          ch==="clan"? el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Сообщения нынешних участников вашего клана.")]) : null,
-          ch==="private"? el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Только ваши личные сообщения — от вас и вам.")]) : null,
-          rows.length? el("div",{class:"scroll",style:"max-height:65vh"},rows) : el("div",{class:"muted"},[L("сообщений нет")])]));
-      }
-      tmr=setTimeout(fetchC,20000);
-    }).catch(function(e){ out.innerHTML=""; out.appendChild(errBox(e)); });
+  function show(){
+    out.innerHTML="";
+    var qs=q.value.trim()? "&q="+encodeURIComponent(q.value.trim()) : "";
+    var title=(CH.filter(function(c){ return c[0]===ch; })[0]||[,""])[1];
+    if(ch!=="private"){
+      var cnt=el("span",{class:"muted small"});
+      out.appendChild(card("",[el("div",{class:"row",style:"justify-content:space-between;margin-bottom:6px"},[el("b",{},[title]),cnt]),
+        ch==="clan"? el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Сообщения нынешних участников вашего клана.")]) : null,
+        chatLog("/api/chat?ch="+ch+qs,{onTotal:function(n){ cnt.textContent=L("сообщений: ")+n; }})]));
+      return;
+    }
+    // личные: беседы + переписка
+    var list=el("div",{class:"convlist"}), pane=el("div",{class:"convpane"});
+    var wrap=el("div",{class:"conv"+(peer?" open":"")},[list,pane]);
+    out.appendChild(card("",[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Только ваши личные сообщения — от вас и вам.")]), wrap]));
+    list.appendChild(el("div",{class:"muted small"},[L("Загрузка…")]));
+    api("/api/chat?ch=private"+qs).then(function(d){
+      list.innerHTML="";
+      if(!d.conversations.length){ list.appendChild(el("div",{class:"muted"},[L("сообщений нет")])); return; }
+      d.conversations.forEach(function(c){
+        list.appendChild(el("div",{class:"conv-it"+(peer===c.with?" on":""),onclick:function(){ peer=c.with; show(); }},[
+          el("div",{class:"row",style:"justify-content:space-between"},[el("b",{},[c.with]), el("span",{class:"muted small"},[c.count])]),
+          el("div",{class:"muted small ell"},[(c.last_out? L("вы: ") : "")+c.last_text]),
+          el("div",{class:"muted small"},[c.last_ts])])); });
+      if(!peer && window.innerWidth>700) { peer=d.conversations[0].with; show(); }
+    }).catch(function(e){ list.innerHTML=""; list.appendChild(errBox(e)); });
+    if(peer){
+      pane.appendChild(el("div",{class:"row",style:"margin-bottom:6px"},[
+        el("button",{class:"backbtn",onclick:function(){ peer=null; show(); }},["←"]), el("b",{},[peer])]));
+      pane.appendChild(chatLog("/api/chat?ch=private&with="+encodeURIComponent(peer)+qs,{showNick:false}));
+    } else pane.appendChild(el("div",{class:"muted",style:"padding:20px"},[L("Выберите собеседника слева.")]));
   }
-  var qt; q.addEventListener("input",function(){ clearTimeout(qt); qt=setTimeout(fetchC,300); });
-  m.appendChild(card(L("Чат"),[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},[L("Только чтение, обновляется раз в 20 секунд.")])]));
+  var qt; q.addEventListener("input",function(){ clearTimeout(qt); qt=setTimeout(show,400); });
+  m.appendChild(card(L("Чат"),[bar,el("div",{style:"margin-top:8px"},[q]),el("div",{class:"muted small",style:"margin-top:6px"},[L("Только чтение. Прокрутите вверх, чтобы загрузить более старые сообщения; новые подгружаются раз в 20 секунд.")])]));
   m.appendChild(out); draw();
 }
 
