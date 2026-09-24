@@ -897,6 +897,23 @@ function tabMap(m){
           (t.x*8)+"–"+(t.x*8+7)+", "+(t.y*8)+"–"+(t.y*8+7), el("button",{onclick:function(){ focus(t.x*8+4,t.y*8+4); view.scrollIntoView({block:"nearest"}); }},["показать"])]; })])]));
     }
     function setRot(v){ keep(function(){ rot=v; try{ localStorage.setItem("swp_rot",String(rot)); }catch(e){} }); }
+    // протяжка как в админке: тащим зажатой ЛКМ (или пальцем), колесо — масштаб под курсором
+    img.draggable=false; view.style.cursor="grab"; view.style.touchAction="none"; view.style.userSelect="none";
+    var drag=null;
+    view.addEventListener("pointerdown",function(e){ if(e.button!==0) return;
+      drag={x:e.clientX,y:e.clientY,l:view.scrollLeft,t:view.scrollTop}; view.setPointerCapture(e.pointerId);
+      view.style.cursor="grabbing"; e.preventDefault(); });
+    view.addEventListener("pointermove",function(e){ if(!drag) return;
+      view.scrollLeft=drag.l-(e.clientX-drag.x); view.scrollTop=drag.t-(e.clientY-drag.y); });
+    function endDrag(){ drag=null; view.style.cursor="grab"; }
+    view.addEventListener("pointerup",endDrag); view.addEventListener("pointercancel",endDrag);
+    view.addEventListener("wheel",function(e){
+      if(!img.naturalWidth) return; e.preventDefault();
+      var nz=Math.max(1,Math.min(16,zoom+(e.deltaY<0?1:-1))); if(nz===zoom) return;
+      var r=view.getBoundingClientRect(), ox=e.clientX-r.left, oy=e.clientY-r.top;
+      var c=fromStage(view.scrollLeft+ox, view.scrollTop+oy);   // клетка под курсором остаётся под курсором
+      zoom=nz; place(); var p=toStage(c.x,c.y); view.scrollLeft=p.x-ox; view.scrollTop=p.y-oy;
+    },{passive:false});
     sel.addEventListener("change",show);
     box.appendChild(card("Мои участки на карте",[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
       el("button",{title:"повернуть против часовой на 45°",onclick:function(){ setRot(rot-45); }},["↺"]), rl,
@@ -904,7 +921,7 @@ function tabMap(m){
       el("button",{onclick:function(){ keep(function(){ zoom=Math.max(1,zoom-1); }); }},["−"]), zl,
       el("button",{onclick:function(){ keep(function(){ zoom=Math.min(16,zoom+1); }); }},["+"]),
       el("button",{onclick:focusMine},["ко мне"]), st]),
-      el("div",{class:"muted small",style:"margin-bottom:6px"},["Видно "+d.fog_radius+" клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы."]), view]));
+      el("div",{class:"muted small",style:"margin-bottom:6px"},["Видно "+d.fog_radius+" клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы. Карту можно тащить мышью, колесо — масштаб."]), view]));
     box.appendChild(tlist); show();
   });
 }
