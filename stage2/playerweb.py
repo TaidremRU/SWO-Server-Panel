@@ -2079,30 +2079,30 @@ var CE={joined:L("вступил"),left:L("ушёл"),role:L("роль"),tech:L(
 // Линейный график с осями: Y — 3 деления (мин/середина/макс), X — время.
 function chart(pts,o){
   o=o||{}; var wide=o.wide && window.innerWidth>700;   // на телефоне широкий график стал бы мелким
-  var W=wide?1100:520,H=wide?230:220,L=44,R=10,T=10,B=34;
+  var W=wide?1100:520,H=wide?230:220,ML=44,R=10,T=10,B=34;
   var box=el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[o.title||""])]);
   if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},[pts.length? L("сейчас: ")+pts[0].v+L(" · график появится, когда накопятся данные") : L("мало данных")])); return box; }
   var t0=pts[0].t,t1=pts[pts.length-1].t,lo=Infinity,hi=-Infinity; pts.forEach(function(p){ lo=Math.min(lo,p.v); hi=Math.max(hi,p.v); });
   if(o.zero) lo=Math.min(0,lo);
   if(hi===lo){ hi+=1; if(!o.zero) lo-=1; }
-  function X(t){ return L+(W-L-R)*(t-t0)/((t1-t0)||1); } function Y(v){ return T+(H-T-B)*(1-(v-lo)/(hi-lo)); }
+  function X(t){ return ML+(W-ML-R)*(t-t0)/((t1-t0)||1); } function Y(v){ return T+(H-T-B)*(1-(v-lo)/(hi-lo)); }
   var fmt=function(v){ return Math.abs(v)>=1000? Math.round(v).toLocaleString(LOC) : String(Math.round(v*10)/10); };
   var kids=[];
-  [lo,(lo+hi)/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:L,x2:W-R,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-dasharray":"3 3"}));
-    kids.push(svgEl("text",{x:L-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[fmt(v)])); });
+  [lo,(lo+hi)/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:ML,x2:W-R,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-dasharray":"3 3"}));
+    kids.push(svgEl("text",{x:ML-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[fmt(v)])); });
   var span=t1-t0, n=4, prevLab=null;
   for(var i=0;i<=n;i++){ var t=t0+span*i/n, d=new Date(t*1000);
     var lab= span>2*86400? (d.getDate()+"."+String(d.getMonth()+1).padStart(2,"0")) : (String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"));
     if(lab===prevLab) continue; prevLab=lab;
     kids.push(svgEl("line",{x1:X(t),x2:X(t),y1:H-B,y2:H-B+4,stroke:"var(--mut)"}));
     kids.push(svgEl("text",{x:X(t),y:H-B+16,"text-anchor":i===0?"start":i===n?"end":"middle","font-size":"11",fill:"var(--mut)"},[lab])); }
-  kids.push(svgEl("line",{x1:L,x2:W-R,y1:H-B,y2:H-B,stroke:"var(--mut)"}));
-  kids.push(svgEl("line",{x1:L,x2:L,y1:T,y2:H-B,stroke:"var(--mut)"}));
+  kids.push(svgEl("line",{x1:ML,x2:W-R,y1:H-B,y2:H-B,stroke:"var(--mut)"}));
+  kids.push(svgEl("line",{x1:ML,x2:ML,y1:T,y2:H-B,stroke:"var(--mut)"}));
   var d=pts.map(function(p,i){ return (i?"L":"M")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1); }).join(" ");
   kids.push(svgEl("path",{d:d+" L"+X(t1)+" "+(H-B)+" L"+X(t0)+" "+(H-B)+" Z",fill:"var(--acc)","fill-opacity":"0.12",stroke:"none"}));
   kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2"}));
   var xl=o.x||L("время"); if(span<=2*86400 && xl===L("дата")) xl=L("время");   // на оси часы, а не даты
-  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[xl]));
+  kids.push(svgEl("text",{x:(ML+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[xl]));
   kids.push(svgEl("text",{x:12,y:(T+H-B)/2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)",transform:"rotate(-90 12 "+((T+H-B)/2)+")"},[o.y||""]));
   box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:auto;display:block"},kids));
   return box;
