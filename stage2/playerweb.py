@@ -227,11 +227,12 @@ class PlayerWeb:
             except ValueError:
                 pass
         while not self._stop.is_set():
-            warm = set()
+            warm, chest_maps = set(), set()
             try:
                 wd = players.find_world_dir(self.cfg)
                 if wd:
                     warm = self._sample_explored(wd)
+                    chest_maps = self._panel_territory_maps(wd)
                     if time.time() - last_hist >= HISTORY_SEC:
                         self._history_snapshot(wd)
                         last_hist = time.time()
@@ -245,8 +246,24 @@ class PlayerWeb:
                 hit = self._map_img.get(mp)
                 if not hit or now - hit[0] >= MAP_IMG_CACHE_SEC - SAMPLE_SEC:
                     self._map_refresh(mp)
+            for mp in sorted(chest_maps):       # «Мои сундуки» — чтобы не ждать разбора карты
+                if self._stop.is_set():
+                    return
+                hit = self._cache.get(("containers", mp))
+                if not hit or time.time() - hit[0] >= self.CHESTS_TTL - SAMPLE_SEC:
+                    self._containers_refresh(wd, mp)
             if self._stop.wait(SAMPLE_SEC):
                 return
+
+    def _panel_territory_maps(self, wd):
+        """Карты, где есть участки у игроков, вошедших в панель (их сундуки держим тёплыми)."""
+        with self._slock:
+            uids = {v["uid"] for v in self._sessions.values()}
+        maps = set()
+        for u in uids:
+            raw = players._read_json(players._user_file(wd, u)) or {}
+            maps.update(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId") is not None)
+        return maps
 
     def _sample_explored(self, wd):
         """-> карты онлайн-игроков, у которых открыта панель (их стоит держать
@@ -947,17 +964,45 @@ class PlayerWeb:
         return d
 
     # ------------------------------------------------------------------ сундуки
+    CHESTS_TTL = 300
+
+    def _containers_refresh(self, wd, mp):
+        """Разобрать хранилища карты (map<N>.dt — секунды, на больших картах до ~30 с);
+        не больше одного разбора на карту одновременно."""
+        key = ("containers", mp)
+        with self._map_lock:
+            if key in self._map_busy:
+                return None
+            self._map_busy.add(key)
+        try:
+            path = os.path.join(wd, "Data", "maps", "map%d.dt" % mp)
+            d = players.mapdt.list_containers(path, world_dir=wd, item_names=players.load_items(wd), cap=10 ** 6, min_items=1)
+            if d.get("ok"):
+                self._cache[key] = (time.time(), d)
+            return d
+        except Exception:  # noqa: BLE001
+            logging.exception("playerweb: хранилища карты %s", mp)
+            return None
+        finally:
+            with self._map_lock:
+                self._map_busy.discard(key)
+
     def _map_containers(self, wd, mp):
-        """Все непустые хранилища карты (разбор map<N>.dt — секунды), кэш 5 мин на всех."""
+        """Все непустые хранилища карты, общий кэш: устаревшее отдаётся сразу, свежее
+        собирается в фоне; ждать приходится только самый первый раз (фоновый цикл
+        заранее греет карты участков тех, у кого открыта панель)."""
         key = ("containers", mp)
         hit = self._cache.get(key)
-        if hit and time.time() - hit[0] < 300:
+        if hit:
+            if time.time() - hit[0] >= self.CHESTS_TTL and key not in self._map_busy:
+                threading.Thread(target=self._containers_refresh, args=(wd, mp), daemon=True).start()
             return hit[1]
-        path = os.path.join(wd, "Data", "maps", "map%d.dt" % mp)
-        d = players.mapdt.list_containers(path, world_dir=wd, item_names=players.load_items(wd), cap=10 ** 6, min_items=1)
-        if d.get("ok"):
-            self._cache[key] = (time.time(), d)
-        return d
+        for _ in range(900):            # кто-то уже разбирает эту карту — дождаться
+            if key not in self._map_busy:
+                break
+            time.sleep(0.2)
+        hit = self._cache.get(key)
+        return hit[1] if hit else (self._containers_refresh(wd, mp) or {"ok": False})
 
     def _api_my_chests(self, uid, q):
         """Что лежит в хранилищах на МОИХ участках: сундуки и прочие ёмкости + брошенное
