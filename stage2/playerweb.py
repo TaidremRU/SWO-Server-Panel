@@ -10,6 +10,7 @@
 ``playerweb.allowed_nets`` пусто = пускать всех (панель для игроков); для
 выхода в интернет — только через обратный прокси с HTTPS.
 """
+import hashlib
 import html
 import http.cookies
 import json
@@ -25,6 +26,8 @@ import players
 from webui import Throttle, _Handler, _ip_allowed, _parse_nets
 
 SESSION_TTL = 12 * 3600
+REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
+REMEMBER_RECHECK = 60        # как часто сверять, не сменил ли игрок пароль в игре
 LEADERS_CACHE_SEC = 300
 
 
@@ -37,8 +40,9 @@ class PlayerWeb:
         self._ct_events = ct_events or os.path.join(base, "logs", "clan_events.jsonl")
         self._ct_points = ct_points or os.path.join(base, "logs", "clan_points.jsonl")
         self._tt_log = tt_log or os.path.join(base, "logs", "tech_track.jsonl")
-        self._sessions = {}          # tok -> {uid, nick, ts}
+        self._sessions = {}          # tok -> {uid, nick, exp, fp?, chk?}
         self._slock = threading.Lock()
+        self._remember_path = os.path.join(base, "playerweb_remember.json")
         self.throttle = Throttle()                                   # по IP
         self.nick_throttle = Throttle(max_fail=8, window=900, block=900)  # по нику (перебор с разных IP)
         self._cache = {}
@@ -102,16 +106,52 @@ class PlayerWeb:
         except Exception:  # noqa: BLE001
             return {}
 
+    @staticmethod
+    def _thash(tok):
+        return hashlib.sha256(tok.encode("utf-8")).hexdigest()
+
+    def _code_fp(self, uid):
+        """Отпечаток текущего игрового пароля: сменил пароль — запомненные входы гаснут."""
+        code = players.player_code(self.cfg, uid) or ""
+        return hashlib.sha256(("%s:%s" % (uid, code)).encode("utf-8")).hexdigest()[:24] if code else ""
+
+    def _remember_load(self):
+        d = players._read_json(self._remember_path) or {}
+        return d if isinstance(d, dict) else {}
+
+    def _remember_save(self, d):
+        now = time.time()
+        d = {k: v for k, v in d.items() if (v or {}).get("exp", 0) > now}
+        tmp = self._remember_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, self._remember_path)
+
     def _session(self, h):
         c = http.cookies.SimpleCookie(h.headers.get("Cookie", ""))
         tok = c["psid"].value if "psid" in c else ""
         if not tok:
             return "", None
+        now = time.time()
         with self._slock:
             s = self._sessions.get(tok)
-            if s and time.time() - s["ts"] > SESSION_TTL:
+            if not s:   # после перезапуска панели — поднять из «запомненных»
+                r = self._remember_load().get(self._thash(tok))
+                if r and r.get("exp", 0) > now:
+                    s = {"uid": r["uid"], "nick": r["nick"], "exp": r["exp"], "fp": r.get("fp"), "chk": 0}
+                    self._sessions[tok] = s
+            if s and s["exp"] < now:
                 self._sessions.pop(tok, None)
                 s = None
+            if s and s.get("fp") and now - s.get("chk", 0) > REMEMBER_RECHECK:
+                if self._code_fp(s["uid"]) != s["fp"]:
+                    self._sessions.pop(tok, None)
+                    d = self._remember_load()
+                    d.pop(self._thash(tok), None)
+                    self._remember_save(d)
+                    logging.info("playerweb: запомненный вход %s сброшен — пароль сменён", s["nick"])
+                    return tok, None
+                s["chk"] = now
         return tok, s
 
     def _title(self):
@@ -168,7 +208,10 @@ class PlayerWeb:
                 return self._json(h, {"error": "auth"}, 401)
             if route == "logout" and method == "POST":
                 with self._slock:
-                    self._sessions.pop(tok, None)
+                    if (self._sessions.pop(tok, None) or {}).get("fp"):
+                        d = self._remember_load()
+                        d.pop(self._thash(tok), None)
+                        self._remember_save(d)
                 return self._json(h, {"ok": True}, set_cookie="psid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
             if method != "GET":
                 return self._json(h, {"error": "unknown"}, 404)
@@ -214,14 +257,24 @@ class PlayerWeb:
         self.throttle.ok(ip)
         self.nick_throttle.ok(key)
         tok = secrets.token_urlsafe(32)
+        remember = bool(b.get("remember"))
         with self._slock:
             now = time.time()
-            for t in [t for t, s in self._sessions.items() if now - s["ts"] > SESSION_TTL]:
+            for t in [t for t, s in self._sessions.items() if s["exp"] < now]:
                 self._sessions.pop(t, None)
-            self._sessions[tok] = {"uid": uid, "nick": nick, "ts": now}
-        logging.info("playerweb: вход %s (#%s) с %s", nick, uid, ip)
-        return self._json(h, {"ok": True, "nick": nick},
-                          set_cookie="psid=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict" % (tok, SESSION_TTL))
+            s = {"uid": uid, "nick": nick, "exp": now + (REMEMBER_TTL if remember else SESSION_TTL)}
+            if remember:
+                s.update(fp=self._code_fp(uid), chk=now)
+                d = self._remember_load()
+                d[self._thash(tok)] = {"uid": uid, "nick": nick, "exp": s["exp"], "fp": s["fp"]}
+                self._remember_save(d)
+            self._sessions[tok] = s
+        logging.info("playerweb: вход %s (#%s) с %s%s", nick, uid, ip, " (запомнить)" if remember else "")
+        # без «запомнить» — кука живёт до закрытия браузера
+        cookie = "psid=%s; Path=/; HttpOnly; SameSite=Strict" % tok
+        if remember:
+            cookie += "; Max-Age=%d" % REMEMBER_TTL
+        return self._json(h, {"ok": True, "nick": nick}, set_cookie=cookie)
 
     # --------------------------------------------------------------------- api
     def _api_me(self, uid, q):
@@ -290,7 +343,15 @@ class PlayerWeb:
         online = []
         if wd:
             names = players.load_user_list(wd)
-            online = sorted(names.get(u) or ("id %s" % u) for u, on in players._online_now(wd).items() if on)
+            clans = players.load_clans(wd)
+            for u, on in players._online_now(wd).items():
+                if not on:
+                    continue
+                raw = players._read_json(players._user_file(wd, u)) or {}
+                c = clans.get(raw.get("clanId") or 0)
+                online.append({"name": names.get(u) or raw.get("name") or ("id %s" % u),
+                               "level": raw.get("unitLevel"), "clan": c["name"] if c else ""})
+            online.sort(key=lambda x: (-(x["level"] or 0), x["name"].lower()))
         lb = self._cached("leaders", LEADERS_CACHE_SEC,
                           lambda: players.leaderboards(self.cfg, self._tt_log, self._ct_points))
         ser = self._cached("online24", 120, lambda: players.online_series_recent(self.cfg, 24))
@@ -388,16 +449,20 @@ function fmtMin(m){ if(m==null) return ""; var h=Math.floor(m/60), mm=Math.round
 
 // ---------------------------------------------------------------- вход
 function renderLogin(){
-  var nick=el("input",{placeholder:"Ник в игре",autocomplete:"username"});
-  var code=el("input",{type:"password",placeholder:"Пароль из игры",autocomplete:"current-password"});
+  // настоящая <form> с name/autocomplete — браузер сам предложит сохранить ник и пароль
+  var nick=el("input",{name:"username",placeholder:"Ник в игре",autocomplete:"username"});
+  var code=el("input",{name:"password",type:"password",placeholder:"Пароль из игры",autocomplete:"current-password"});
+  var rem=el("input",{type:"checkbox",id:"rem",style:"width:auto;margin:0"});
+  try{ rem.checked=localStorage.getItem("swp_rem")!=="0"; }catch(e){ rem.checked=true; }
   var msg=el("div",{class:"msg err",style:"display:none"});
-  function go(){ msg.style.display="none";
-    api("/api/login",{nick:nick.value,code:code.value}).then(function(d){ S.nick=d.nick; render(); })
+  function go(ev){ ev.preventDefault(); msg.style.display="none";
+    try{ localStorage.setItem("swp_rem",rem.checked?"1":"0"); }catch(e){}
+    api("/api/login",{nick:nick.value,code:code.value,remember:rem.checked}).then(function(d){ S.nick=d.nick; render(); })
       .catch(function(e){ msg.textContent=errText(e)+(e.retry? " ("+e.retry+" с)":""); msg.style.display=""; }); }
-  code.addEventListener("keydown",function(e){ if(e.key==="Enter") go(); });
-  $("#main").appendChild(el("div",{class:"login card"},[el("h3",{},["Вход для игроков"]),
+  $("#main").appendChild(el("form",{class:"login card",method:"post",action:"#",onsubmit:go},[el("h3",{},["Вход для игроков"]),
     el("p",{class:"muted small"},["Ник и пароль — те же, что при входе на сервер."]), nick, code,
-    el("button",{class:"pri",style:"width:100%",onclick:go},["Войти"]), el("div",{style:"margin-top:10px"},[msg])]));
+    el("label",{for:"rem",class:"row small",style:"margin:0 0 12px;cursor:pointer"},[rem,"Запомнить меня на 30 дней"]),
+    el("button",{class:"pri",type:"submit",style:"width:100%"},["Войти"]), el("div",{style:"margin-top:10px"},[msg])]));
 }
 
 // ---------------------------------------------------------------- каркас
@@ -560,7 +625,7 @@ function tabCraft(m){
 var CE={joined:"вступил",left:"ушёл",role:"роль",tech:"клан-технология",renamed:"переименован",slots:"слоты",created:"создан",disbanded:"распущен"};
 // Линейный график с осями: Y — 3 деления (мин/середина/макс), X — время.
 function chart(pts,o){
-  o=o||{}; var W=520,H=200,L=44,R=10,T=10,B=34;
+  o=o||{}; var W=o.wide?1100:520,H=o.wide?230:200,L=44,R=10,T=10,B=34;
   var box=el("div",{style:"flex:1;min-width:260px"},[el("div",{class:"small muted"},[o.title||""])]);
   if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},["мало данных"])); return box; }
   var t0=pts[0].t,t1=pts[pts.length-1].t,lo=Infinity,hi=-Infinity; pts.forEach(function(p){ lo=Math.min(lo,p.v); hi=Math.max(hi,p.v); });
@@ -583,7 +648,7 @@ function chart(pts,o){
   kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2"}));
   kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[o.x||"время"]));
   kids.push(svgEl("text",{x:12,y:(T+H-B)/2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)",transform:"rotate(-90 12 "+((T+H-B)/2)+")"},[o.y||""]));
-  box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;max-width:640px;height:auto;display:block"},kids));
+  box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:auto;display:block"},kids));
   return box;
 }
 function tabClan(m){
@@ -612,7 +677,7 @@ function tabServer(m){
   load(box,"/api/server",function(d){
     box.appendChild(card("Сервер",[kv([["Статус",el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?"работает":"не запущен"])],
       ["Сейчас онлайн",d.online.length],["Пик за сутки",d.online_peak]]),
-      el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:"Онлайн за 24 часа",y:"игроков",x:"время",zero:true})])]));
+      el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:"Онлайн за 24 часа",y:"игроков",x:"время",zero:true,wide:true})])]));
     function top(title,rows,col){ return card(title,[rows.length? table(["#","Игрок",col],rows,function(r){ return [rows.indexOf(r)+1, r.name, r.v]; })
       : el("div",{class:"muted"},["пока нет данных"])]); }
     box.appendChild(el("div",{class:"grid"},[
@@ -620,7 +685,8 @@ function tabServer(m){
       top("Торговцы",d.traders,"Продаж"),
       card("Кланы",[d.clans.length? table(["Клан","Рейтинг","За 7 дней"],d.clans,function(c){ return [c.name,c.rating,c.growth==null?"":(c.growth>0?"+":"")+c.growth]; })
         : el("div",{class:"muted"},["пока нет данных"])])]));
-    box.appendChild(card("Сейчас на сервере ("+d.online.length+")",[d.online.length? el("div",{class:"chips"},d.online.map(function(n){ return el("span",{class:"chip"},[n]); }))
+    box.appendChild(card("Сейчас на сервере ("+d.online.length+")",[d.online.length?
+      el("div",{class:"scroll"},[table(["#","Игрок","Уровень","Клан"],d.online,function(p){ return [d.online.indexOf(p)+1,p.name,p.level==null?"":p.level,p.clan||"—"]; })])
       : el("div",{class:"muted"},["никого"])]));
   });
 }
