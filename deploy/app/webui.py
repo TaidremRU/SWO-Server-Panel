@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -929,6 +930,19 @@ class WebUI:
         return self._json(h, out)
 
     # ---------------------------------------------------------------- players
+    def _api_disk(self, h, method, q, sess):
+        """Место на диске, где лежит мир игры (для шапки панели)."""
+        path = players.find_world_dir(self.cfg) or self.cfg.get("base_dir", common.BASE_DIR)
+        try:
+            u = shutil.disk_usage(path)
+        except OSError as e:
+            return self._json(h, {"ok": False, "error": str(e)}, 500)
+        drive = os.path.splitdrive(os.path.abspath(path))[0] or "/"
+        return self._json(h, {"ok": True, "drive": drive, "total_gb": round(u.total / 1e9, 1),
+                              "used_gb": round(u.used / 1e9, 1), "free_gb": round(u.free / 1e9, 1),
+                              "used_pct": round(100.0 * u.used / u.total, 1) if u.total else None,
+                              "free_pct": round(100.0 * u.free / u.total, 1) if u.total else None})
+
     def _api_players(self, h, method, q, sess):
         now = time.time()
         if not self._players_cache or now - self._players_cache[0] > PLAYERS_CACHE_SEC:
@@ -2519,7 +2533,8 @@ var T = {
   pd_p11:"Кислород", pd_p12:"Очки генетики",
   pd_lp0:"Опыт", pd_lp1:"Уровень", pd_lp2:"Очки распределения",
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
-  ago:"назад", never:"нет данных", n_a:"н/д" },
+  ago:"назад", never:"нет данных", n_a:"н/д",
+  disk_used:"занято", disk_free:"свободно", disk_tip:"Диск с миром игры: занято {u} из {t} ГБ, свободно {f} ГБ" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
   dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", fleet:"Fleet", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
@@ -2745,7 +2760,8 @@ var T = {
   pd_p11:"Oxygen", pd_p12:"Genetic points",
   pd_lp0:"Exp", pd_lp1:"Level", pd_lp2:"Distribution points",
   pd_skill_pfx:"Skill", pd_skill_hint:"exact name unknown to the panel — +2%/level to something",
-  ago:"ago", never:"no data", n_a:"n/a" }
+  ago:"ago", never:"no data", n_a:"n/a",
+  disk_used:"used", disk_free:"free", disk_tip:"Game world disk: {u} of {t} GB used, {f} GB free" }
 };
 function t(k){ return (T[S.lang]&&T[S.lang][k]) || (T.ru[k]) || k; }
 var $=function(s,r){return (r||document).querySelector(s)};
@@ -2847,12 +2863,29 @@ function render(){
   app.appendChild(shell());
   routeTab();
 }
+// место на диске мира — в шапке рядом с языком; меньше 10% свободно — красным
+var DISK_TIMER=null;
+function diskBadge(){
+  var sp=el("span",{id:"disk",class:"small",style:"white-space:nowrap"},[]);
+  function fill(d){
+    var e=$("#disk")||sp; e.innerHTML="";
+    if(!d||!d.ok||d.free_pct==null) return;
+    var bad=d.free_pct<10;
+    e.style.color=bad?"var(--err)":"var(--ok)";
+    e.title=t("disk_tip").replace("{u}",d.used_gb).replace("{t}",d.total_gb).replace("{f}",d.free_gb);
+    e.appendChild(document.createTextNode("💾 "+d.drive+" "+t("disk_used")+" "+Math.round(d.used_pct)+"% · "+t("disk_free")+" "+Math.round(d.free_pct)+"%"));
+  }
+  function load(){ api("/api/disk").then(function(d){ S.disk=d; fill(d); }).catch(function(){}); }
+  if(S.disk) fill(S.disk);
+  if(!DISK_TIMER){ load(); DISK_TIMER=setInterval(function(){ if(S.authed) load(); },60000); }
+  return sp;
+}
 function header(){
   var langBtn=el("button",{class:"small",onclick:function(){ S.lang=S.lang==="ru"?"en":"ru"; localStorage.setItem("sw_lang",S.lang); render(); }},[S.lang==="ru"?"EN":"RU"]);
   var thBtn=el("button",{class:"small",title:"theme",onclick:toggleTheme},["◐"]);
   var out=[ el("span",{id:"conn",class:"dot "+(S.conn===false?"err":(S.conn?"ok":""))}),
             el("h1",{},[S.title||t("title")]), el("span",{class:"sp"}),
-            el("span",{class:"muted small"},[S.user||""]), langBtn, thBtn,
+            el("span",{class:"muted small"},[S.user||""]), diskBadge(), langBtn, thBtn,
             el("button",{class:"small",onclick:doLogout},[t("logout")]) ];
   return el("header",{},out);
 }
