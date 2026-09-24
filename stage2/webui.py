@@ -23,6 +23,7 @@ import base64
 import copy
 import hashlib
 import http.cookies
+import ipaddress
 import json
 import logging
 import os
@@ -78,6 +79,9 @@ SETTINGS_SCHEMA = [
         ("webui.host", "Хост", "Host", "str", "0.0.0.0 = все интерфейсы; нужен перезапуск"),
         ("webui.port", "Порт", "Port", "int", "нужен перезапуск + правило фаервола"),
         ("webui.enabled", "Включена", "Enabled", "bool", ""),
+        ("webui.allowed_nets", "Разрешённые адреса", "Allowed addresses", "strlist",
+         "IP или подсети через запятую (192.168.0.0/24, 10.1.2.3); пусто = любые локальные сети "
+         "(10.*, 172.16–31.*, 192.168.*, link-local); 127.0.0.1 разрешён всегда"),
         ("webui.title", "Название панели", "Panel title", "str",
          "шапка и вкладка браузера; пусто = SigmaSteamBot. Иконка — ниже, «Иконка панели»"),
     ]),
@@ -382,6 +386,32 @@ def _parse_log(text):
 
 
 # --------------------------------------------------------------------- the server
+def _parse_nets(items):
+    """Список «IP / подсеть» -> [ip_network]. ValueError на мусоре."""
+    out = []
+    for x in items or []:
+        x = str(x).strip()
+        if x:
+            out.append(ipaddress.ip_network(x, strict=False))
+    return out
+
+
+def _ip_allowed(ip, nets):
+    """Пускать ли адрес. Loopback — всегда (зайти с самой VM, если список
+    настроен неудачно). Пустой список — любые частные/локальные сети."""
+    try:
+        a = ipaddress.ip_address(str(ip).split("%")[0])
+    except ValueError:
+        return False
+    if a.version == 6 and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    if a.is_loopback:
+        return True
+    if not nets:
+        return a.is_private or a.is_link_local
+    return any(a.version == n.version and a in n for n in nets)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "SigmaWebUI/" + VERSION
 
@@ -573,7 +603,31 @@ class WebUI:
         return (tok, self.sessions.get(tok)) if tok else ("", None)
 
     # ---------------------------------------------------------------- dispatch
+    def _allowed_nets(self):
+        raw = tuple((self.cfg.get("webui") or {}).get("allowed_nets") or [])
+        if getattr(self, "_nets_key", None) != raw:
+            try:
+                self._nets = _parse_nets(raw)
+            except ValueError:
+                logging.error("webui: allowed_nets с ошибкой (%s) — пускаю только локальные сети", raw)
+                self._nets = []
+            self._nets_key = raw
+        return self._nets
+
     def dispatch(self, h, method):
+        ip = h.client_address[0]
+        if not _ip_allowed(ip, self._allowed_nets()):
+            now = time.time()
+            seen = getattr(self, "_denied_log", {})
+            if now - seen.get(ip, 0) > 600:          # не спамить лог на каждый запрос
+                logging.warning("webui: отказ в доступе с %s (не в webui.allowed_nets)", ip)
+                seen[ip] = now
+                self._denied_log = seen
+            try:
+                return self._send(h, 403, "text/plain; charset=utf-8",
+                                  "403: доступ к панели с этого адреса запрещён".encode("utf-8"))
+            except Exception:  # noqa: BLE001
+                return None
         try:
             path, _, qs = h.path.partition("?")
             q = urllib.parse.parse_qs(qs)
@@ -1794,6 +1848,13 @@ class WebUI:
             port = _cfg_get_path(cfg, "webui.port")
             if port is not None and not (1 <= int(port) <= 65535):
                 raise _Bad("порт вне 1..65535")
+            try:
+                nets = _parse_nets(_cfg_get_path(cfg, "webui.allowed_nets") or [])
+            except ValueError as e:
+                raise _Bad("разрешённые адреса: %s" % e)
+            if not _ip_allowed(h.client_address[0], nets):
+                raise _Bad("разрешённые адреса: ваш текущий адрес %s в список не входит — "
+                           "сохранение заблокировало бы вам доступ" % h.client_address[0])
         except _Bad as e:
             return self._json(h, {"error": "invalid", "detail": str(e)}, 400)
         except ValueError as e:
