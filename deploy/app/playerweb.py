@@ -472,6 +472,13 @@ class PlayerWeb:
                                       "staff": self._staff(s["uid"]) if s else None})
             if route == "login" and method == "POST":
                 return self._api_login(h)
+            if route == "public" and method == "GET":
+                # главная до входа: то же, что вкладка «Сервер»; кэш на всех, чтобы
+                # анонимные заходы не гоняли рейтинги/онлайн на каждый запрос
+                d = self._cached("public", 60, lambda: self._api_server(None, q))
+                if (q.get("lang") or [""])[0] == "en":
+                    d = _tr(d)
+                return self._json(h, d, 200 if d.get("ok") else 503)
             if route == "admin-enter" and method == "POST":
                 tok, s = self._session(h)
                 if not s:
@@ -1192,6 +1199,10 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.warn{color:var(--warn);border-color:var(--warn)} .pill.err{color:var(--err);border-color:var(--err)}
 .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden} .bar>i{display:block;height:100%;background:var(--acc)}
 .login{max-width:340px;margin:60px auto} .login input{width:100%;margin-bottom:10px}
+.landing{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;align-items:start}
+.landing .login{margin:0;max-width:none} .landing-side{position:sticky;top:70px}
+.landing .grid{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+@media (max-width:860px){.landing{grid-template-columns:1fr} .landing-side{position:static;order:-1}}
 .scroll{max-height:420px;overflow:auto}
 /* карточка-колонка: .grow забирает всю оставшуюся высоту (ряд грида тянет карточки до самой высокой) */
 .card.fill{display:flex;flex-direction:column}
@@ -1228,6 +1239,7 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Ник и пароль — те же, что при входе на сервер. После входа — профиль, исследования, карта, сундуки, рынок, чат и клан.":"Same nickname and password you use to join the server. After logging in: profile, research, map, chests, market, chat and clan.",
   "Английский":"English",
   "сообщений: ":"messages: ",
   "это начало переписки":"this is the beginning",
@@ -1267,7 +1279,6 @@ var EN_DICT={
   "Пароль из игры":"In-game password",
   " с)":" s)",
   "Вход для игроков":"Player login",
-  "Ник и пароль — те же, что при входе на сервер.":"Same nickname and password you use to join the server.",
   "Запомнить меня на 30 дней":"Remember me for 30 days",
   "Войти":"Log in",
   "Профиль":"Profile",
@@ -1544,7 +1555,8 @@ function load(box,path,draw){ box.innerHTML=""; box.appendChild(el("p",{class:"m
 function fmtMin(m){ if(m==null) return ""; var h=Math.floor(m/60), mm=Math.round(m%60); return h? h+L(" ч ")+mm+L(" мин") : mm+L(" мин"); }
 
 // ---------------------------------------------------------------- вход
-function renderLogin(){
+// главная до входа: сводка сервера (как вкладка «Сервер») + вход для тех, кому нужен кабинет
+function renderLanding(){
   // настоящая <form> с name/autocomplete — браузер сам предложит сохранить ник и пароль
   var nick=el("input",{name:"username",placeholder:L("Ник в игре"),autocomplete:"username"});
   var code=el("input",{name:"password",type:"password",placeholder:L("Пароль из игры"),autocomplete:"current-password"});
@@ -1553,12 +1565,16 @@ function renderLogin(){
   var msg=el("div",{class:"msg err",style:"display:none"});
   function go(ev){ ev.preventDefault(); msg.style.display="none";
     try{ localStorage.setItem("swp_rem",rem.checked?"1":"0"); }catch(e){}
-    api("/api/login",{nick:nick.value,code:code.value,remember:rem.checked}).then(function(d){ S.nick=d.nick; render(); })
+    api("/api/login",{nick:nick.value,code:code.value,remember:rem.checked}).then(function(d){ S.nick=d.nick;
+        api("/api/session").then(function(x){ S.staff=x.staff||null; render(); }).catch(function(){ render(); }); })
       .catch(function(e){ msg.textContent=errText(e)+(e.retry? " ("+e.retry+L(" с)"):""); msg.style.display=""; }); }
-  $("#main").appendChild(el("form",{class:"login card",method:"post",action:"#",onsubmit:go},[el("h3",{},[L("Вход для игроков")]),
-    el("p",{class:"muted small"},[L("Ник и пароль — те же, что при входе на сервер.")]), nick, code,
+  var form=el("form",{class:"login card",method:"post",action:"#",onsubmit:go},[el("h3",{},[L("Вход для игроков")]),
+    el("p",{class:"muted small"},[L("Ник и пароль — те же, что при входе на сервер. После входа — профиль, исследования, карта, сундуки, рынок, чат и клан.")]), nick, code,
     el("label",{for:"rem",class:"row small",style:"margin:0 0 12px;cursor:pointer"},[rem,L("Запомнить меня на 30 дней")]),
-    el("button",{class:"pri",type:"submit",style:"width:100%"},[L("Войти")]), el("div",{style:"margin-top:10px"},[msg])]));
+    el("button",{class:"pri",type:"submit",style:"width:100%"},[L("Войти")]), el("div",{style:"margin-top:10px"},[msg])]);
+  var info=el("div");
+  $("#main").appendChild(el("div",{class:"landing"},[info, el("div",{class:"landing-side"},[form])]));
+  tabServer(info,"/api/public");
 }
 
 // ---------------------------------------------------------------- каркас
@@ -1609,7 +1625,7 @@ function render(){
   if(S.nick && ICONS===null){ ICONS={none:true};
     api("/api/item-icons").then(function(d){ ICONS=d; if(!d.none) render(); }).catch(function(){}); }
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
-  if(!S.nick){ nav.style.display="none"; return renderLogin(); }
+  if(!S.nick){ nav.style.display="none"; return renderLanding(); }
   nav.style.display="";
   who.appendChild(el("span",{class:"nk"},[S.nick+"  "]));
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
@@ -2128,9 +2144,9 @@ function tabClan(m){
 }
 
 // ---------------------------------------------------------------- сервер
-function tabServer(m){
+function tabServer(m, path){
   var box=el("div"); m.appendChild(box);
-  load(box,"/api/server",function(d){
+  load(box,path||"/api/server",function(d){
     box.appendChild(card(L("Сервер"),[kv([[L("Статус"),el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?L("работает"):L("не запущен")])],
       [L("Сейчас онлайн"),d.online.length],[L("Пик за сутки"),d.online_peak]]),
       el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:L("Онлайн за 24 часа"),y:L("игроков"),x:L("время"),zero:true,wide:true})])]));
