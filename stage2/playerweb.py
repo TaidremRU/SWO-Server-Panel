@@ -294,7 +294,7 @@ class PlayerWeb:
             "research": {k: (d.get("research") or {}).get(k)
                          for k in ("current", "current_name", "remaining_min", "done_count", "tech_list",
                                    "invested_h", "booster")},
-            "position": d.get("position"),
+            "position": self._with_map_names(d.get("position") or {}),
             "avatar": {"params": a.get("params"), "long_params": a.get("long_params"), "skills": a.get("skills"),
                        "abilities": a.get("abilities"),
                        "stash": inv(a.get("stash")), "carry": inv(a.get("carry")),
@@ -304,6 +304,30 @@ class PlayerWeb:
             "deaths": ((d.get("activity") or {}).get("deaths") or [])[:10],
             "rewards": ((d.get("activity") or {}).get("rewards") or [])[:10],
         }
+
+    _KIND_RU = {"planet": "планета", "satellite": "спутник", "asteroid": "астероид"}
+
+    def _map_names(self):
+        """{id карты: название} — id карты мира == id объекта звёздной системы
+        (Data\\world\\star1.json), 0 — космос."""
+        def build():
+            so = players.space_objects(self.cfg, 1)
+            names = {o["id"]: "%s (%s)" % (o["name"], self._KIND_RU[o["kind"]]) if o.get("kind") in self._KIND_RU
+                     else o["name"] for o in so.get("objects") or [] if o.get("name")}
+            return {"ok": bool(so.get("ok")), "names": names}
+        return self._cached("map_names", 600, build).get("names") or {}
+
+    def _with_map_names(self, pos):
+        names = self._map_names()
+
+        def nm(mp):
+            return "Космос" if mp == 0 else names.get(mp) or ("карта %s" % mp if mp is not None else "")
+        pos = dict(pos)
+        pos["map_name"] = nm(pos.get("map"))
+        if pos.get("respawn"):
+            pos["respawn"] = dict(pos["respawn"], map_name=nm(pos["respawn"].get("map")))
+        pos["territories"] = [dict(t, map_name=nm(t.get("map"))) for t in pos.get("territories") or []]
+        return pos
 
     def _api_tech_tree(self, uid, q):
         return self._cached("tech_tree", 600, lambda: players.tech_tree(self.cfg))
@@ -494,26 +518,27 @@ function tabMe(m){
       ["Очки клана",p.clan_point],["Рейтинг",p.rating],["Наиграно",p.playtime_h+" ч"],
       ["Сессий",d.sessions.total? d.sessions.total+" · в среднем "+d.sessions.avg_min+" мин":""],
       ["Первый вход",p.first_seen],
-      p.banned? ["Бан", el("span",{class:"pill err"},[p.ban_expires_in_h? "ещё "+p.ban_expires_in_h+" ч":"да"])] : ["",""] ])]);
-    var res=card("Исследования",[kv([
-      ["Сейчас изучается", r.current? r.current_name+(r.remaining_min!=null?" · осталось "+fmtMin(r.remaining_min):"") : "ничего"],
-      ["Изучено технологий", r.done_count],["Вложено времени", r.invested_h+" ч"],["Ускорители", r.booster]])]);
+      p.banned? ["Бан", el("span",{class:"pill err"},[p.ban_expires_in_h? "ещё "+p.ban_expires_in_h+" ч":"да"])] : ["",""] ]),
+      el("h3",{style:"margin-top:14px"},["Исследования"]),
+      kv([["Сейчас изучается", r.current? r.current_name+(r.remaining_min!=null?" · осталось "+fmtMin(r.remaining_min):"") : "ничего"],
+        ["Изучено технологий", r.done_count],["Вложено времени", r.invested_h+" ч"],["Ускорители", r.booster]])]);
     var params=(d.avatar.params||[]).map(function(x){
       var pct=x.max? Math.max(0,Math.min(100,100*x.val/x.max)):null;
       return el("div",{style:"margin-bottom:6px"},[el("div",{class:"row small",style:"justify-content:space-between"},[
         el("span",{},[PARAM[x.type]||("#"+x.type)]), el("span",{class:"muted"},[(Math.round(x.val*10)/10)+(x.max?" / "+Math.round(x.max*10)/10:"")])]),
         pct!=null? el("div",{class:"bar"},[el("i",{style:"width:"+pct+"%"})]) : null]); });
     var lp=(d.avatar.long_params||[]).map(function(x){ return [LPARAM[x.type]||("#"+x.type), x.val]; });
-    var av=card("Аватар",[kv(lp)].concat([el("div",{style:"margin-top:10px"},params)],
-      (d.avatar.abilities||[]).length? [el("div",{class:"muted small",style:"margin-top:8px"},["Способности"]),
-        el("div",{class:"chips scroll",style:"max-height:120px"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))] : []));
+    var av=card("Аватар",[kv(lp), el("div",{style:"margin-top:10px"},params)]);
+    var ab=card("Способности"+((d.avatar.abilities||[]).length?" ("+d.avatar.abilities.length+")":""),[(d.avatar.abilities||[]).length?
+      el("div",{class:"chips scroll",style:"max-height:360px"},d.avatar.abilities.map(function(a){ return el("span",{class:"chip"},[a]); }))
+      : el("div",{class:"muted"},["нет"])]);
     var pos=d.position||{};
-    var terr=(pos.territories||[]).length? el("div",{class:"scroll",style:"max-height:200px"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map,t.x,t.y]; })])
+    var terr=(pos.territories||[]).length? el("div",{class:"scroll",style:"max-height:200px"},[table(["Карта","X","Y"],pos.territories,function(t){ return [t.map_name,t.x,t.y]; })])
       : el("div",{class:"muted"},["нет территорий"]);
-    var where=card("Где я",[kv([["Карта",pos.map],["Координаты",pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
-      ["Точка возрождения",pos.respawn? "карта "+pos.respawn.map+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
+    var where=card("Где я",[kv([["Карта",pos.map_name],["Координаты",pos.x!=null? Math.round(pos.x)+", "+Math.round(pos.y):""],
+      ["Точка возрождения",pos.respawn? pos.respawn.map_name+" · "+Math.round(pos.respawn.x||0)+", "+Math.round(pos.respawn.y||0):""]]),
       el("div",{class:"muted small",style:"margin:10px 0 4px"},["Мои территории"]), terr]);
-    box.appendChild(el("div",{class:"grid"},[head,res,av,where]));
+    box.appendChild(el("div",{class:"grid"},[head,av,ab,where]));
     box.appendChild(el("div",{class:"grid"},[
       card("Склад"+(d.avatar.stash_size?" ("+d.avatar.stash.length+" / "+d.avatar.stash_size+")":""),[invTable(d.avatar.stash)]),
       card("С собой"+(d.avatar.carry_size?" ("+d.avatar.carry.length+" / "+d.avatar.carry_size+")":""),[invTable(d.avatar.carry)])]));
