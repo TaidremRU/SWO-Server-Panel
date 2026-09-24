@@ -1073,6 +1073,50 @@ class WebUI:
         threading.Thread(target=run, name="buffopt", daemon=True).start()
         return self._json(h, {"job": jid})
 
+    def _api_food_ingredients(self, h, method, q, sess):
+        """53 ингредиента кулинарии (Data\\product\\product_genes.json) с генами —
+        для чекбоксов оптимизатора во вкладке «Кулинария»."""
+        try:
+            d = players.food_data_read(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: food_data_read")
+            d = {"ok": False, "error": str(e)}
+        out = {"ok": d.get("ok"), "ingredients": d.get("ingredients", []), "error": d.get("error")}
+        return self._json(h, out, 200 if out.get("ok") else 404)
+
+    def _api_food_lib(self, h, method, q, sess):
+        """Все блюда, когда-либо приготовленные на сервере (product_lib.json)."""
+        try:
+            d = players.food_lib_read(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: food_lib_read")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_food_optimize(self, h, method, q, sess):
+        """POST {available:[id], genes:["A".."D"], max_eat:float|null, top:10} —
+        асинхронный перебор (полный набор ~2-5 с), прогресс — GET /api/job?id=..."""
+        b = self._body(h)
+        jid = secrets.token_hex(8)
+        job = {"id": jid, "done": False, "ok": None, "result": None,
+               "started": time.time(), "finished": None}
+        with self._jobs_lock:
+            self._jobs[jid] = job
+            while len(self._jobs) > 30:
+                self._jobs.pop(next(iter(self._jobs)))
+
+        def run():
+            try:
+                d = players.food_optimize(self.cfg, b.get("available"), b.get("genes"),
+                                          b.get("max_eat"), b.get("top", 10))
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: food_optimize")
+                d = {"ok": False, "error": str(e)}
+            job.update(ok=bool(d.get("ok")), result=d, done=True, finished=time.time())
+
+        threading.Thread(target=run, name="foodopt", daemon=True).start()
+        return self._json(h, {"job": jid})
+
     def _api_mapdt_index(self, h, method, q, sess):
         try:
             d = players.mapdt_index(self.cfg)
@@ -1855,7 +1899,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1898,6 +1942,15 @@ var T = {
   bn_bt0:"Здоровье", bn_bt1:"Энергия", bn_bt2:"Меткость", bn_bt3:"Скорость движения",
   bn_bt4:"Скорость действия", bn_bt5:"Сила ближнего боя", bn_bt6:"Сила дальнего боя",
   bn_bt7:"Щит", bn_bt8:"Скорость ближнего боя", bn_bt9:"Скорость дальнего боя",
+  fd_lib:"Блюда сервера", fd_lib_intro:"Все блюда, которые когда-либо готовили на этом сервере (Data\\product\\product_lib.json) — сервер сам их запоминает, ничего загружать не нужно.",
+  fd_only_eat:"только съедобные (сытость > 0)", fd_sort_eat:"сортировать по сытости", fd_shown:"показано",
+  fd_eat:"Сытость", fd_genes:"Гены", fd_no_genes:"без генов", fd_per_point:"блюд на 1 очко генетики",
+  fd_gene_gain:"к каждому гену", fd_slots:"Порядок в слотах (сетка 2×2) важен — клади ровно так:",
+  fd_opt_title:"Оптимизатор блюд", fd_opt_intro:"Отметь ингредиенты, которые есть, выбери гены, которые обязательно нужны, и (желательно) свой максимум сытости: блюдо сытнее максимума игра просто не даст съесть. Переберём все сочетания по 4 во всех порядках.",
+  fd_need_genes:"Нужные гены", fd_max_eat:"Макс. сытость", fd_max_eat_ph:"напр. 150",
+  fd_opt_found:"подходящих наборов", fd_opt_none:"Ни одно сочетание не подходит под условия.",
+  fd_note:"Формула готовки разобрана из кода игры и проверена на всех блюдах сервера (совпадение 100%). Съеденное блюдо: сытость +N, энергия +N/5, каждый ген блюда +N/5 к Генетике A–D; когда все четыре ≥ 100 — +1 очко генетики. Блюдо с генами ABCD качает генетику быстрее всего.",
+  fd_all_on:"все", fd_all_off:"ничего",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -2008,7 +2061,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2051,6 +2104,15 @@ var T = {
   bn_bt0:"Health", bn_bt1:"Energy", bn_bt2:"Accuracy", bn_bt3:"Move speed",
   bn_bt4:"Action speed", bn_bt5:"Melee strength", bn_bt6:"Ranged strength",
   bn_bt7:"Shield", bn_bt8:"Melee speed", bn_bt9:"Ranged speed",
+  fd_lib:"Server dishes", fd_lib_intro:"Every dish ever cooked on this server (Data\\product\\product_lib.json) — the server keeps them itself, nothing to upload.",
+  fd_only_eat:"edible only (satiety > 0)", fd_sort_eat:"sort by satiety", fd_shown:"shown",
+  fd_eat:"Satiety", fd_genes:"Genes", fd_no_genes:"no genes", fd_per_point:"dishes per genetics point",
+  fd_gene_gain:"to each gene", fd_slots:"Slot order (2×2 grid) matters — place exactly like this:",
+  fd_opt_title:"Dish optimizer", fd_opt_intro:"Check the ingredients you have, pick the genes you need and (ideally) your max satiety: the game won't let you eat a dish above it. Every 4-ingredient combo in every order will be tried.",
+  fd_need_genes:"Required genes", fd_max_eat:"Max satiety", fd_max_eat_ph:"e.g. 150",
+  fd_opt_found:"matching sets", fd_opt_none:"No combination matches these conditions.",
+  fd_note:"The cooking formula was reverse-engineered from the game code and verified on every dish on the server (100% match). Eating a dish: satiety +N, energy +N/5, each dish gene +N/5 to Genetics A–D; once all four reach 100 — +1 genetics point. ABCD dishes level genetics fastest.",
+  fd_all_on:"all", fd_all_off:"none",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2271,14 +2333,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","buffs","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","buffs","food","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -2714,6 +2776,147 @@ function tabBuffs(v){
     ]),
     body,
     el("div",{class:"muted small",style:"margin-top:8px"},[t("bn_state_note")])
+  ]));
+}
+
+// ---- кулинария (ProductLib.GetProductLibItem, разобрано Ghidra 2026-09-24) ----
+var FOOD_GENES=["A","B","C","D"];
+function foodGenesChips(genes){
+  if(!genes || !genes.length) return el("span",{class:"muted small"},[t("fd_no_genes")]);
+  return el("span",{class:"chips",style:"display:inline-flex"}, genes.map(function(g){
+    return el("span",{class:"chip",style:genes.length===4?"border-color:var(--acc);color:var(--acc)":""},[g]); }));
+}
+function foodSlots(items){
+  // слоты 0 1 / 2 3 — баланс считается по строкам и столбцам этой сетки
+  var cell=function(i){ return el("div",{style:"border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;text-align:center"},
+    [el("span",{class:"muted small"},[(i+1)+". "]), items[i].name]); };
+  return el("div",{style:"display:inline-grid;grid-template-columns:1fr 1fr;gap:4px;min-width:240px"},[cell(0),cell(1),cell(2),cell(3)]);
+}
+function foodDishCard(res, idx){
+  var info=[el("b",{},[t("fd_eat")+": "+res.eat]), " · ", t("fd_genes")+": ", foodGenesChips(res.genes)];
+  if(res.genes.length) info.push(el("span",{class:"small"},[" · +"+res.gene_gain+" "+t("fd_gene_gain")]));
+  if(res.per_point) info.push(el("span",{class:"small"},[" · "+res.per_point+" "+t("fd_per_point")]));
+  return el("div",{class:"card",style:"margin-bottom:6px"},[
+    el("div",{style:"margin-bottom:6px"},[idx!=null? el("b",{},["#"+(idx+1)+"  "]) : "", el("span",{},info)]),
+    foodSlots(res.items)
+  ]);
+}
+function tabFood(v){
+  // ---- оптимизатор ----
+  var optIngr={};
+  var optChips=el("div",{class:"chips",style:"margin:8px 0"},[el("span",{class:"muted small"},["…"])]);
+  var geneCbs={};
+  var geneRow=el("span",{style:"display:inline-flex;gap:8px;align-items:center"}, FOOD_GENES.map(function(g){
+    var cb=el("input",{type:"checkbox"},[]); geneCbs[g]=cb;
+    return el("label",{style:"display:inline-flex;gap:3px;align-items:center;cursor:pointer"},[cb,g]); }));
+  var maxEat=el("input",{type:"number",min:"0",step:"any",placeholder:t("fd_max_eat_ph"),style:"width:90px"});
+  var optMsg=el("span",{class:"muted small"},[]);
+  var optResults=el("div",{},[]);
+  function setAll(on){ Object.keys(optIngr).forEach(function(k){ optIngr[k].checked=on; }); }
+  api("/api/food-ingredients").then(function(d){
+    optChips.innerHTML="";
+    if(!d.ok || !d.ingredients.length){ optChips.appendChild(el("div",{class:"muted small"},[d.error||t("bn_none")])); return; }
+    d.ingredients.forEach(function(it){
+      var cb=el("input",{type:"checkbox",checked:true},[]);
+      optIngr[it.id]=cb;
+      optChips.appendChild(el("label",{title:t("fd_genes")+": "+(it.genes.join("")||"—"),
+        style:"display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:20px;padding:2px 8px;font-size:11.5px;cursor:pointer"},
+        [cb, it.name, el("span",{class:"muted",style:"font-size:10.5px"},[it.genes.join("")||"·"])]));
+    });
+  }).catch(function(e){ optChips.innerHTML=""; optChips.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  function pollOpt(jid){
+    var iv=setInterval(function(){
+      api("/api/job?id="+jid).then(function(j){
+        if(!j.done) return;
+        clearInterval(iv);
+        optMsg.textContent="";
+        var d=j.result||{};
+        optResults.innerHTML="";
+        if(!d.ok){ optResults.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+        optResults.appendChild(el("div",{class:"muted small",style:"margin-bottom:8px"},[
+          d.checked+" "+t("bn_opt_checked")+" · "+d.count+" "+t("fd_opt_found")]));
+        if(!d.results.length){ optResults.appendChild(el("div",{class:"muted"},[t("fd_opt_none")])); return; }
+        optResults.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[t("fd_slots")]));
+        d.results.forEach(function(res,i){ optResults.appendChild(foodDishCard(res,i)); });
+      }).catch(function(){ clearInterval(iv); optMsg.textContent=t("err_net"); });
+    },1000);
+  }
+  function runOptimize(){
+    var available=Object.keys(optIngr).filter(function(k){ return optIngr[k].checked; }).map(Number);
+    if(available.length<4){ optMsg.textContent=t("fd_opt_none"); return; }
+    var genes=FOOD_GENES.filter(function(g){ return geneCbs[g].checked; });
+    optMsg.textContent=t("bn_opt_working");
+    optResults.innerHTML="";
+    api("/api/food-optimize",{body:{available:available,genes:genes,
+      max_eat:maxEat.value===""?null:parseFloat(maxEat.value),top:10}})
+      .then(function(r){ pollOpt(r.job); })
+      .catch(function(e){ optMsg.textContent=errText(e); });
+  }
+
+  // ---- блюда сервера ----
+  var libBody=el("div",{},[el("p",{class:"muted"},["…"])]);
+  var onlyEat=el("input",{type:"checkbox",checked:true},[]);
+  var sortEat=el("input",{type:"checkbox",checked:true},[]);
+  var activeFilter=null, LIB=null, LIMIT=200;
+  function chipStyle(on){ return "cursor:pointer"+(on?";background:var(--acc);color:#fff;border-color:var(--acc)":""); }
+  function renderLib(){
+    var d=LIB; libBody.innerHTML="";
+    if(!d.ok){ libBody.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    var chips=el("div",{class:"chips",style:"margin-bottom:10px"},[
+      el("span",{class:"chip",style:chipStyle(activeFilter===null),onclick:function(){ activeFilter=null; renderLib(); }},[t("bn_all")+" ("+d.count+")"])]);
+    d.by_item.forEach(function(it){
+      chips.appendChild(el("span",{class:"chip",style:chipStyle(activeFilter===it.id),
+        onclick:function(){ activeFilter=(activeFilter===it.id)?null:it.id; renderLib(); }},[it.name+" ×"+it.count]));
+    });
+    libBody.appendChild(chips);
+    var rows=d.dishes.filter(function(r){
+      return (!onlyEat.checked || r.eat>0) && (activeFilter===null || r.items.some(function(it){ return it.id===activeFilter; })); });
+    if(sortEat.checked) rows=rows.slice().sort(function(a,b){ return b.eat-a.eat || b.genes.length-a.genes.length; });
+    libBody.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[
+      t("fd_shown")+" "+Math.min(rows.length,LIMIT)+" / "+rows.length]));
+    var tb=el("table",{},[el("tr",{},[t("bn_ingredients"),t("fd_eat"),t("fd_genes")].map(function(x){ return el("th",{},[x]); }))]);
+    rows.slice(0,LIMIT).forEach(function(r){
+      tb.appendChild(el("tr",{},[
+        el("td",{},[el("div",{class:"chips"}, r.items.map(function(it,i){
+          return el("span",{class:"chip",style:it.id===activeFilter?"border-color:var(--acc);color:var(--acc)":""},[(i+1)+". "+it.name]); }))]),
+        el("td",{},[r.eat>0? String(r.eat) : el("span",{class:"muted"},["0"])]),
+        el("td",{},[foodGenesChips(r.genes), r.per_point? el("span",{class:"muted small"},[" ("+r.per_point+")"]) : ""])
+      ]));
+    });
+    libBody.appendChild(tb);
+  }
+  onlyEat.addEventListener("change",function(){ if(LIB) renderLib(); });
+  sortEat.addEventListener("change",function(){ if(LIB) renderLib(); });
+  api("/api/food-lib").then(function(d){ LIB=d; renderLib(); }).catch(function(e){
+    libBody.innerHTML=""; libBody.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+
+  v.appendChild(el("div",{},[
+    el("div",{class:"card",style:"margin-bottom:12px"},[
+      el("h3",{},[t("fd_opt_title")]),
+      el("p",{class:"muted small"},[t("fd_opt_intro")]),
+      el("div",{class:"row",style:"gap:6px"},[
+        el("button",{class:"small",onclick:function(){ setAll(true); }},[t("fd_all_on")]),
+        el("button",{class:"small",onclick:function(){ setAll(false); }},[t("fd_all_off")])
+      ]),
+      optChips,
+      el("div",{class:"row",style:"gap:10px;flex-wrap:wrap;align-items:center"},[
+        el("span",{class:"small"},[t("fd_need_genes")]), geneRow,
+        el("span",{class:"small"},[t("fd_max_eat")]), maxEat,
+        el("button",{class:"small pri",onclick:runOptimize},[t("bn_opt_go")]),
+        optMsg
+      ]),
+      el("div",{style:"margin-top:10px"},[optResults])
+    ]),
+    el("div",{class:"card",style:"margin-bottom:12px"},[
+      el("h3",{},[t("fd_lib")]),
+      el("p",{class:"muted small"},[t("fd_lib_intro")]),
+      el("div",{class:"row",style:"gap:14px;flex-wrap:wrap;margin-bottom:8px"},[
+        el("label",{style:"display:inline-flex;gap:4px;align-items:center"},[onlyEat,t("fd_only_eat")]),
+        el("label",{style:"display:inline-flex;gap:4px;align-items:center"},[sortEat,t("fd_sort_eat")])
+      ]),
+      libBody
+    ]),
+    el("div",{class:"muted small",style:"margin-top:8px"},[t("fd_note")])
   ]));
 }
 

@@ -2500,6 +2500,189 @@ def buff_optimize(cfg, available, target_type, top_n=5):
     }
 
 
+# --- Кулинария: ZServer.Game.Global.ProductLib.GetProductLibItem / ZProductBalance /
+# ProductGenes / ZInventoryManager.UseItem — расшифровано Ghidra-декомпиляцией
+# GameAssembly.dll 2026-09-24. Формула проверена на 2305/2305 блюдах сервера .106.
+#   eat   = B[s0][s1] * B[s2][s3] * B[s0][s2] * B[s1][s3] * 5.0 * 0.0625
+#           (B — направленная попарная таблица 0..6 из product_balance.json,
+#            слоты — сетка 2×2: 0 1 / 2 3, порядок важен)
+#   genes = XOR генов 4 ингредиентов (product_genes.json), только если eat > 0
+# Съедание (UseItem): сытость += eat — если превысит максимум, блюдо НЕ съедается;
+# каждый ген=1 даёт +eat/5 к genA..genD (UnitParamType 7-10), энергия += eat/5;
+# когда все genA..genD ≥ 100 — с каждого снимается 100, «Очки генетики» +1.
+_FOOD_EAT_K = 5.0 * 0.0625
+_FOOD_GENE_THRESHOLD = 100.0
+_FOOD_GENE_NAMES = ("A", "B", "C", "D")
+
+_FOOD_NAMES_RU = {
+    'berry': 'Ягода', 'meat': 'Мясо', 'roast': 'Жаренное мясо', 'meat_fish': 'Рыба',
+    'potatoes': 'Картофель', 'rice': 'Рис', 'corn': 'Кукуруза', 'tomatoes': 'Помидоры',
+    'onion': 'Лук', 'mushrooms': 'Грибы', 'carrot': 'Морковь', 'cabbage': 'Капуста',
+    'pumpkin': 'Тыква', 'beet': 'Свекла', 'dill': 'Укроп', 'wheat': 'Пшеница',
+    'cucumber': 'Огурец', 'strawberry': 'Клубника', 'apple': 'Яблоко', 'garlic': 'Чеснок',
+    'grape': 'Виноград', 'pepper': 'Перец', 'sugar_cane': 'Сахарный тростник',
+    'bananas': 'Банан', 'oranges': 'Апельсин', 'lemons': 'Лимон', 'bell_pepper': 'Сладкий перец',
+    'pineapple': 'Ананас', 'watermelon': 'Арбуз', 'coconut': 'Кокос', 'flour': 'Мука',
+    'sugar': 'Сахар', 'salt': 'Соль', 'fried_fish': 'Жаренная рыба', 'fat_tail': 'Курдючный жир',
+    'brain': 'Мозги', 'kidneys': 'Почки', 'liver': 'Печень', 'stomach': 'Желудок',
+    'lungs': 'Легкие', 'eyes': 'Глаза', 'spleen': 'Селезенка', 'ears': 'Уши',
+    'cartilage': 'Хрящи', 'heart': 'Сердце', 'poultry': 'Мясо птицы', 'milk': 'Молоко',
+    'red_caviar': 'Красная икра', 'black_caviar': 'Черная икра', 'egg': 'Яйцо',
+    'honey': 'Мед', 'butter': 'Масло', 'curd': 'Творог',
+}
+
+
+def _genes_mask(g):
+    """``{"genes":[bool×4]}`` -> битовая маска (бит i = ген A..D)."""
+    arr = (g or {}).get("genes") or []
+    return sum(1 << i for i, x in enumerate(arr[:4]) if x)
+
+
+def _genes_list(mask):
+    return [_FOOD_GENE_NAMES[i] for i in range(4) if mask >> i & 1]
+
+
+def food_data_read(cfg):
+    """Попарный баланс (``Data\\product\\product_balance.json``) + гены
+    ингредиентов (``product_genes.json``) — обе таблицы генерятся сервером
+    один раз на мир. -> ``{ok, bal:{id:{id:int}}, genes:{id:mask},
+    names:{id:name}, ingredients:[{id,name,genes}]}``."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    pdir = os.path.join(world_dir, "Data", "product")
+    bal_raw = _read_json(os.path.join(pdir, "product_balance.json")) or {}
+    gen_raw = _read_json(os.path.join(pdir, "product_genes.json")) or {}
+    if not bal_raw.get("items") or not gen_raw.get("items"):
+        return {"ok": False, "error": "нет product_balance.json/product_genes.json — в этом мире ещё не готовили"}
+    bal = {it["id"]: {x["id"]: x["balance"] for x in (it.get("items") or [])} for it in bal_raw["items"]}
+    genes = {it["id"]: _genes_mask(it.get("genes")) for it in gen_raw["items"]}
+    item_names = load_items(world_dir)
+    names = {}
+    for i in bal:
+        slug = item_names.get(i)
+        names[i] = _FOOD_NAMES_RU.get(slug) or slug or ("#%s" % i)
+    ingredients = sorted(({"id": i, "name": names[i], "genes": _genes_list(genes.get(i, 0))}
+                          for i in bal if i in genes), key=lambda x: x["name"].lower())
+    return {"ok": True, "bal": bal, "genes": genes, "names": names, "ingredients": ingredients}
+
+
+def _food_calc(combo, bal, genes):
+    """Точное воспроизведение ``ProductLib.GetProductLibItem``. -> (eat, genes_mask)."""
+    a, b, c, d = combo
+    p = bal[a].get(b, 0) * bal[c].get(d, 0) * bal[a].get(c, 0) * bal[b].get(d, 0)
+    if not p:
+        return 0.0, 0
+    return p * _FOOD_EAT_K, genes[a] ^ genes[b] ^ genes[c] ^ genes[d]
+
+
+def _food_dish(combo, eat, mask, names):
+    ng = bin(mask).count("1")
+    per_gene = eat / 5.0
+    return {
+        "items": [{"id": i, "name": names.get(i, "#%s" % i)} for i in combo],
+        "eat": round(eat, 4), "genes": _genes_list(mask),
+        "gene_gain": round(per_gene, 4) if ng else 0,
+        # сколько таких блюд нужно на 1 очко генетики (только если все 4 гена)
+        "per_point": (int(-(-_FOOD_GENE_THRESHOLD // per_gene)) if ng == 4 and per_gene > 0 else None),
+    }
+
+
+def food_lib_read(cfg):
+    """Все блюда, которые когда-либо готовили на сервере (``product_lib.json``,
+    кэш ``ProductLib``) — с именами ингредиентов. Пустые (eat=0) тоже, чтобы было
+    видно, что с чем НЕ сочетается."""
+    fd = food_data_read(cfg)
+    if not fd.get("ok"):
+        return fd
+    world_dir = find_world_dir(cfg)
+    lib = _read_json(os.path.join(world_dir, "Data", "product", "product_lib.json")) or {}
+    names = fd["names"]
+    out, by_item = [], {}
+    for r in lib.get("items") or []:
+        ids = r.get("items") or []
+        if len(ids) != 4:
+            continue
+        dish = _food_dish(ids, float(r.get("eat") or 0), _genes_mask(r.get("genes")), names)
+        dish["id"] = r.get("id")
+        out.append(dish)
+        for i in ids:
+            slot = by_item.setdefault(i, {"id": i, "name": names.get(i, "#%s" % i), "count": 0})
+            slot["count"] += 1
+    out.sort(key=lambda x: -(x["id"] or 0))
+    return {"ok": True, "count": len(out), "dishes": out,
+            "by_item": sorted(by_item.values(), key=lambda x: x["name"].lower())}
+
+
+def food_optimize(cfg, available, need_genes=None, max_eat=None, top_n=10):
+    """Полный перебор упорядоченных четвёрок из ``available`` (id ингредиентов).
+    ``need_genes`` — список из "A".."D", которые ОБЯЗАТЕЛЬНО должны быть в блюде;
+    ``max_eat`` — максимум сытости игрока (блюдо сытнее просто не съедается).
+    Для каждого набора ингредиентов оставляем лучший порядок; сортировка по eat.
+    -> ``{ok, checked, count, results:[dish]}``."""
+    fd = food_data_read(cfg)
+    if not fd.get("ok"):
+        return fd
+    bal, genes, names = fd["bal"], fd["genes"], fd["names"]
+    avail = []
+    for a in available or []:
+        try:
+            a = int(a)
+        except (TypeError, ValueError):
+            continue
+        if a in bal and a in genes and a not in avail:
+            avail.append(a)
+    if len(avail) < 4:
+        return {"ok": False, "error": "нужно минимум 4 доступных ингредиента"}
+    need = 0
+    for g in need_genes or []:
+        if g in _FOOD_GENE_NAMES:
+            need |= 1 << _FOOD_GENE_NAMES.index(g)
+    try:
+        max_eat = float(max_eat) if max_eat not in (None, "") else None
+    except (TypeError, ValueError):
+        max_eat = None
+    # eat кратен _FOOD_EAT_K — сравниваем целые произведения балансов
+    max_p = int(max_eat / _FOOD_EAT_K + 1e-9) if max_eat is not None else None
+    n = len(avail)
+    best = {}  # frozenset -> (p, combo, mask)
+    for a in avail:
+        Ba = bal[a]
+        for b in avail:
+            if b == a:
+                continue
+            ab = Ba.get(b, 0)
+            if not ab:
+                continue
+            Bb = bal[b]
+            for c in avail:
+                if c == a or c == b:
+                    continue
+                ac = Ba.get(c, 0)
+                if not ac:
+                    continue
+                Bc = bal[c]
+                p3 = ab * ac
+                g3 = genes[a] ^ genes[b] ^ genes[c]
+                for d in avail:
+                    if d == a or d == b or d == c:
+                        continue
+                    p = p3 * Bc.get(d, 0) * Bb.get(d, 0)
+                    if not p or (max_p is not None and p > max_p):
+                        continue
+                    m = g3 ^ genes[d]
+                    if m & need != need:
+                        continue
+                    key = frozenset((a, b, c, d))
+                    cur = best.get(key)
+                    if cur is None or p > cur[0]:
+                        best[key] = (p, (a, b, c, d), m)
+    ranked = sorted(best.values(), key=lambda x: (-x[0], -bin(x[2]).count("1")))
+    top = ranked[:max(1, min(50, int(top_n or 10)))]
+    return {"ok": True, "checked": n * (n - 1) * (n - 2) * (n - 3), "count": len(best),
+            "results": [_food_dish(combo, p * _FOOD_EAT_K, m, names) for p, combo, m in top]}
+
+
 def _inv_container(world_dir, uid, where):
     """-> (path, mtime, root_obj, inv_dict) для 'stash' (файл игрока) или 'carry'
     (файл его юнита). Или (None, None, None, err_str)."""
