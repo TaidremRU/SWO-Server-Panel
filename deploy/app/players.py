@@ -2059,57 +2059,6 @@ def craft_plan(cfg, item, qty=1, uid=None, clan_id=None):
     }
 
 
-def player_craftable(cfg, uid):
-    """Что игрок может скрафтить прямо сейчас из того, что у него есть (склад +
-    инвентарь аватара), с учётом его технологий и технологий клана. Станки не
-    считаются — только рецепты craft.json. -> {ok, have, now:[...], almost:[...]}:
-    ``now`` — хватает всего (max — сколько раз подряд), ``almost`` — теха есть,
-    не хватает одного ингредиента."""
-    world_dir = find_world_dir(cfg)
-    if not world_dir:
-        return {"ok": False, "error": "каталог мира не найден"}
-    cd = _craft_data(world_dir)
-    if not cd:
-        return {"ok": False, "error": "нет Data\\craft.json"}
-    uid = int(uid)
-    raw = _read_json(_user_file(world_dir, uid)) or {}
-    unit = {}
-    if raw.get("unitId") is not None:
-        unit = _read_json(os.path.join(world_dir, "Data", "units", "unit%s.json" % raw["unitId"])) or {}
-    items = load_items(world_dir)
-    have = collections.Counter()
-    for it in ((raw.get("Inventory") or {}).get("items") or []) + ((unit.get("Inventory") or {}).get("items") or []):
-        slug = items.get(it.get("type"))
-        if slug:
-            have[slug] += int(it.get("count") or 0)
-    known = set(raw.get("techList") or [])
-    c = next((x for x in _clans_raw(world_dir) if x.get("id") == raw.get("clanId")), None) if raw.get("clanId") else None
-    if c:
-        known.update(c.get("tech") or [])
-    now, almost = [], []
-    for sid, r in cd["recipes"].items():
-        if not r["res"] or (r["tech"] and r["tech"] not in known):
-            continue
-        need = [(rid, n) for rid, n in r["res"] if n > 0]
-        if not need:
-            continue
-        short = [(rid, n - have.get(rid, 0)) for rid, n in need if have.get(rid, 0) < n]
-        row = {"id": sid, "name": item_label(sid), "out": r["count"],
-               "workbench": item_label(r["workbench"]) if r["workbench"] else "",
-               "res": [{"id": rid, "name": item_label(rid), "n": n, "have": have.get(rid, 0)} for rid, n in need]}
-        if not short:
-            row["max"] = min(have[rid] // n for rid, n in need)
-            now.append(row)
-        elif len(short) == 1 and len(need) > 1 and any(have.get(rid) for rid, _n in need):
-            row["short"] = {"id": short[0][0], "name": item_label(short[0][0]), "n": short[0][1]}
-            almost.append(row)
-    now.sort(key=lambda x: x["name"].lower())
-    almost.sort(key=lambda x: (x["short"]["n"], x["name"].lower()))
-    return {"ok": True, "now": now, "almost": almost[:60],
-            "have": sorted(({"id": k, "name": item_label(k), "count": v} for k, v in have.items() if v),
-                           key=lambda x: x["name"].lower())}
-
-
 def _tech_parent(world_dir, tid):
     p = os.path.join(world_dir, "Data", "tech.json")
     try:

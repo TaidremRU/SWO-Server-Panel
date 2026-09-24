@@ -347,9 +347,6 @@ class PlayerWeb:
     def _api_tech_tree(self, uid, q):
         return self._cached("tech_tree", 600, lambda: players.tech_tree(self.cfg))
 
-    def _api_craftable(self, uid, q):
-        return players.player_craftable(self.cfg, uid)
-
     def _api_craft_catalog(self, uid, q):
         return self._cached("craft_catalog", 600, lambda: players.craft_catalog(self.cfg))
 
@@ -633,7 +630,7 @@ function tabTech(m){
 
 // ---------------------------------------------------------------- крафт
 function tabCraft(m){
-  var now=el("div"), plan=el("div");
+  var plan=el("div");
   var inp=el("input",{list:"cr-dl",placeholder:"Что скрафтить?",style:"min-width:240px"}), dl=el("datalist",{id:"cr-dl"});
   var qty=el("input",{type:"number",min:"1",value:"1",style:"width:80px"}), byName={};
   api("/api/craft-catalog").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});
@@ -654,17 +651,6 @@ function tabCraft(m){
   }
   m.appendChild(card("Раскладка до сырья",[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},["Посчитать"])]),
     el("div",{style:"margin-top:10px"},[plan])]));
-  m.appendChild(now);
-  load(now,"/api/craftable",function(d){
-    function rec(r){ return el("span",{},r.res.map(function(x,i){ return el("span",{style:x.have<x.n?"color:var(--err)":""},[(i?", ":"")+x.name+" ×"+x.n]); })); }
-    function nm(r){ return el("a",{href:"#",onclick:function(e){ e.preventDefault(); inp.value=r.name; doPlan(r.id); window.scrollTo(0,0); }},[r.name+(r.out>1?" ×"+r.out:"")]); }
-    now.appendChild(card("Могу скрафтить из того, что есть ("+d.now.length+")",[
-      el("p",{class:"muted small"},["Склад + инвентарь, с учётом моих технологий и технологий клана. Станки не учитываются."]),
-      d.now.length? el("div",{class:"scroll"},[table(["Предмет","Сколько раз","Рецепт","Где"],d.now,function(r){ return [nm(r),r.max,rec(r),r.workbench]; })])
-        : el("div",{class:"muted"},["пока ничего"])]));
-    if(d.almost.length) now.appendChild(card("Не хватает одного ресурса",[el("div",{class:"scroll"},[
-      table(["Предмет","Не хватает","Рецепт"],d.almost,function(r){ return [nm(r), r.short.name+" ×"+r.short.n, rec(r)]; })])]));
-  });
 }
 
 // ---------------------------------------------------------------- клан
