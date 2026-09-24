@@ -43,13 +43,30 @@ try:
 except OSError:
     pass
 _wa = webui.AuthStore(_wa_path)
-assert _wa.verify("admin", "admin") and _wa.must_change, "webui: дефолт admin/admin не создан"
+assert _wa.verify("admin", "admin") and _wa.must_change_of("admin"), "webui: дефолт admin/admin не создан"
 assert not _wa.verify("admin", "wrong"), "webui: verify пропускает неверный пароль"
-_wa.set_password("s3cret-pass")
-assert _wa.verify("admin", "s3cret-pass") and not _wa.must_change, "webui: смена пароля не сработала"
+_wa.set_password("admin", "s3cret-pass")
+assert _wa.verify("admin", "s3cret-pass") and not _wa.must_change_of("admin"), "webui: смена пароля не сработала"
+_wa.add_user("mod1", "mod-pass-1", "moderator")
+assert _wa.role_of("mod1") == "moderator" and _wa.must_change_of("mod1"), "webui: пользователь не добавился"
+try:
+    _wa.delete_user("admin")
+    raise AssertionError("webui: удалили последнего админа")
+except webui._Bad:
+    pass
+_wa.delete_user("mod1")
+assert _wa.role_of("mod1") is None, "webui: пользователь не удалился"
+os.remove(_wa_path)
+# старый формат (один пользователь) -> admin
+with open(_wa_path, "w", encoding="utf-8") as _f:
+    _salt = b"0123456789abcdef"
+    json.dump({"username": "boss", "algo": "pbkdf2_sha256", "iterations": 1000, "salt": _salt.hex(),
+               "hash": webui.AuthStore._hash("old-pass-1", _salt, 1000), "must_change": False}, _f)
+_wa = webui.AuthStore(_wa_path)
+assert _wa.role_of("boss") == "admin" and _wa.verify("boss", "old-pass-1"), "webui: миграция старого файла"
 os.remove(_wa_path)
 _wcfg = cfg.get("webui", {}) or {}
-print("webui OK: auth admin/admin+must_change, PBKDF2, host=%s port=%s enabled=%s"
+print("webui OK: auth admin/admin+must_change, PBKDF2, роли+миграция, host=%s port=%s enabled=%s"
       % (_wcfg.get("host", "0.0.0.0"), _wcfg.get("port", 8080), _wcfg.get("enabled", True)))
 
 # --- вкладка «Игроки»: чтение файлов локального сервера ---

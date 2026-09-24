@@ -206,8 +206,19 @@ def _coerce_setting(path, typ, raw):
 
 
 # --------------------------------------------------------------------------- auth
+ROLES = ("admin", "moderator", "viewer")
+ROLE_LEVEL = {"viewer": 1, "moderator": 2, "admin": 3}
+_NAME_RX = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
+
+
 class AuthStore:
-    """Логин/пароль веб-панели в ``webui_auth.json`` (PBKDF2-HMAC-SHA256)."""
+    """Пользователи веб-панели в ``webui_auth.json`` (PBKDF2-HMAC-SHA256):
+    ``{"users": {name: {hash, salt, iterations, role, must_change, updated}}}``.
+
+    Роли — как у Telegram-бота: **admin** (всё), **moderator** (просмотр +
+    перезапуск игры/вход, скриншот, бан/разбан, нарушения/твинки), **viewer**
+    (только просмотр, без паролей/приватов/IP игроков). Старый формат с одним
+    пользователем (username/salt/hash) при загрузке становится админом."""
 
     ITERS = 200_000
 
@@ -219,62 +230,134 @@ class AuthStore:
     def _load_or_init(self):
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                self.d = json.load(f)
-            if not {"username", "salt", "hash"} <= set(self.d):
-                raise ValueError("неполный файл")
+                d = json.load(f)
+            if "users" not in d:                       # старый формат — один админ
+                if not {"username", "salt", "hash"} <= set(d):
+                    raise ValueError("неполный файл")
+                u = {k: d[k] for k in ("algo", "iterations", "salt", "hash", "must_change", "updated") if k in d}
+                u["role"] = "admin"
+                d = {"users": {d["username"]: u}}
+                self.d = d
+                self._save()
+                logging.info("webui: %s переведён на несколько пользователей", self.path)
+            if not d.get("users"):
+                raise ValueError("нет пользователей")
+            self.d = d
         except FileNotFoundError:
-            self.d = self._make("admin", "admin", must_change=True)
+            self.d = {"users": {"admin": self._make("admin", "admin", True)}}
             self._save()
-            logging.warning(
-                "webui: создан %s — вход admin/admin, СМЕНИТЕ ПАРОЛЬ при первом входе", self.path
-            )
+            logging.warning("webui: создан %s — вход admin/admin, СМЕНИТЕ ПАРОЛЬ при первом входе", self.path)
         except Exception:  # noqa: BLE001
             logging.exception("webui: %s повреждён — пересоздаю admin/admin", self.path)
-            self.d = self._make("admin", "admin", must_change=True)
+            self.d = {"users": {"admin": self._make("admin", "admin", True)}}
             self._save()
 
-    def _make(self, user, pw, must_change):
+    def _make(self, pw, role, must_change):
         salt = secrets.token_bytes(16)
-        return {
-            "username": user,
-            "algo": "pbkdf2_sha256",
-            "iterations": self.ITERS,
-            "salt": salt.hex(),
-            "hash": self._hash(pw, salt, self.ITERS),
-            "must_change": bool(must_change),
-            "updated": _now_iso(),
-        }
+        return {"algo": "pbkdf2_sha256", "iterations": self.ITERS, "salt": salt.hex(),
+                "hash": self._hash(pw, salt, self.ITERS), "role": role,
+                "must_change": bool(must_change), "updated": _now_iso()}
 
     @staticmethod
     def _hash(pw, salt, iters):
         return hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, iters).hex()
 
+    def _u(self, user):
+        return (self.d.get("users") or {}).get(user)
+
     @property
     def username(self):
-        return self.d.get("username", "admin")
+        """Первый админ (для строки в логе при старте)."""
+        return next((n for n, u in self.d["users"].items() if u.get("role") == "admin"), "admin")
+
+    def role_of(self, user):
+        u = self._u(user)
+        return (u.get("role") if u.get("role") in ROLES else "admin") if u else None
+
+    def must_change_of(self, user):
+        u = self._u(user)
+        return bool(u and u.get("must_change"))
 
     @property
     def must_change(self):
-        return bool(self.d.get("must_change"))
+        """Хотя бы у одного админа пароль по умолчанию (для лога при старте)."""
+        return any(u.get("must_change") for u in self.d["users"].values() if u.get("role") == "admin")
 
     def verify(self, user, pw):
-        if user != self.d.get("username"):
+        u = self._u(user)
+        if not u:
+            # время ответа не должно выдавать, есть ли такой пользователь
+            self._hash(pw, b"0" * 16, self.ITERS)
             return False
-        got = self._hash(pw, bytes.fromhex(self.d["salt"]), int(self.d.get("iterations", self.ITERS)))
-        return secrets.compare_digest(got, self.d.get("hash", ""))
+        got = self._hash(pw, bytes.fromhex(u["salt"]), int(u.get("iterations", self.ITERS)))
+        return secrets.compare_digest(got, u.get("hash", ""))
 
-    def set_password(self, newpw, newuser=None):
+    def users(self):
+        return [{"name": n, "role": self.role_of(n), "must_change": bool(u.get("must_change")),
+                 "updated": u.get("updated")} for n, u in sorted(self.d["users"].items())]
+
+    def _admins(self):
+        return [n for n in self.d["users"] if self.role_of(n) == "admin"]
+
+    def set_password(self, user, newpw, newuser=None):
+        """Смена своего пароля (и, по желанию, логина) — снимает must_change."""
         with self._lock:
-            self.d = self._make(newuser or self.username, newpw, must_change=False)
+            u = self.d["users"].pop(user)
+            name = newuser or user
+            if name != user and name in self.d["users"]:
+                self.d["users"][user] = u
+                raise _Bad("пользователь %s уже есть" % name)
+            self.d["users"][name] = self._make(newpw, u.get("role", "admin"), False)
+            self._save()
+
+    def add_user(self, name, pw, role):
+        if not _NAME_RX.match(name or ""):
+            raise _Bad("логин: 2–32 символа, латиница, цифры, _ . -")
+        if role not in ROLES:
+            raise _Bad("неизвестная роль")
+        with self._lock:
+            if name in self.d["users"]:
+                raise _Bad("пользователь %s уже есть" % name)
+            self.d["users"][name] = self._make(pw, role, True)   # сменит пароль при первом входе
+            self._save()
+
+    def set_role(self, name, role):
+        if role not in ROLES:
+            raise _Bad("неизвестная роль")
+        with self._lock:
+            u = self._u(name)
+            if not u:
+                raise _Bad("нет такого пользователя")
+            if u.get("role") == "admin" and role != "admin" and len(self._admins()) <= 1:
+                raise _Bad("нельзя оставить панель без админа")
+            u["role"] = role
+            u["updated"] = _now_iso()
+            self._save()
+
+    def reset_password(self, name, pw):
+        with self._lock:
+            u = self._u(name)
+            if not u:
+                raise _Bad("нет такого пользователя")
+            self.d["users"][name] = self._make(pw, u.get("role", "viewer"), True)
+            self._save()
+
+    def delete_user(self, name):
+        with self._lock:
+            if not self._u(name):
+                raise _Bad("нет такого пользователя")
+            if self.role_of(name) == "admin" and len(self._admins()) <= 1:
+                raise _Bad("нельзя удалить последнего админа")
+            self.d["users"].pop(name)
             self._save()
 
     def reset(self):
-        """Сброс на admin/admin + must_change (забытый пароль, без доступа к RDP) —
-        дергается командой /webui reset из Telegram."""
+        """Сброс входа admin/admin + must_change (забытый пароль, без доступа к RDP) —
+        дергается командой /webui reset из Telegram. Остальные пользователи остаются."""
         with self._lock:
-            self.d = self._make("admin", "admin", must_change=True)
+            self.d["users"]["admin"] = self._make("admin", "admin", True)
             self._save()
-        logging.warning("webui: пароль сброшен на admin/admin через /webui reset")
+        logging.warning("webui: вход admin сброшен на admin/admin через /webui reset")
 
     def _save(self):
         tmp = self.path + ".tmp"
@@ -318,6 +401,12 @@ class Sessions:
     def drop(self, tok):
         with self._lock:
             self._d.pop(tok, None)
+
+    def drop_user(self, user):
+        """Выкинуть все сессии пользователя (сброс пароля, удаление)."""
+        with self._lock:
+            for t in [t for t, s in self._d.items() if s["user"] == user]:
+                self._d.pop(t, None)
 
     def elevate(self, tok, seconds):
         """Отметить сессию как «подтверждённую паролем» на ``seconds`` вперёд —
@@ -657,6 +746,42 @@ class WebUI:
             self._nets_key = raw
         return self._nets
 
+    # ------------------------------------------------------------ права по ролям
+    # viewer — просмотр; moderator — + как в Telegram (скриншот, перезапуск игры,
+    # вход) и бан/разбан, нарушения, твинки; admin — всё. Не указанный POST —
+    # только админу, не указанный GET — всем вошедшим.
+    _MOD_ROUTES = {"shot", "suspicious", "twinks"}
+    _MOD_OPS = {"restartgame", "login"}
+    _MOD_MODERATE = {"ban", "unban"}
+    _ADMIN_ROUTES = {"audit", "log", "settings", "roles", "login-flow", "nav-shots", "nav-shot", "admin-tools",
+                     "world-backup", "players-csv", "users",
+                     # рецепты микстур/кулинарии — знание только для админа
+                     "buff-notepad", "buff-ingredients", "buff-optimize", "food-ingredients", "food-lib", "food-optimize"}
+    _POST_VIEW = {"job"}
+
+    def _need_level(self, route, method, q):
+        if route.startswith("players/"):
+            parts = route.split("/")
+            sub = parts[2] if len(parts) > 2 else ""
+            if sub in ("secret", "sensitive", "inventory"):
+                return 3
+            if sub == "moderate":
+                return 2        # точнее — в _api_player_moderate (бан/разбан модератору, остальное админу)
+            return 1
+        if route in self._ADMIN_ROUTES:
+            return 3
+        if route == "action":
+            return 2            # конкретная операция проверяется в _api_action
+        if route in self._MOD_ROUTES:
+            return 2
+        if route == "favicon" and method == "POST":
+            return 3
+        if route == "server-chat" and method == "POST":
+            return 3            # приватный чат сервера
+        if method == "POST" and route not in self._POST_VIEW:
+            return 3
+        return 1
+
     def dispatch(self, h, method):
         ip = h.client_address[0]
         if not _ip_allowed(ip, self._allowed_nets()):
@@ -691,6 +816,9 @@ class WebUI:
                 return self._api_login(h)
 
             tok, sess = self._session_of(h)
+            if sess and not self.auth.role_of(sess["user"]):     # пользователя удалили
+                self.sessions.drop(tok)
+                sess = None
             if not sess:
                 return self._json(h, {"error": "auth"}, 401)
 
@@ -705,8 +833,14 @@ class WebUI:
             if route == "password" and method == "POST":
                 return self._api_password(h, sess)
 
-            if self.auth.must_change:
+            if self.auth.must_change_of(sess["user"]):
                 return self._json(h, {"error": "must_change"}, 403)
+
+            role = self.auth.role_of(sess["user"])
+            need = self._need_level(route, method, q)
+            if ROLE_LEVEL.get(role, 0) < need:
+                return self._json(h, {"error": "forbidden", "role": role}, 403)
+            sess["role"] = role
 
             if route.startswith("players/"):
                 parts = route.split("/")
@@ -821,7 +955,8 @@ class WebUI:
                "title": self._title(), "favicon_v": self._favicon_ver(),
                "langs": list(i18n.SUPPORTED)}
         if sess:
-            out.update(username=sess["user"], csrf=sess["csrf"], must_change=self.auth.must_change)
+            out.update(username=sess["user"], csrf=sess["csrf"], must_change=self.auth.must_change_of(sess["user"]),
+                       role=self.auth.role_of(sess["user"]))
         return self._json(h, out)
 
     def _api_login(self, h):
@@ -837,12 +972,50 @@ class WebUI:
             tok, csrf = self.sessions.new(user, ip)
             self.audit(ip, user, "вход в панель")
             return self._json(
-                h, {"ok": True, "username": user, "csrf": csrf, "must_change": self.auth.must_change},
+                h, {"ok": True, "username": user, "csrf": csrf, "must_change": self.auth.must_change_of(user),
+                    "role": self.auth.role_of(user)},
                 set_cookie="sid=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (tok, SESSION_TTL),
             )
         self.throttle.fail(ip)
         logging.warning("webui: неудачный вход user=%r ip=%s", user, ip)
         return self._json(h, {"error": "bad_credentials"}, 401)
+
+    def _api_users(self, h, method, q, sess):
+        """Пользователи панели (только админ). POST {op: add|role|reset|delete, name,
+        role, password} — под повторным вводом своего пароля, всё в аудит."""
+        if method == "GET":
+            return self._json(h, {"ok": True, "users": self.auth.users(), "roles": list(ROLES), "me": sess["user"]})
+        b = self._body(h)
+        op, name = (b.get("op") or "").strip(), (b.get("name") or "").strip()
+        ok, resp = self._reauth(h, sess, "пользователи панели: %s %s" % (op, name), body=b)
+        if not ok:
+            return resp
+        try:
+            if op in ("add", "reset"):
+                pw = b.get("new_password") or ""
+                if len(pw) < 6 or pw.lower() in ("admin", "password", name.lower()):
+                    raise _Bad("пароль: не короче 6 символов и не совпадает с логином")
+                if op == "add":
+                    self.auth.add_user(name, pw, (b.get("role") or "viewer").strip())
+                else:
+                    self.auth.reset_password(name, pw)
+                    self.sessions.drop_user(name)
+            elif op == "role":
+                if name == sess["user"]:
+                    raise _Bad("свою роль менять нельзя")
+                self.auth.set_role(name, (b.get("role") or "").strip())
+            elif op == "delete":
+                if name == sess["user"]:
+                    raise _Bad("себя удалить нельзя")
+                self.auth.delete_user(name)
+                self.sessions.drop_user(name)
+            else:
+                return self._json(h, {"error": "bad_op"}, 400)
+        except _Bad as e:
+            return self._json(h, {"error": "bad", "detail": str(e)}, 400)
+        self.audit(h.client_address[0], sess["user"], "ПОЛЬЗОВАТЕЛИ панели: %s %s%s" % (
+            op, name, (" → " + b.get("role")) if op in ("add", "role") else ""))
+        return self._json(h, {"ok": True, "users": self.auth.users()})
 
     def _api_password(self, h, sess):
         b = self._body(h)
@@ -853,7 +1026,7 @@ class WebUI:
             return self._json(h, {"error": "too_short"}, 400)
         if new.lower() in ("admin", "password", sess["user"].lower()):
             return self._json(h, {"error": "too_weak"}, 400)
-        self.auth.set_password(new)
+        self.auth.set_password(sess["user"], new)
         self.audit(h.client_address[0], sess["user"], "смена пароля")
         return self._json(h, {"ok": True})
 
@@ -1669,6 +1842,8 @@ class WebUI:
         ACTS = {"ban", "unban", "role", "position", "tech", "stat", "reset_code"}
         if act not in ACTS:
             return self._json(h, {"error": "bad_action"}, 400)
+        if sess.get("role") != "admin" and act not in self._MOD_MODERATE:
+            return self._json(h, {"error": "forbidden", "role": sess.get("role")}, 403)
         ok, b = self._reauth(h, sess, "модерация игрока #%s (%s)" % (pid, act), body=body)
         if not ok:
             return b
@@ -2028,6 +2203,8 @@ class WebUI:
         op = (b.get("op") or "").strip()
         if op not in self._OPS:
             return self._json(h, {"error": "bad_op"}, 400)
+        if sess.get("role") != "admin" and op not in self._MOD_OPS:
+            return self._json(h, {"error": "forbidden", "role": sess.get("role")}, 403)
         if op in self._CONFIRM and not b.get("confirm"):
             return self._json(h, {"error": "need_confirm"}, 400)
         lang = i18n.norm(b.get("lang") or self.cfg.get("telegram", {}).get("default_lang", "ru"))
@@ -2434,6 +2611,10 @@ var T = {
   chpass_title:"Смена пароля", chpass_note:"Вход по умолчанию admin/admin. Смените пароль сейчас — минимум 6 символов, не «admin».",
   chpass_old:"Текущий пароль", chpass_new:"Новый пароль", chpass_rep:"Повторите новый пароль",
   chpass_mismatch:"Пароли не совпадают", change:"Сменить пароль",
+  err_forbidden:"Недостаточно прав для этого действия", role_admin:"админ", role_moderator:"модератор", role_viewer:"наблюдатель",
+  us_title:"Пользователи панели", us_intro:"Админ — всё; модератор — просмотр, скриншот, перезапуск игры и вход, бан/разбан, нарушения и твинки; наблюдатель — только просмотр (без паролей, приватов и IP игроков, без рецептов). Новый пользователь сменит пароль при первом входе.",
+  us_name:"Логин", us_role:"Роль", us_pw:"Временный пароль (от 6 символов)", us_add:"Добавить", us_reset:"Сбросить пароль", us_del:"Удалить",
+  us_me:"это вы", us_mc:"ждёт смены пароля", us_new_pw:"Новый временный пароль для ", us_confirm_del:"Удалить пользователя ",
   err_bad_credentials:"Неверный логин или пароль", err_throttled:"Слишком много попыток, подождите",
   err_bad_old:"Текущий пароль неверный", err_too_short:"Минимум 6 символов", err_too_weak:"Слишком простой пароль",
   err_auth:"Сессия истекла — войдите заново", err_net:"Нет связи с сервером",
@@ -2661,6 +2842,10 @@ var T = {
   chpass_title:"Change password", chpass_note:"Default login is admin/admin. Change it now — at least 6 characters, not \"admin\".",
   chpass_old:"Current password", chpass_new:"New password", chpass_rep:"Repeat new password",
   chpass_mismatch:"Passwords do not match", change:"Change password",
+  err_forbidden:"Not enough rights for this action", role_admin:"admin", role_moderator:"moderator", role_viewer:"viewer",
+  us_title:"Panel users", us_intro:"Admin — everything; moderator — viewing, screenshot, game restart and login, ban/unban, violations and twinks; viewer — viewing only (no player passwords, private messages or IPs, no recipes). A new user changes the password on first login.",
+  us_name:"Login", us_role:"Role", us_pw:"Temporary password (6+ chars)", us_add:"Add", us_reset:"Reset password", us_del:"Delete",
+  us_me:"you", us_mc:"must change password", us_new_pw:"New temporary password for ", us_confirm_del:"Delete user ",
   err_bad_credentials:"Wrong username or password", err_throttled:"Too many attempts, wait a bit",
   err_bad_old:"Current password is wrong", err_too_short:"At least 6 characters", err_too_weak:"Password too weak",
   err_auth:"Session expired — log in again", err_net:"No connection to server",
@@ -2885,12 +3070,19 @@ function header(){
   var thBtn=el("button",{class:"small",title:"theme",onclick:toggleTheme},["◐"]);
   var out=[ el("span",{id:"conn",class:"dot "+(S.conn===false?"err":(S.conn?"ok":""))}),
             el("h1",{},[S.title||t("title")]), el("span",{class:"sp"}),
-            el("span",{class:"muted small"},[S.user||""]), diskBadge(), langBtn, thBtn,
+            el("span",{class:"muted small"},[(S.user||"")+(S.role&&S.role!=="admin"? " · "+t("role_"+S.role) : "")]), diskBadge(), langBtn, thBtn,
             el("button",{class:"small",onclick:doLogout},[t("logout")]) ];
   return el("header",{},out);
 }
+// вкладки по ролям (сервер всё равно проверяет каждый запрос — это только чтобы не показывать лишнее)
+var ROLE_TABS={
+  viewer:["dash","srv","chat","stats","map","players","activity","leaders","clans","fleet","trade","economy","craft"],
+  moderator:["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","craft"]};
+function isAdmin(){ return (S.role||"admin")==="admin"; }
 function shell(){
   var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
+  if(!isAdmin()){ var allow=ROLE_TABS[S.role]||ROLE_TABS.viewer; tabs=tabs.filter(function(x){ return allow.indexOf(x)>=0; });
+    if(tabs.indexOf(S.tab)<0) S.tab=tabs[0]; }
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
@@ -2916,7 +3108,7 @@ function viewLogin(){
 function doLogin(){
   var u=$("#lu").value.trim(), p=$("#lp").value;
   api("/api/login",{body:{username:u,password:p}}).then(function(j){
-    S.authed=true; S.user=j.username; S.csrf=j.csrf; S.must_change=!!j.must_change; render();
+    S.authed=true; S.user=j.username; S.csrf=j.csrf; S.must_change=!!j.must_change; S.role=j.role||"admin"; render();
   }).catch(function(e){ var m=$("#lmsg"); if(m) m.innerHTML=""; if(m) m.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 function doLogout(){ api("/api/logout",{method:"POST"}).finally(function(){ S.authed=false; S.csrf=""; render(); }); }
@@ -3039,6 +3231,7 @@ function tabAct(v){
     ["testalert","a_testalert",0],
     ["restartvm","a_restartvm",1], ["restarttask","a_restarttask",1], ["stopbot","a_stopbot",1]
   ];
+  if(!isAdmin()) defs=defs.filter(function(d){ return d[0]==="restartgame"||d[0]==="login"; });
   var grid=el("div",{class:"actions"}, defs.map(function(d){
     var cls=d[2]?"danger":""; if(d[0]==="restartgame"||d[0]==="login") cls="pri";
     return el("button",{class:cls,onclick:function(){ runAction(d[0], d[3]||{}, d[2], t(d[1])); }},[t(d[1])]);
@@ -3054,7 +3247,7 @@ function tabAct(v){
       expMsg
     ])
   ]);
-  v.appendChild(el("div",{},[grid, out, exp]));
+  v.appendChild(el("div",{},[grid, out, isAdmin()? exp : null]));
 }
 function runAction(op, extra, needConfirm, label){
   if(needConfirm && !window.confirm(t("confirm")+":\n"+label)) return;
@@ -5617,6 +5810,33 @@ function accRow(a){
     lbl, usr, pw, rm ]);
   return row;
 }
+// ---- пользователи панели (только админ; изменения — под паролем, в аудит) ----
+function usersCard(){
+  var body=el("div",{},[el("p",{class:"muted small"},["…"])]), msg=el("div",{});
+  function roleSel(v){ var s=el("select",{},["admin","moderator","viewer"].map(function(r){ var o=el("option",{value:r},[t("role_"+r)]); if(r===v) o.selected=true; return o; })); return s; }
+  function call(extra){ msg.innerHTML="";
+    gatedApi("/api/users",extra,function(d){ draw(d); },function(e){ msg.appendChild(el("div",{class:"msg err"},[e.detail||errText(e)])); }); }
+  function draw(d){
+    body.innerHTML="";
+    var tb=el("table",{},[el("tr",{},[t("us_name"),t("us_role"),"",""].map(function(x){ return el("th",{},[x]); }))]);
+    d.users.forEach(function(u){
+      var me=u.name===S.user, rs=roleSel(u.role);
+      rs.disabled=me; rs.addEventListener("change",function(){ call({op:"role",name:u.name,role:rs.value}); });
+      tb.appendChild(el("tr",{},[
+        el("td",{},[el("b",{},[u.name]), me? el("span",{class:"muted small"},["  ("+t("us_me")+")"]) : null,
+          u.must_change? el("span",{class:"pill warn",style:"margin-left:6px"},[t("us_mc")]) : null]),
+        el("td",{},[rs]),
+        el("td",{},[el("button",{class:"small",onclick:function(){ var pw=window.prompt(t("us_new_pw")+u.name); if(pw) call({op:"reset",name:u.name,new_password:pw}); }},[t("us_reset")])]),
+        el("td",{},[me? null : el("button",{class:"small danger",onclick:function(){ if(window.confirm(t("us_confirm_del")+u.name+"?")) call({op:"delete",name:u.name}); }},[t("us_del")])])]));
+    });
+    var nm=el("input",{placeholder:t("us_name"),style:"width:140px"}), pw=el("input",{type:"password",placeholder:t("us_pw"),autocomplete:"new-password",style:"width:220px"}), rl=roleSel("moderator");
+    body.appendChild(tb);
+    body.appendChild(el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;margin-top:10px"},[nm,rl,pw,
+      el("button",{class:"pri small",onclick:function(){ call({op:"add",name:nm.value.trim(),role:rl.value,new_password:pw.value}); }},[t("us_add")])]));
+  }
+  api("/api/users").then(draw).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin-bottom:12px"},[el("h3",{},[t("us_title")]), el("p",{class:"muted small"},[t("us_intro")]), body, msg]);
+}
 function drawSettings(out,j){
   out.innerHTML=""; SET_FIELDS={}; SET_ACCS=[];
   if(!j.ok){ out.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
@@ -5626,6 +5846,7 @@ function drawSettings(out,j){
     sec.fields.forEach(function(fd){ card.appendChild(setFieldInput(fd)); });
     grid.appendChild(card);
   });
+  out.appendChild(usersCard());
   out.appendChild(grid);
   out.appendChild(faviconCard());
 
@@ -5779,7 +6000,7 @@ function faviconCard(){
   document.addEventListener("visibilitychange",function(){ if(!document.hidden && S.authed && !S.must_change){
     if(S.tab==="dash") loadState(false); } });
   api("/api/session").then(function(j){
-    S.authed=!!j.authed; S.user=j.username||""; S.csrf=j.csrf||""; S.must_change=!!j.must_change;
+    S.authed=!!j.authed; S.user=j.username||""; S.csrf=j.csrf||""; S.must_change=!!j.must_change; S.role=j.role||"admin";
     applyBrand(j.title, j.favicon_v); render();
   }).catch(function(){ S.authed=false; render(); });
 })();
