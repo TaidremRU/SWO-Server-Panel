@@ -19,6 +19,7 @@ PBKDF2-HMAC-SHA256. Сессия — cookie ``sid`` (в памяти проце�
 Протокол — обычный HTTP: панель только для локальной сети (как и остальной
 доступ к этому боксу).
 """
+import base64
 import copy
 import hashlib
 import http.cookies
@@ -77,6 +78,8 @@ SETTINGS_SCHEMA = [
         ("webui.host", "Хост", "Host", "str", "0.0.0.0 = все интерфейсы; нужен перезапуск"),
         ("webui.port", "Порт", "Port", "int", "нужен перезапуск + правило фаервола"),
         ("webui.enabled", "Включена", "Enabled", "bool", ""),
+        ("webui.title", "Название панели", "Panel title", "str",
+         "шапка и вкладка браузера; пусто = SigmaSteamBot. Иконка — ниже, «Иконка панели»"),
     ]),
     ("watchdog", "Watchdog", "Watchdog", [
         ("watchdog.enabled", "Включён", "Enabled", "bool", ""),
@@ -578,7 +581,7 @@ class WebUI:
                 return self._send(h, 200, "text/html; charset=utf-8", PAGE,
                                   {"Cache-Control": "no-store"})
             if path == "/favicon.ico":
-                return self._send(h, 204, "text/plain", b"")
+                return self._send_favicon(h)
             if path == "/healthz":
                 return self._api_healthz(h)
             if not path.startswith("/api/"):
@@ -654,9 +657,71 @@ class WebUI:
         }).encode("utf-8")
         return self._send(h, 200, "application/json", body, {"Cache-Control": "no-store"})
 
+    # ---------------------------------------------------- название и иконка
+    _FAVICON_TYPES = {b"\x89PNG": "image/png", b"\x00\x00\x01\x00": "image/x-icon",
+                      b"\xff\xd8\xff": "image/jpeg", b"GIF8": "image/gif", b"RIFF": "image/webp"}
+
+    def _title(self):
+        return ((self.cfg.get("webui") or {}).get("title") or "").strip() or "SigmaSteamBot"
+
+    def _favicon_path(self):
+        return os.path.join(self.cfg.get("base_dir", common.BASE_DIR), "favicon.img")
+
+    def _favicon_ver(self):
+        try:
+            return int(os.path.getmtime(self._favicon_path()))
+        except OSError:
+            return 0
+
+    def _favicon_type(self, data):
+        for sig, ct in self._FAVICON_TYPES.items():
+            if data.startswith(sig):
+                return ct
+        return None
+
+    def _send_favicon(self, h):
+        try:
+            with open(self._favicon_path(), "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._send(h, 204, "text/plain", b"")
+        return self._send(h, 200, self._favicon_type(data) or "application/octet-stream", data,
+                          {"Cache-Control": "max-age=300"})
+
+    def _api_favicon(self, h, method, q, sess):
+        """POST {data:"data:image/...;base64,..."} — поставить иконку панели
+        (PNG/ICO/JPEG/GIF/WebP, до 512 КБ); {data:null} — убрать."""
+        if method != "POST":
+            return self._json(h, {"ok": True, "v": self._favicon_ver()})
+        b = self._body(h)
+        raw = b.get("data")
+        path = self._favicon_path()
+        if not raw:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.audit(h.client_address[0], sess["user"], "иконка панели: убрана")
+            return self._json(h, {"ok": True, "v": 0})
+        try:
+            data = base64.b64decode(str(raw).split(",", 1)[-1], validate=False)
+        except (ValueError, TypeError):
+            return self._json(h, {"error": "invalid", "detail": "не base64"}, 400)
+        if len(data) > 512 * 1024:
+            return self._json(h, {"error": "invalid", "detail": "больше 512 КБ"}, 400)
+        if not self._favicon_type(data):
+            return self._json(h, {"error": "invalid", "detail": "нужен PNG/ICO/JPEG/GIF/WebP"}, 400)
+        tmp = path + ".swtmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+        self.audit(h.client_address[0], sess["user"], "иконка панели: загружена (%d байт)" % len(data))
+        return self._json(h, {"ok": True, "v": self._favicon_ver()})
+
     def _api_session(self, h):
         _, sess = self._session_of(h)
         out = {"app": "SigmaSteamBot", "version": VERSION, "authed": bool(sess),
+               "title": self._title(), "favicon_v": self._favicon_ver(),
                "langs": list(i18n.SUPPORTED)}
         if sess:
             out.update(username=sess["user"], csrf=sess["csrf"], must_change=self.auth.must_change)
@@ -1943,6 +2008,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SigmaSteamBot</title>
+<link rel="icon" id="favicon" href="/favicon.ico">
 <style>
 :root{
   --bg:#0f1216; --panel:#171c22; --panel2:#1e252d; --line:#2b333d; --fg:#e7ecf1;
@@ -2138,6 +2204,8 @@ var T = {
   tr_idle:"Не заходил", tr_storage:"Выручка на складе", tr_loading:"собираю данные по всем картам…",
   mi_by_clan:"по кланам", mi_shops:"магазины", mi_shops_hint:"Значки магазинов игроков на карте", mi_no_clans:"на этой карте нет земли кланов",
   mi_blocks:"уч. 8×8", mi_owners:"владельцев", mi_noclan:"без клана",
+  fav_title:"Иконка панели", fav_remove:"Убрать", fav_big:"Файл больше 512 КБ",
+  fav_hint:"Показывается во вкладке браузера. PNG/ICO/JPEG/GIF/WebP до 512 КБ, лучше квадратная 64–256 px. Применяется сразу, без «Сохранить». Название панели — поле «Название панели» в блоке «Веб-панель» (после «Сохранить» обнови страницу).",
   ec_title:"Экономика сервера", ec_intro:"Сколько каждого предмета есть в мире: у игроков (склад + при себе), в сундуках и брошенное на картах (без природных кладов под лопату), в торговле (лоты и выручка терминалов/магазинов). Курс — медиана по предложениям в «Торговле». Динамика — по суточным снимкам, которые панель делает сама (копится с момента включения). Клик по строке — график и главные держатели.",
   ec_sort:"сортировка:", ec_s_total:"всего", ec_s_players:"у игроков", ec_s_cont:"в сундуках", ec_s_trade:"в торговле",
   ec_s_holders:"держателей", ec_s_d1:"рост за сутки", ec_s_d7:"рост за неделю",
@@ -2343,6 +2411,8 @@ var T = {
   tr_idle:"Idle", tr_storage:"Revenue in storage", tr_loading:"collecting data from all maps…",
   mi_by_clan:"by clan", mi_shops:"shops", mi_shops_hint:"Player shop markers on the map", mi_no_clans:"no clan land on this map",
   mi_blocks:"8×8 plots", mi_owners:"owners", mi_noclan:"no clan",
+  fav_title:"Panel icon", fav_remove:"Remove", fav_big:"File is over 512 KB",
+  fav_hint:"Shown in the browser tab. PNG/ICO/JPEG/GIF/WebP up to 512 KB, square 64–256 px works best. Applied immediately, no \"Save\" needed. The panel name is the \"Panel title\" field in \"Web panel\" (reload the page after \"Save\").",
   ec_title:"Server economy", ec_intro:"How much of every item exists: with players (stash + carried), in chests and dropped on maps (natural buried stashes excluded), in trade (terminal/shop lots and revenue). Rate — median across \"Trade\" offers. Trend — from daily snapshots the panel takes itself (accumulates from when it's enabled). Click a row for the chart and top holders.",
   ec_sort:"sort:", ec_s_total:"total", ec_s_players:"with players", ec_s_cont:"in chests", ec_s_trade:"in trade",
   ec_s_holders:"holders", ec_s_d1:"24h growth", ec_s_d7:"7d growth",
@@ -2569,7 +2639,7 @@ function header(){
   var langBtn=el("button",{class:"small",onclick:function(){ S.lang=S.lang==="ru"?"en":"ru"; localStorage.setItem("sw_lang",S.lang); render(); }},[S.lang==="ru"?"EN":"RU"]);
   var thBtn=el("button",{class:"small",title:"theme",onclick:toggleTheme},["◐"]);
   var out=[ el("span",{id:"conn",class:"dot "+(S.conn===false?"err":(S.conn?"ok":""))}),
-            el("h1",{},[t("title")]), el("span",{class:"sp"}),
+            el("h1",{},[S.title||t("title")]), el("span",{class:"sp"}),
             el("span",{class:"muted small"},[S.user||""]), langBtn, thBtn,
             el("button",{class:"small",onclick:doLogout},[t("logout")]) ];
   return el("header",{},out);
@@ -5172,6 +5242,7 @@ function drawSettings(out,j){
     grid.appendChild(card);
   });
   out.appendChild(grid);
+  out.appendChild(faviconCard());
 
   // игровые аккаунты
   var accBox=el("div",{},[]);
@@ -5293,13 +5364,38 @@ function logNav(body){
   }).catch(function(e){ body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 
+// ---- название и иконка панели (config: webui.title + favicon.img в base_dir) ----
+function applyBrand(title, favV){
+  if(title){ S.title=title; document.title=title; }
+  var lk=document.getElementById("favicon");
+  if(lk) lk.href="/favicon.ico?v="+(favV||0);
+}
+function faviconCard(){
+  var prev=el("img",{src:"/favicon.ico?v="+Date.now(),style:"width:48px;height:48px;border-radius:8px;border:1px solid var(--line);object-fit:contain;background:var(--panel2)"});
+  var msg=el("span",{class:"muted small"},[]);
+  var inp=el("input",{type:"file",accept:"image/png,image/x-icon,image/vnd.microsoft.icon,image/jpeg,image/gif,image/webp"});
+  function done(r){ msg.textContent="✅"; prev.src="/favicon.ico?v="+Date.now(); applyBrand(null, r.v||Date.now()); }
+  inp.addEventListener("change",function(){
+    var f=inp.files[0]; if(!f) return;
+    if(f.size>512*1024){ msg.textContent=t("fav_big"); return; }
+    var rd=new FileReader();
+    rd.onload=function(){ api("/api/favicon",{body:{data:rd.result}}).then(done).catch(function(e){ msg.textContent=errText(e); }); inp.value=""; };
+    rd.readAsDataURL(f);
+  });
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("fav_title")]),
+    el("div",{class:"row",style:"gap:12px;align-items:center;flex-wrap:wrap"},[prev, inp,
+      el("button",{class:"small",onclick:function(){ api("/api/favicon",{body:{data:null}}).then(done).catch(function(e){ msg.textContent=errText(e); }); }},[t("fav_remove")]), msg]),
+    el("p",{class:"muted small"},[t("fav_hint")])]);
+}
+
 // ---- boot ----
 (function(){
   var th=localStorage.getItem("sw_theme"); if(th) document.documentElement.setAttribute("data-theme",th);
   document.addEventListener("visibilitychange",function(){ if(!document.hidden && S.authed && !S.must_change){
     if(S.tab==="dash") loadState(false); } });
   api("/api/session").then(function(j){
-    S.authed=!!j.authed; S.user=j.username||""; S.csrf=j.csrf||""; S.must_change=!!j.must_change; render();
+    S.authed=!!j.authed; S.user=j.username||""; S.csrf=j.csrf||""; S.must_change=!!j.must_change;
+    applyBrand(j.title, j.favicon_v); render();
   }).catch(function(){ S.authed=false; render(); });
 })();
 </script>

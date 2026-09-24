@@ -17,6 +17,8 @@ nav_out.txt
 !docs/screenshots/*.png
 buff_notepad.json
 tech_track_state.json
+clan_track_state.json
+inv_track_state.json
 
 # --- веб-панель: локальные креды и аудит ---
 webui_auth.json
@@ -37,3 +39,6 @@ venv/
 # --- эксперименты и скретч-файлы ---
 experiment/
 com.txt
+
+# иконка панели (своя на каждой машине, ставится из «Настроек»)
+favicon.img
