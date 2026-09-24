@@ -76,5 +76,19 @@ New-NetFirewallRule -DisplayName 'SigmaSteamBot Web UI' -Direction Inbound -Acti
     -Protocol TCP -LocalPort $WebPort -Profile Any | Out-Null
 Write-Output "[ok] firewall: inbound TCP $WebPort allowed (Web UI). Open http://<vm-ip>:$WebPort/  (login admin/admin, change on first use)"
 
+# --- панель игроков (playerweb.enabled/port из config.json): своё правило фаервола ---
+Get-NetFirewallRule -DisplayName 'SigmaSteamBot Player Panel' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+try {
+  $pj = $null
+  if (Test-Path (Join-Path $Base 'config.json')) { $pj = (Get-Content (Join-Path $Base 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json).playerweb }
+  if ($pj -and $pj.enabled) {
+    $PlPort = 80
+    if ($pj.port) { $PlPort = [int]$pj.port }
+    New-NetFirewallRule -DisplayName 'SigmaSteamBot Player Panel' -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort $PlPort -Profile Any | Out-Null
+    Write-Output "[ok] firewall: inbound TCP $PlPort allowed (player panel)"
+  }
+} catch { Write-Output "[--] playerweb: $_" }
+
 Get-ScheduledTask -TaskName 'SigmaSteamBot', 'SigmaNav', 'SigmaConsoleGuard' | Select-Object TaskName, State | Format-Table -AutoSize
 Write-Output "Done. Start now with:  Start-ScheduledTask -TaskName SigmaSteamBot"

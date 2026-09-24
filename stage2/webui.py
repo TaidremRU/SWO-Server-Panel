@@ -85,6 +85,15 @@ SETTINGS_SCHEMA = [
         ("webui.title", "Название панели", "Panel title", "str",
          "шапка и вкладка браузера; пусто = SigmaSteamBot. Иконка — ниже, «Иконка панели»"),
     ]),
+    ("playerweb", "Панель игроков", "Player panel", [
+        ("playerweb.enabled", "Включена", "Enabled", "bool",
+         "вход ником + игровым паролем, только своё; нужен перезапуск задачи"),
+        ("playerweb.host", "Хост", "Host", "str", "0.0.0.0 = все интерфейсы; нужен перезапуск"),
+        ("playerweb.port", "Порт", "Port", "int", "по умолчанию 80; нужен перезапуск + правило фаервола (setup.bat)"),
+        ("playerweb.allowed_nets", "Разрешённые адреса", "Allowed addresses", "strlist",
+         "пусто = пускать всех; для интернета — только через прокси с HTTPS"),
+        ("playerweb.title", "Название", "Title", "str", "пусто = как у админ-панели"),
+    ]),
     ("watchdog", "Watchdog", "Watchdog", [
         ("watchdog.enabled", "Включён", "Enabled", "bool", ""),
         ("watchdog.auto_start_steam", "Авто-запуск Steam", "Auto-start Steam", "bool", ""),

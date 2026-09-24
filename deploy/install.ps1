@@ -107,6 +107,20 @@ New-NetFirewallRule -DisplayName 'SigmaSteamBot Web UI' -Direction Inbound -Acti
     -Protocol TCP -LocalPort $WebPort -Profile Any | Out-Null
 Write-Output "[ok] фаервол: входящий TCP $WebPort разрешён (веб-панель) -> http://<ip-vm>:$WebPort/  (вход admin/admin, смените при первом входе)"
 
+# --- панель игроков (playerweb.enabled/port из config.json): своё правило фаервола ---
+Get-NetFirewallRule -DisplayName 'SigmaSteamBot Player Panel' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+try {
+  $pj = $null
+  if (Test-Path (Join-Path $BaseDir 'config.json')) { $pj = (Get-Content (Join-Path $BaseDir 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json).playerweb }
+  if ($pj -and $pj.enabled) {
+    $PlPort = 80
+    if ($pj.port) { $PlPort = [int]$pj.port }
+    New-NetFirewallRule -DisplayName 'SigmaSteamBot Player Panel' -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort $PlPort -Profile Any | Out-Null
+    Write-Output "[ok] фаервол: входящий TCP $PlPort разрешён (панель игроков)"
+  }
+} catch { Write-Output "[--] playerweb: $_" }
+
 Get-ScheduledTask -TaskName 'SigmaSteamBot','SigmaNav','SigmaConsoleGuard' | Select-Object TaskName, State | Format-Table -AutoSize
 
 # --- запуск сейчас, чтобы после setup.bat панель уже работала без ручных шагов ---

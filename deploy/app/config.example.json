@@ -24,6 +24,14 @@
     "port": 8080
   },
 
+  "_playerweb_comment": "Панель ИГРОКОВ (playerweb.py): вход ником + игровым паролем, игрок видит только своё (профиль, инвентарь, исследования, крафт, свой клан) и общие рейтинги; только чтение. allowed_nets пусто = пускать всех. В интернет — только через обратный прокси с HTTPS.",
+  "playerweb": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 80,
+    "allowed_nets": []
+  },
+
   "_players_comment": "Вкладка «Игроки» веб-панели: список и онлайн-статус игроков локального сервера из файлов игры (analytics.txt + Data\\users\\* + Logs\\game_state.txt). localserver_root пусто = %USERPROFILE%\\AppData\\LocalLow\\Crematorium of Time\\SigmaWorld\\SigmaWorld\\LocalServer. world/world_dir пусто = мир с самым свежим analytics.txt. Пароли игроков (Code) в список/карточку не отдаются. twink_ignore_ips — какие IP не учитывать во вкладке «Твинки» (напр. локальный релей).",
   "players": {
     "enabled": true,
