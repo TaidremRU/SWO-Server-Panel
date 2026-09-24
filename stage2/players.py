@@ -1530,6 +1530,126 @@ def tech_label(world_dir, tid):
     return ("%s — %s" % (tid, m["label"])) if m else tid
 
 
+def tech_tree(cfg):
+    """Дерево технологий для схемы изучения (игрок/клан) — порядок как в
+    ``tech.json`` (так же идёт в игре). -> ``{ok, nodes:[{id, parent, label,
+    family, cost_h, level, clan}]}``."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    raw = _read_json(os.path.join(world_dir, "Data", "tech.json")) or {}
+    meta = tech_meta(world_dir)
+    nodes = []
+    for it in raw.get("items", []):
+        tid = it.get("id")
+        if not tid:
+            continue
+        m = meta.get(tid) or {}
+        nodes.append({"id": tid, "parent": it.get("parent"), "label": m.get("label") or tid,
+                      "family": m.get("family") or "", "cost_h": m.get("cost_h"),
+                      "level": it.get("level"), "clan": bool(it.get("isClan"))})
+    return {"ok": True, "nodes": nodes}
+
+
+# ZData.ClanRole / ClanSlotType (Il2CppDumper, GameAssembly.dll), подписи — из
+# клиентской локализации (role_*, textClan*).
+_CLAN_ROLES_RU = {0: "Лидер", 1: "Офицер", 2: "Участник", 3: "Капрал"}
+_CLAN_SLOT_TYPES_RU = {0: "Бой", 1: "Производство", 2: "Наука", 3: "Фермерство", 4: "Пилот"}
+
+
+def _clans_raw(world_dir):
+    return (_read_json(os.path.join(world_dir, "Data", "game", "clans.json")) or {}).get("clans") or []
+
+
+def clans_list(cfg):
+    """Все кланы: размер, рейтинг, CP, лидер, сколько онлайн, клан-технологии."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    online = _online_now(world_dir)
+    out = []
+    for c in _clans_raw(world_dir):
+        users = c.get("users") or []
+        leader = next((u.get("userId") for u in users if u.get("role") == 0), None)
+        out.append({
+            "id": c.get("id"), "name": c.get("name") or ("clan %s" % c.get("id")),
+            "size": len(users), "max": c.get("maxUserCount"),
+            "rating": c.get("rating"), "clan_point": c.get("clanPoint"),
+            "trading": bool(c.get("isTrading")),
+            "leader": {"id": leader, "name": names.get(leader) or ("id %s" % leader)} if leader is not None else None,
+            "online": sum(1 for u in users if online.get(u.get("userId"))),
+            "tech_count": len(c.get("tech") or []),
+        })
+    out.sort(key=lambda x: -(x["rating"] or 0))
+    return {"ok": True, "clans": out}
+
+
+def clan_detail(cfg, cid):
+    """Клан целиком: состав (с уровнем/часами/исследованиями/специализацией),
+    клан-технологии, слоты специализаций и «покрытие» — сколько участников
+    знают каждую личную технологию."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    c = next((x for x in _clans_raw(world_dir) if x.get("id") == cid), None)
+    if not c:
+        return {"ok": False, "error": "клан %d не найден" % cid}
+    names = load_user_list(world_dir)
+    online = _online_now(world_dir)
+    st = server_time(world_dir)
+    tcost = _load_ref(world_dir, "tech.json", "id", "cost")
+    slot_of = {}
+    slots = []
+    for i, s in enumerate(c.get("slots") or []):
+        uid = s.get("userId") or 0
+        row = {"idx": i, "blocked": bool(s.get("isBlock")),
+               "positive": _CLAN_SLOT_TYPES_RU.get(s.get("positive"), "#%s" % s.get("positive")),
+               "negative": _CLAN_SLOT_TYPES_RU.get(s.get("negative"), "#%s" % s.get("negative")),
+               "user": {"id": uid, "name": names.get(uid) or ("id %s" % uid)} if uid else None}
+        slots.append(row)
+        if uid:
+            slot_of[uid] = row
+    members, coverage = [], {}
+    for u in c.get("users") or []:
+        uid = u.get("userId")
+        raw = _read_json(_user_file(world_dir, uid)) if uid is not None else {}
+        techs = raw.get("techList") or []
+        for t in techs:
+            coverage[t] = coverage.get(t, 0) + 1
+        sl = slot_of.get(uid)
+        members.append({
+            "id": uid, "name": names.get(uid) or raw.get("name") or ("id %s" % uid),
+            "role": u.get("role"), "role_name": _CLAN_ROLES_RU.get(u.get("role"), "#%s" % u.get("role")),
+            "rating": u.get("rating"), "clan_point": u.get("clanPoint"),
+            "online": bool(online.get(uid)),
+            "level": raw.get("unitLevel"),
+            "playtime_h": round(float(raw.get("timeGame") or 0) / 3600.0, 1),
+            "last_seen_h": round((st - float(raw.get("lastTimeGame") or 0)) / 3600.0, 1)
+                           if (st and raw.get("lastTimeGame")) else None,
+            "tech_count": len(techs),
+            "research_h": round(sum(tcost.get(t) or 0 for t in techs) / 60.0, 1),
+            "researching": tech_label(world_dir, raw.get("researchTech")) if raw.get("researchTech") else "",
+            "techs": techs,
+            "spec": {"positive": sl["positive"], "negative": sl["negative"]} if sl else None,
+        })
+    members.sort(key=lambda m: (m["role"] if m["role"] is not None else 9, -(m["rating"] or 0)))
+    ctech = c.get("tech") or []
+    return {
+        "ok": True, "id": cid, "name": c.get("name") or ("clan %d" % cid),
+        "size": len(members), "max": c.get("maxUserCount"),
+        "rating": c.get("rating"), "clan_point": c.get("clanPoint"),
+        "trading": bool(c.get("isTrading")),
+        "online": sum(1 for m in members if m["online"]),
+        "tech": ctech, "tech_named": [{"id": t, "label": tech_label(world_dir, t)} for t in ctech],
+        "members": members, "slots": slots, "coverage": coverage,
+    }
+
+
 # --- человеко-читаемые подписи к блокам/абилкам ------------------------------
 # blocks.json/ability.json дают только английский slug (id/name). Тексты — из
 # клиентской локализации: resources.assets содержит TextAsset "lang" — XML

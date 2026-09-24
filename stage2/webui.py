@@ -1073,6 +1073,25 @@ class WebUI:
         threading.Thread(target=run, name="buffopt", daemon=True).start()
         return self._json(h, {"job": jid})
 
+    def _api_tech_tree(self, h, method, q, sess):
+        """Дерево технологий (tech.json) для схемы изучения игрока/клана."""
+        try:
+            d = players.tech_tree(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: tech_tree")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_clans(self, h, method, q, sess):
+        """Вкладка «Кланы»: без ?id — список, с ?id=N — клан целиком."""
+        cid = (q.get("id") or [""])[0]
+        try:
+            d = players.clan_detail(self.cfg, cid) if cid else players.clans_list(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: clans %s", cid)
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
     def _api_food_ingredients(self, h, method, q, sess):
         """53 ингредиента кулинарии (Data\\product\\product_genes.json) с генами —
         для чекбоксов оптимизатора во вкладке «Кулинария»."""
@@ -1899,7 +1918,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1951,6 +1970,17 @@ var T = {
   fd_opt_found:"подходящих наборов", fd_opt_none:"Ни одно сочетание не подходит под условия.",
   fd_note:"Формула готовки разобрана из кода игры и проверена на всех блюдах сервера (совпадение 100%). Съеденное блюдо: сытость +N, энергия +N/5, каждый ген блюда +N/5 к Генетике A–D; когда все четыре ≥ 100 — +1 очко генетики. Блюдо с генами ABCD качает генетику быстрее всего.",
   fd_all_on:"все", fd_all_off:"ничего",
+  cl_none:"Кланов пока нет.", cl_intro:"Нажми на название клана — откроется состав, специализации, клановые технологии и схема изучения.",
+  cl_name:"Клан", cl_player:"Игрок", cl_size:"Состав", cl_online:"Онлайн", cl_rating:"Рейтинг", cl_leader:"Лидер",
+  cl_ctech:"Клан-технологии", cl_trade:"Торг. терминал", cl_back:"к списку кланов", cl_members:"Состав",
+  cl_role:"Роль", cl_techs:"Техов", cl_now:"сейчас", cl_spec:"Специализация",
+  cl_spec_hint:"Строка — позитивная специализация, столбец — негативная. В ячейке — кто её занимает.",
+  cl_ctech_scheme:"Схема клановых технологий", cl_ptech_scheme:"Личные технологии участников",
+  cl_cov_all:"весь клан — сколько участников знают", pd_tech_scheme:"Схема изучения",
+  ts_cost:"время изучения", ts_level:"уровень", ts_known:"знают",
+  ts_st_done:"изучено", ts_st_cur:"изучается сейчас", ts_st_avail:"доступно", ts_st_lock:"закрыто",
+  ts_cov_legend:"знает хотя бы один (ярче — больше участников)",
+  ts_hint:"Наведи на квадрат — название, время и статус. Ветка идёт слева направо, ответвления — новые строки под родителем.",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -2061,7 +2091,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2113,6 +2143,17 @@ var T = {
   fd_opt_found:"matching sets", fd_opt_none:"No combination matches these conditions.",
   fd_note:"The cooking formula was reverse-engineered from the game code and verified on every dish on the server (100% match). Eating a dish: satiety +N, energy +N/5, each dish gene +N/5 to Genetics A–D; once all four reach 100 — +1 genetics point. ABCD dishes level genetics fastest.",
   fd_all_on:"all", fd_all_off:"none",
+  cl_none:"No clans yet.", cl_intro:"Click a clan name to open its roster, specializations, clan techs and research scheme.",
+  cl_name:"Clan", cl_player:"Player", cl_size:"Members", cl_online:"Online", cl_rating:"Rating", cl_leader:"Leader",
+  cl_ctech:"Clan techs", cl_trade:"Trade terminal", cl_back:"back to clans", cl_members:"Roster",
+  cl_role:"Role", cl_techs:"Techs", cl_now:"now", cl_spec:"Specialization",
+  cl_spec_hint:"Row — positive specialization, column — negative. Cell — who holds it.",
+  cl_ctech_scheme:"Clan tech scheme", cl_ptech_scheme:"Members' personal techs",
+  cl_cov_all:"whole clan — how many members know it", pd_tech_scheme:"Research scheme",
+  ts_cost:"research time", ts_level:"level", ts_known:"known by",
+  ts_st_done:"researched", ts_st_cur:"researching now", ts_st_avail:"available", ts_st_lock:"locked",
+  ts_cov_legend:"known by at least one (brighter — more members)",
+  ts_hint:"Hover a square for name, time and status. Branches run left to right, forks start new rows under the parent.",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2333,14 +2374,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","entry","buffs","food","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","clans","entry","buffs","food","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -2920,6 +2961,187 @@ function tabFood(v){
   ]));
 }
 
+// ---- схема изучения (дерево tech.json) ----
+// Раскладка «метро»: первая ветка продолжает строку, остальные дети — новые
+// строки под родителем. Цвет — статус (изучено/изучается/доступно/закрыто)
+// или, в режиме coverage, доля участников клана, знающих технологию.
+var TECH_TREE=null;
+function loadTechTree(){
+  return TECH_TREE? Promise.resolve(TECH_TREE)
+    : api("/api/tech-tree").then(function(d){ if(d.ok) TECH_TREE=d; return d; });
+}
+function svgEl(tag,attrs,kids){ var e=document.createElementNS("http://www.w3.org/2000/svg",tag);
+  for(var k in (attrs||{})) if(attrs[k]!=null) e.setAttribute(k,attrs[k]);
+  (kids||[]).forEach(function(c){ if(c==null) return; e.appendChild(typeof c==="string"?document.createTextNode(c):c); });
+  return e; }
+function techScheme(nodes, opt){
+  opt=opt||{};
+  var list=nodes.filter(opt.filter||function(){ return true; });
+  var byId={}, kids={}, roots=[];
+  list.forEach(function(n){ byId[n.id]=n; });
+  list.forEach(function(n){
+    if(n.parent && byId[n.parent]) (kids[n.parent]=kids[n.parent]||[]).push(n.id); else roots.push(n.id); });
+  var pos={}, rowStart=[], nRows=0, maxX=0;
+  function place(id,x,row){
+    pos[id]={x:x,row:row}; if(x>maxX) maxX=x;
+    (kids[id]||[]).forEach(function(c,i){
+      if(i===0) place(c,x+1,row);
+      else { var r=nRows++; rowStart[r]=c; place(c,x+1,r); } });
+  }
+  roots.forEach(function(id){ var r=nRows++; rowStart[r]=id; place(id,0,r); });
+  var done=opt.done||{}, cov=opt.coverage, total=opt.total||1;
+  var LBL=150, P=21, C=15, W=LBL+(maxX+1)*P+8, H=nRows*P+6;
+  function cx(id){ return LBL+pos[id].x*P; } function cy(id){ return 3+pos[id].row*P; }
+  var svg=svgEl("svg",{width:W,height:H,viewBox:"0 0 "+W+" "+H,style:"display:block;font-family:inherit"});
+  var prevFam=null;
+  rowStart.forEach(function(id,r){
+    var n=byId[id], fam=n.family||"";
+    svg.appendChild(svgEl("text",{x:LBL-8,y:3+r*P+C-3,"text-anchor":"end","font-size":"11",
+      fill:fam===prevFam?"var(--line)":"var(--mut)"},[fam===prevFam?"↳":fam]));
+    prevFam=fam;
+  });
+  list.forEach(function(n){
+    if(!n.parent || !pos[n.parent]) return;
+    var px=cx(n.parent)+C/2, py=cy(n.parent)+C/2, x=cx(n.id), y=cy(n.id)+C/2;
+    var d= (pos[n.parent].row===pos[n.id].row) ? ("M"+(px+C/2)+" "+py+" H"+x)
+      : ("M"+px+" "+(py+C/2)+" V"+y+" H"+x);
+    var lit = cov? (cov[n.id]>0) : !!done[n.parent];
+    svg.appendChild(svgEl("path",{d:d,fill:"none",stroke:lit?"var(--mut)":"var(--line)","stroke-width":"1.2"}));
+  });
+  var cnt={done:0,cur:0,avail:0,lock:0};
+  list.forEach(function(n){
+    var st, fill, stroke, op=1, txt=null;
+    if(cov){
+      var k=cov[n.id]||0; st=k? "cov":"lock";
+      fill=k?"var(--ok)":"transparent"; stroke=k?"var(--ok)":"var(--line)"; op=k? (0.25+0.75*k/total) : 1;
+      if(k) txt=String(k);
+      if(k) cnt.done++; else cnt.lock++;
+    } else if(done[n.id]){ st="done"; fill="var(--ok)"; stroke="var(--ok)"; cnt.done++; }
+    else if(opt.current===n.id){ st="cur"; fill="var(--warn)"; stroke="var(--warn)"; cnt.cur++; }
+    else if(!n.parent || !byId[n.parent] || done[n.parent]){ st="avail"; fill="transparent"; stroke="var(--acc)"; cnt.avail++; }
+    else { st="lock"; fill="transparent"; stroke="var(--line)"; cnt.lock++; }
+    var tip=n.label+"  ["+n.id+"]"+(n.cost_h!=null? "\n"+t("ts_cost")+": "+n.cost_h+" "+(S.lang==="ru"?"ч":"h"):"")
+      +(n.level? "\n"+t("ts_level")+": "+n.level : "")
+      +"\n"+(cov? t("ts_known")+": "+(cov[n.id]||0)+" / "+total : t("ts_st_"+st));
+    var g=svgEl("g",{},[svgEl("title",{},[tip]),
+      svgEl("rect",{x:cx(n.id),y:cy(n.id),width:C,height:C,rx:3,fill:fill,"fill-opacity":op,stroke:stroke,"stroke-width":st==="avail"?1.6:1.2})]);
+    if(txt) g.appendChild(svgEl("text",{x:cx(n.id)+C/2,y:cy(n.id)+C-4,"text-anchor":"middle","font-size":"9",fill:"#fff"},[txt]));
+    svg.appendChild(g);
+  });
+  function lg(color,filled,label){ return el("span",{style:"display:inline-flex;align-items:center;gap:4px"},[
+    el("span",{style:"display:inline-block;width:11px;height:11px;border-radius:3px;border:1.5px solid "+color+";background:"+(filled?color:"transparent")}),label]); }
+  var legend = cov
+    ? el("div",{class:"row small muted",style:"gap:12px;flex-wrap:wrap;margin-bottom:6px"},[
+        lg("var(--ok)",true,t("ts_cov_legend")+" ("+cnt.done+" / "+list.length+")"), lg("var(--line)",false,t("ts_st_lock")) ])
+    : el("div",{class:"row small muted",style:"gap:12px;flex-wrap:wrap;margin-bottom:6px"},[
+        lg("var(--ok)",true,t("ts_st_done")+" "+cnt.done+" / "+list.length),
+        cnt.cur? lg("var(--warn)",true,t("ts_st_cur")) : null,
+        lg("var(--acc)",false,t("ts_st_avail")+" "+cnt.avail),
+        lg("var(--line)",false,t("ts_st_lock")+" "+cnt.lock) ]);
+  return el("div",{},[legend, el("div",{style:"overflow:auto;max-height:640px;border:1px solid var(--line);border-radius:8px;padding:6px"},[svg]),
+    el("div",{class:"muted small",style:"margin-top:4px"},[t("ts_hint")])]);
+}
+function techSchemeCard(title, mk){
+  var box=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  loadTechTree().then(function(tr){
+    box.innerHTML="";
+    if(!tr.ok){ box.appendChild(el("div",{class:"msg err"},[tr.error||"error"])); return; }
+    box.appendChild(mk(tr.nodes));
+  }).catch(function(e){ box.innerHTML=""; box.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[title]), box]);
+}
+function setOf(arr){ var o={}; (arr||[]).forEach(function(x){ o[x]=true; }); return o; }
+
+// ---- кланы ----
+var CLAN_SEL=null;
+function tabClans(v){
+  var out=el("div",{},[el("p",{class:"muted"},["…"])]);
+  v.appendChild(out);
+  if(CLAN_SEL!=null) return clanDetail(out, CLAN_SEL);
+  api("/api/clans").then(function(d){
+    out.innerHTML="";
+    if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    if(!d.clans.length){ out.appendChild(el("div",{class:"muted"},[t("cl_none")])); return; }
+    var tb=el("table",{},[el("tr",{},["#",t("cl_name"),t("cl_size"),t("cl_online"),t("cl_rating"),"CP",t("cl_leader"),t("cl_ctech"),t("cl_trade")]
+      .map(function(x){ return el("th",{},[x]); }))]);
+    d.clans.forEach(function(c,i){
+      tb.appendChild(el("tr",{},[
+        el("td",{},[String(i+1)]),
+        el("td",{},[el("a",{class:"pl-link",onclick:function(){ CLAN_SEL=c.id; routeTab(); }},[c.name])]),
+        el("td",{},[c.size+" / "+(c.max!=null?c.max:"?")]),
+        el("td",{},[c.online? el("span",{class:"pill ok"},[String(c.online)]) : "0"]),
+        el("td",{},[c.rating!=null? Number(c.rating).toLocaleString() : "—"]),
+        el("td",{},[c.clan_point!=null? String(c.clan_point) : "—"]),
+        el("td",{},[c.leader? plLink(c.leader.id,c.leader.name) : "—"]),
+        el("td",{},[String(c.tech_count)]),
+        el("td",{},[c.trading? "✓" : "—"])
+      ]));
+    });
+    out.appendChild(el("div",{class:"card"},[el("h3",{},[t("clans")+" · "+d.clans.length]), el("p",{class:"muted small"},[t("cl_intro")]), tb]));
+  }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+function clanDetail(out, cid){
+  api("/api/clans?id="+cid).then(function(d){
+    out.innerHTML="";
+    var back=el("div",{class:"row",style:"margin-bottom:10px"},[
+      el("button",{class:"small",onclick:function(){ CLAN_SEL=null; routeTab(); }},["← "+t("cl_back")])]);
+    out.appendChild(back);
+    if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    var hh=S.lang==="ru"?"ч":"h";
+    var g=el("div",{class:"grid"},[]);
+    g.appendChild(kvcard(d.name,[
+      [t("cl_rating"), d.rating!=null? Number(d.rating).toLocaleString() : "—"],
+      ["Clan Points", d.clan_point!=null? d.clan_point : "—"],
+      [t("cl_size"), d.size+" / "+(d.max!=null?d.max:"?")],
+      [t("cl_online"), d.online],
+      [t("cl_trade"), d.trading? "✓" : "—"],
+      [t("cl_ctech"), d.tech_named.length? el("div",{class:"chips"}, d.tech_named.map(function(x){ return el("span",{class:"chip"},[x.label]); })) : "—"]
+    ]));
+    // матрица специализаций: строка = позитивная, столбец = негативная
+    var types=[], seen={};
+    d.slots.forEach(function(s){ if(!seen[s.positive]){ seen[s.positive]=1; types.push(s.positive); } });
+    var mt=el("table",{class:"small"},[el("tr",{},[el("th",{},["+ \\ −"])].concat(types.map(function(x){ return el("th",{},[x]); })))]);
+    types.forEach(function(pt){
+      mt.appendChild(el("tr",{},[el("th",{},[pt])].concat(types.map(function(nt){
+        var s=d.slots.filter(function(z){ return z.positive===pt && z.negative===nt; })[0];
+        if(!s || s.blocked) return el("td",{style:"background:var(--line);opacity:.35"},[""]);
+        return el("td",{},[s.user? plLink(s.user.id,s.user.name) : el("span",{class:"muted"},["·"])]); }))));
+    });
+    g.appendChild(el("div",{class:"card"},[el("h3",{},[t("cl_spec")]), el("p",{class:"muted small"},[t("cl_spec_hint")]), mt]));
+    out.appendChild(g);
+
+    var rows=d.members.map(function(m){ return [
+      el("span",{},[m.online? el("span",{class:"dot ok",style:"margin-right:5px"}) : null, plLink(m.id,m.name)]),
+      m.role_name, m.level!=null? String(m.level) : "—", String(m.playtime_h),
+      m.last_seen_h!=null? (m.online? t("cl_now") : m.last_seen_h+" "+hh) : "—",
+      String(m.tech_count), "~"+m.research_h+" "+hh, m.researching||"—",
+      m.spec? ("+"+m.spec.positive+" / −"+m.spec.negative) : "—",
+      m.rating!=null? Number(m.rating).toLocaleString() : "—", m.clan_point!=null? String(m.clan_point) : "—" ]; });
+    out.appendChild(el("div",{class:"card",style:"margin-top:12px;overflow:auto"},[el("h3",{},[t("cl_members")+" · "+d.members.length]),
+      ltable([t("cl_player"),t("cl_role"),t("pd_level"),t("pd_playtime"),t("pd_last_seen"),t("cl_techs"),t("st_resh"),t("pd_res_cur"),t("cl_spec"),t("cl_rating"),"CP"],
+        d.members, function(m){ return rows[d.members.indexOf(m)]; })]));
+
+    out.appendChild(techSchemeCard(t("cl_ctech_scheme"), function(nodes){
+      return techScheme(nodes,{filter:function(n){ return n.clan; }, done:setOf(d.tech)}); }));
+
+    // личные технологии: покрытие по клану или схема одного участника
+    var sel=el("select",{},[el("option",{value:""},[t("cl_cov_all")])].concat(d.members.map(function(m,i){
+      return el("option",{value:String(i)},[m.name+" ("+m.tech_count+")"]); })));
+    var holder=el("div",{},[]);
+    function draw(nodes){
+      holder.innerHTML="";
+      var personal=function(n){ return !n.clan; };
+      holder.appendChild(sel.value===""
+        ? techScheme(nodes,{filter:personal, coverage:d.coverage, total:d.members.length})
+        : techScheme(nodes,{filter:personal, done:setOf(d.members[+sel.value].techs)}));
+    }
+    var card=techSchemeCard(t("cl_ptech_scheme"), function(nodes){
+      sel.addEventListener("change",function(){ draw(nodes); }); draw(nodes);
+      return el("div",{},[el("div",{class:"row",style:"gap:8px;margin-bottom:8px"},[sel]), holder]); });
+    out.appendChild(card);
+  }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+
 // ---- servers ----
 function tabSrv(v){
   var out=el("div",{id:"srvout"},[el("p",{class:"muted"},["…"])]);
@@ -3377,6 +3599,9 @@ function renderPlayerModal(d){
   }).catch(function(){ chatCard.querySelector(".muted").textContent=t("err_net"); });
 
   b.appendChild(g);
+
+  b.appendChild(techSchemeCard(t("pd_tech_scheme"), function(nodes){
+    return techScheme(nodes,{filter:function(n){ return !n.clan; }, done:setOf(r.tech_list), current:r.current}); }));
 
   // sensitive blocks (each behind admin password)
   function gate(box, url, render){
