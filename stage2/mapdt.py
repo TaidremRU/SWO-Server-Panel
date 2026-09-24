@@ -786,6 +786,9 @@ def _read_space_unit(r, version, item_ext):
     u["box_level"] = box.get("level")
     u["box_health"] = round(box.get("health") or 0.0, 1)
     u["box_has_transport"] = bool(box.get("transport"))
+    # груз: инвентарь транспорта внутри ящика-ракеты (+ собственный ниже)
+    u["cargo"] = [{"type": i["type"], "count": i["count"]}
+                  for i in (((box.get("transport") or {}).get("inventory") or {}).get("items") or []) if i.get("count")]
     u["x"], u["y"] = r.f64(), r.f64()
     u["rotate"] = r.i32()
     u["speed"] = round(r.f64(), 3)
@@ -799,6 +802,7 @@ def _read_space_unit(r, version, item_ext):
         if r.boolean():
             inv = _read_inventory(r, MAP_VERSION, item_ext, dict(_NOCTX))
             u["inv_items"] = len(inv.get("items") or [])
+            u["cargo"] += [{"type": i["type"], "count": i["count"]} for i in (inv.get("items") or []) if i.get("count")]
         u["dead_time"] = r.f64()
     if version > 1:
         u["star_id"] = r.u32()

@@ -2418,6 +2418,370 @@ def economy_report(cfg, hist_path):
             "scan_sec": round(time.time() - t0, 1)}
 
 
+# --- активность и удержание -------------------------------------------------
+def _level_bucket(lv):
+    try:
+        lv = int(lv or 0)
+    except (TypeError, ValueError):
+        lv = 0
+    if lv <= 0:
+        return "0"
+    if lv <= 5:
+        return "1-5"
+    lo = (lv - 1) // 10 * 10 + 1 if lv > 10 else 6
+    hi = 10 if lv <= 10 else lo + 9
+    return "%d-%d" % (lo, hi)
+
+
+def activity_report(cfg, churn_days=14):
+    """Регистрации/активные по дням, когорты по неделям с удержанием
+    D1/D7/D30, тепловая карта онлайна (день недели × час, среднее число
+    игроков за 4 недели), на каком уровне бросают (не заходили ``churn_days``)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    per, events = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+    if not events:
+        return {"ok": False, "error": "analytics.txt пуст"}
+    now = max(e["epoch"] for e in events if e["epoch"]) or time.time()
+    reg, enters = {}, collections.defaultdict(list)
+    day_reg, day_act = collections.Counter(), collections.defaultdict(set)
+    open_s, sessions = {}, []
+    for e in events:
+        ep = e["epoch"]
+        if not ep:
+            continue
+        d = datetime.fromtimestamp(ep).strftime("%Y-%m-%d")
+        if e["kind"] == "register":
+            reg.setdefault(e["id"], ep)
+            day_reg[d] += 1
+        elif e["kind"] == "enter":
+            enters[e["id"]].append(ep)
+            day_act[d].add(e["id"])
+            open_s[e["id"]] = ep
+        elif e["kind"] == "exit":
+            st = open_s.pop(e["id"], None)
+            if st is None and e.get("secs"):
+                st = ep - e["secs"]
+            if st:
+                sessions.append((st, ep))
+    for uid, st in open_s.items():          # ещё в игре
+        if per.get(uid, {}).get("online"):
+            sessions.append((st, now))
+    # дни
+    days = []
+    for i in range(59, -1, -1):
+        d = datetime.fromtimestamp(now - i * 86400).strftime("%Y-%m-%d")
+        days.append({"d": d, "reg": day_reg.get(d, 0), "active": len(day_act.get(d, ()))})
+    # когорты по неделям
+    def returned(uid, a, b):
+        t0 = reg[uid]
+        return any(t0 + a * 86400 <= t < t0 + b * 86400 for t in enters.get(uid, ()))
+    cohorts = {}
+    for uid, t0 in reg.items():
+        if t0 < now - 12 * 7 * 86400:
+            continue
+        wk = datetime.fromtimestamp(t0).strftime("%G-W%V")
+        c = cohorts.setdefault(wk, {"week": wk, "size": 0, "d1": [0, 0], "d7": [0, 0], "d30": [0, 0]})
+        c["size"] += 1
+        for key, a, b in (("d1", 1, 2), ("d7", 7, 14), ("d30", 30, 60)):
+            if now - t0 >= b * 86400 or (key == "d1" and now - t0 >= 2 * 86400):
+                c[key][1] += 1
+                if returned(uid, a, b):
+                    c[key][0] += 1
+    # тепловая карта: среднее одновременно онлайн по (день недели, час) за 4 недели
+    since = now - 28 * 86400
+    heat = [[0.0] * 24 for _ in range(7)]
+    for st, en in sessions:
+        st, en = max(st, since), min(en, now)
+        t = st
+        while t < en:
+            dt = datetime.fromtimestamp(t)
+            nxt = min(en, t - dt.minute * 60 - dt.second + 3600)
+            heat[dt.weekday()][dt.hour] += (nxt - t) / 3600.0
+            t = nxt if nxt > t else t + 60
+    heat = [[round(v / 4.0, 2) for v in row] for row in heat]
+    # отток по уровням
+    det = load_user_details(world_dir)
+    buckets = {}
+    quick = 0
+    for uid, u in per.items():
+        lv = (det.get(uid) or {}).get("level")
+        b = _level_bucket(lv)
+        row = buckets.setdefault(b, {"bucket": b, "active": 0, "churned": 0})
+        gone = (now - (u.get("last_epoch") or 0)) > churn_days * 86400 and not u.get("online")
+        row["churned" if gone else "active"] += 1
+        if gone and float((det.get(uid) or {}).get("playtime_h") or 0) < 1:
+            quick += 1
+
+    def bkey(b):
+        return int(b.split("-")[0])
+    lv_rows = sorted(buckets.values(), key=lambda r: bkey(r["bucket"]))
+    return {"ok": True, "days": days, "cohorts": sorted(cohorts.values(), key=lambda c: c["week"]),
+            "heat": heat, "levels": lv_rows, "churn_days": churn_days, "quit_first_hour": quick,
+            "players": len(per)}
+
+
+# --- лидерборды ---------------------------------------------------------------
+_RICH_ITEMS = ("platinum_coin", "gold_coin", "silver_coin", "tech_booster")
+
+
+def leaderboards(cfg, tt_log, clan_points_path, top=10):
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    names = load_user_list(world_dir)
+    items = load_items(world_dir)
+    slug2id = {v: k for k, v in items.items()}
+    per = _player_items(world_dir)
+
+    def nm(u):
+        return names.get(u) or ("id %s" % u)
+    rich = []
+    for slug in _RICH_ITEMS:
+        tid = slug2id.get(slug)
+        if tid is None:
+            continue
+        rows = sorted(((inv.get(tid, 0), u) for u, inv in per.items() if inv.get(tid)), reverse=True)[:top]
+        rich.append({"item": item_label(slug), "rows": [{"id": u, "name": nm(u), "v": n} for n, u in rows]})
+    # торговцы: продажи терминалов (+ магазины из кэша карт, если уже разобраны)
+    sales = collections.Counter()
+    tp = os.path.join(world_dir, "Data", "game", "terminals.dt2")
+    if mapdt and os.path.exists(tp):
+        td = mapdt.parse_terminals(tp, world_dir)
+        for t in td.get("terminals") or []:
+            sales[t["user_id"]] += t["sales"]
+    for _mt, val in list(_MAPSCAN_CACHE.values()):
+        for sh in val.get("shops") or []:
+            if sh.get("owner"):
+                sales[sh["owner"]] += sh.get("sales") or 0
+    traders = [{"id": u, "name": nm(u), "v": n} for u, n in sales.most_common(top) if n]
+    # исследователи: за 7 дней по журналу трекинга + всего часов исследований
+    week = time.time() - 7 * 86400
+    gained = collections.Counter()
+    for ln in _read_text(tt_log, tail_bytes=3_000_000).splitlines():
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if e.get("kind") != "tech_gained":
+            continue
+        try:
+            ts = datetime.strptime(e["ts"], "%Y-%m-%d %H:%M:%S").timestamp()
+        except (KeyError, ValueError):
+            continue
+        if ts >= week:
+            gained[e["uid"]] += int(e.get("count") or 0)
+    research_week = [{"id": u, "name": nm(u), "v": n} for u, n in gained.most_common(top)]
+    tcost = _load_ref(world_dir, "tech.json", "id", "cost")
+    det = load_user_details(world_dir)
+    rh = sorted(((round(sum(tcost.get(t) or 0 for t in d.get("techs") or []) / 60.0, 1), u)
+                 for u, d in det.items()), reverse=True)[:top]
+    research_total = [{"id": u, "name": nm(u), "v": h} for h, u in rh if h]
+    # кланы: рейтинг сейчас и рост за 7 дней (по точкам истории кланов)
+    pts = []
+    for ln in _read_text(clan_points_path, tail_bytes=4_000_000).splitlines():
+        try:
+            pts.append(json.loads(ln))
+        except ValueError:
+            continue
+    old = None
+    for p in pts:
+        if p.get("t", 0) <= time.time() - 7 * 86400 + 3600:
+            old = p
+    old = old or (pts[0] if pts else None)
+    clans = []
+    for c in _clans_raw(world_dir):
+        cid = str(c.get("id"))
+        was = ((old or {}).get("c") or {}).get(cid)
+        clans.append({"id": c.get("id"), "name": c.get("name"), "rating": c.get("rating"),
+                      "growth": (c.get("rating") or 0) - was[0] if was else None,
+                      "since": (old or {}).get("ts")})
+    clans.sort(key=lambda x: -(x["growth"] if x["growth"] is not None else -1e18))
+    return {"ok": True, "rich": rich, "traders": traders, "research_week": research_week,
+            "research_total": research_total, "clans": clans[:top]}
+
+
+# --- инструменты админа (всё — только оффлайн, с бэкапом; вызывать из-под пароля)
+def _resolve_targets(cfg, spec):
+    """``spec``: список id / "clan:N" / "active:D" (заходили за D дней) — через
+    запятую или пробел. -> (sorted uids, ошибка|None)."""
+    world_dir = find_world_dir(cfg)
+    out = set()
+    for tok in re.split(r"[\s,;]+", str(spec or "").strip()):
+        if not tok:
+            continue
+        if tok.startswith("clan:"):
+            try:
+                cid = int(tok[5:])
+            except ValueError:
+                return [], "неверный клан: %s" % tok
+            c = next((x for x in _clans_raw(world_dir) if x.get("id") == cid), None)
+            if not c:
+                return [], "нет клана %s" % cid
+            out.update(u.get("userId") for u in c.get("users") or [])
+        elif tok.startswith("active:"):
+            try:
+                days = float(tok[7:])
+            except ValueError:
+                return [], "неверный период: %s" % tok
+            per, _ev = parse_analytics(os.path.join(world_dir, "analytics.txt"))
+            lim = time.time() - days * 86400
+            out.update(u for u, x in per.items() if (x.get("last_epoch") or 0) >= lim)
+        else:
+            try:
+                out.add(int(tok))
+            except ValueError:
+                return [], "неверный id: %s" % tok
+    return sorted(u for u in out if u is not None), None
+
+
+def mass_give(cfg, spec, item, count):
+    uids, err = _resolve_targets(cfg, spec)
+    if err:
+        return {"ok": False, "error": err}
+    if not uids:
+        return {"ok": False, "error": "список игроков пуст"}
+    if len(uids) > 500:
+        return {"ok": False, "error": "слишком много игроков (%d > 500)" % len(uids)}
+    names = load_user_list(find_world_dir(cfg))
+    res = []
+    for u in uids:
+        r = give_stash_items(cfg, u, item, count)
+        res.append({"id": u, "name": names.get(u) or ("id %s" % u), "ok": bool(r.get("ok")),
+                    "error": r.get("error"), "backup": r.get("backup")})
+    return {"ok": True, "done": sum(1 for r in res if r["ok"]), "total": len(res), "results": res}
+
+
+def clan_give_tech(cfg, clan_id, techs):
+    uids, err = _resolve_targets(cfg, "clan:%s" % clan_id)
+    if err:
+        return {"ok": False, "error": err}
+    names = load_user_list(find_world_dir(cfg))
+    res = []
+    for u in uids:
+        r = player_add_tech(cfg, u, techs)
+        res.append({"id": u, "name": names.get(u) or ("id %s" % u), "ok": bool(r.get("ok")),
+                    "error": r.get("error"), "added": r.get("added")})
+    return {"ok": True, "done": sum(1 for r in res if r["ok"]), "total": len(res), "results": res}
+
+
+def player_backups(cfg, uid):
+    """Бэкапы файлов игрока, которые панель делала перед правками
+    (``logs\\game_edits\\<ts>\\user<N>.json`` / ``unit<id>.json``)."""
+    world_dir = find_world_dir(cfg)
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверный id"}
+    raw = _read_json(_user_file(world_dir, uid))
+    unit_id = raw.get("unitId")
+    wanted = {"user%d.json" % uid: "stash"}
+    if unit_id is not None:
+        wanted["unit%s.json" % unit_id] = "carry"
+    base = os.path.join(cfg.get("base_dir", os.path.dirname(os.path.abspath(__file__))), "logs", "game_edits")
+    items = load_items(world_dir)
+    out = []
+    try:
+        dirs = sorted(os.listdir(base), reverse=True)
+    except OSError:
+        dirs = []
+    for d in dirs:
+        for fn, where in wanted.items():
+            fp = os.path.join(base, d, fn)
+            if os.path.isfile(fp):
+                inv = (_read_json(fp).get("Inventory") or {}).get("items") or []
+                out.append({"dir": d, "file": fn, "where": where, "entries": len(inv),
+                            "items": _name_inv(inv, items)[:60]})
+        if len(out) >= 100:
+            break
+    return {"ok": True, "id": uid, "backups": out}
+
+
+def restore_inventory(cfg, uid, backup_dir, file):
+    """Вернуть ``Inventory`` игрока из бэкапа панели (только оффлайн; текущее
+    состояние перед этим тоже бэкапится — откат обратим)."""
+    world_dir = find_world_dir(cfg)
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверный id"}
+    if not re.match(r"^[0-9_]+$", str(backup_dir or "")) or not re.match(r"^(user|unit)\d+\.json$", str(file or "")):
+        return {"ok": False, "error": "неверный бэкап"}
+    raw = _read_json(_user_file(world_dir, uid))
+    if file == "user%d.json" % uid:
+        where = "stash"
+    elif raw.get("unitId") is not None and file == "unit%s.json" % raw["unitId"]:
+        where = "carry"
+    else:
+        return {"ok": False, "error": "бэкап не от этого игрока"}
+    base = os.path.join(cfg.get("base_dir", os.path.dirname(os.path.abspath(__file__))), "logs", "game_edits")
+    bak = _read_json(os.path.join(base, backup_dir, file))
+    if "Inventory" not in bak:
+        return {"ok": False, "error": "в бэкапе нет инвентаря"}
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок сейчас онлайн — откат только для оффлайн"}
+    path, mt, root, inv = _inv_container(world_dir, uid, where)
+    if inv is None:
+        return {"ok": False, "error": root}
+    root["Inventory"] = bak["Inventory"]
+    if not _is_offline(world_dir, uid):
+        return {"ok": False, "error": "игрок зашёл в игру — запись отменена"}
+    cur_bak = _game_edit_backup(cfg, path)
+    ok, err = _write_json_compact(path, root, mt)
+    if not ok:
+        return {"ok": False, "error": err}
+    return {"ok": True, "id": uid, "where": where, "from": backup_dir,
+            "backup": os.path.basename(os.path.dirname(cur_bak))}
+
+
+# --- флот игроков ---------------------------------------------------------------
+def _merge_cargo(cargo, items):
+    tot = collections.OrderedDict()
+    for c in cargo:
+        tot[c["type"]] = tot.get(c["type"], 0) + c["count"]
+    return [{"name": item_label(items.get(t)) if items.get(t) else "#%s" % t, "count": n} for t, n in tot.items()]
+
+
+def space_fleet(cfg):
+    """Корабли в космосе по владельцам (из space\\units.dt) + станции игроков
+    (Data\\stations\\station*.json)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    su = space_units(cfg)
+    items = load_items(world_dir)
+    clan_of = {u.get("userId"): c.get("name") for c in _clans_raw(world_dir) for u in c.get("users") or []}
+    names = load_user_list(world_dir)
+    owners = {}
+    for sh in (su.get("ships") or []) if su.get("ok") else []:
+        uid = sh.get("user_id") or 0
+        o = owners.setdefault(uid, {"id": uid, "name": sh.get("name") or "—", "clan": clan_of.get(uid) or "",
+                                    "ships": []})
+        o["ships"].append({"id": sh["id"], "model": sh["box_name"], "star": sh.get("star_id"),
+                           "x": sh["x"], "y": sh["y"], "moving": sh["moving"], "speed": sh.get("speed"),
+                           "health": sh.get("health"), "aboard": sh.get("aboard"),
+                           "cargo": _merge_cargo(sh.get("cargo") or [], items)})
+    stations = []
+    sd = os.path.join(world_dir, "Data", "stations")
+    try:
+        for f in sorted(os.listdir(sd)):
+            if not f.endswith(".json"):
+                continue
+            st = _read_json(os.path.join(sd, f))
+            uid = st.get("userId")
+            pos = st.get("position") or {}
+            stations.append({"id": st.get("id"), "name": st.get("name") or "", "owner": {"id": uid, "name": names.get(uid) or ("id %s" % uid)},
+                             "clan": next((c.get("name") for c in _clans_raw(world_dir) if c.get("id") == st.get("clanId")), "") if st.get("clanId") else "",
+                             "star": st.get("starId"), "x": round(pos.get("x") or 0), "y": round(pos.get("y") or 0),
+                             "size": "%sx%s" % ((st.get("size") or {}).get("x"), (st.get("size") or {}).get("y"))})
+    except OSError:
+        pass
+    fleet = sorted(owners.values(), key=lambda o: (-len(o["ships"]), o["name"].lower()))
+    return {"ok": True, "owners": fleet, "ships": sum(len(o["ships"]) for o in fleet),
+            "stations": stations, "note": su.get("note") if su.get("ok") else su.get("error")}
+
+
 def economy_snapshot_due(hist_path):
     """True, если за сегодня ещё нет снимка экономики (фоновый поток зовёт
     economy_report раз в сутки — чтобы динамика копилась без открытия вкладки)."""
@@ -4445,6 +4809,7 @@ def space_units(cfg, star_id=None):
                 "vx": round(u["vx"], 2), "vy": round(u["vy"], 2),
                 "box_type": u["box_type"], "box_name": bn,
                 "cargo_items": u.get("inv_items", 0),
+                "cargo": u.get("cargo") or [],
                 "moving": (abs(u["vx"]) + abs(u["vy"])) > 0.01,
                 "star_id": u.get("star_id")}
         # Классификация — по СЫРОМУ англ. слагу из blocks.json, не по переведённому

@@ -1337,6 +1337,77 @@ class WebUI:
         self.audit(h.client_address[0], sess["user"], "НАРУШЕНИЯ: просмотр журнала (%d)" % d.get("total", 0))
         return self._json(h, d)
 
+    def _cached(self, name, fn, ttl=60):
+        now = time.time()
+        slot = self._heavy.setdefault(name, {"cache": None, "job": None})
+        if slot.get("cache") and now - slot["cache"][0] < ttl:
+            return slot["cache"][1]
+        d = fn()
+        if d.get("ok"):
+            slot["cache"] = (now, d)
+        return d
+
+    def _api_activity(self, h, method, q, sess):
+        """Активность и удержание (analytics.txt)."""
+        try:
+            d = self._cached("activity", lambda: players.activity_report(self.cfg))
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: activity_report")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_leaderboards(self, h, method, q, sess):
+        """Рейтинги: богачи, торговцы, исследователи, рост кланов."""
+        try:
+            d = self._cached("leaderboards", lambda: players.leaderboards(self.cfg, self._tt_log, self._ct_points))
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: leaderboards")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_fleet(self, h, method, q, sess):
+        """Корабли игроков в космосе + станции."""
+        try:
+            d = self._cached("fleet", lambda: players.space_fleet(self.cfg))
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: space_fleet")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_admin_tools(self, h, method, q, sess):
+        """Инструменты админа — под паролем панели, всё в аудит.
+        op: mass_give {targets,item,count} | clan_tech {clan,techs} |
+        backups {uid} | restore {uid,dir,file}. Правки — только оффлайн-игрокам."""
+        b = self._body(h)
+        op = (b.get("op") or "").strip()
+        ok, resp = self._reauth(h, sess, "инструменты админа: %s" % op, body=b)
+        if not ok:
+            return resp
+        ip, user = h.client_address[0], sess["user"]
+        try:
+            if op == "mass_give":
+                d = players.mass_give(self.cfg, b.get("targets"), b.get("item"), b.get("count"))
+                if d.get("ok"):
+                    self.audit(ip, user, "АДМИН: массовая выдача %s ×%s → [%s]: выдано %d/%d" % (
+                        b.get("item"), b.get("count"), b.get("targets"), d["done"], d["total"]))
+            elif op == "clan_tech":
+                d = players.clan_give_tech(self.cfg, b.get("clan"), b.get("techs"))
+                if d.get("ok"):
+                    self.audit(ip, user, "АДМИН: техи %s клану #%s: %d/%d игроков" % (
+                        b.get("techs"), b.get("clan"), d["done"], d["total"]))
+            elif op == "backups":
+                d = players.player_backups(self.cfg, b.get("uid"))
+            elif op == "restore":
+                d = players.restore_inventory(self.cfg, b.get("uid"), b.get("dir"), b.get("file"))
+                self.audit(ip, user, "АДМИН: откат инвентаря игрока #%s из %s/%s → %s" % (
+                    b.get("uid"), b.get("dir"), b.get("file"), "ok" if d.get("ok") else d.get("error")))
+            else:
+                d = {"ok": False, "error": "неизвестная операция"}
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: admin_tools %s", op)
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 400)
+
     def _api_map_clans(self, h, method, q, sess):
         """GET ?map=N — легенда «карта по кланам»."""
         try:
@@ -2182,7 +2253,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", activity:"Активность", leaders:"Рейтинги", admin:"Админ", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -2266,6 +2337,25 @@ var T = {
   mi_by_clan:"по кланам", mi_shops:"магазины", mi_shops_hint:"Значки магазинов игроков на карте", mi_no_clans:"на этой карте нет земли кланов",
   mi_blocks:"уч. 8×8", mi_owners:"владельцев", mi_noclan:"без клана",
   fav_title:"Иконка панели", fav_remove:"Убрать", fav_big:"Файл больше 512 КБ",
+  fl_title:"Флот игроков", fl_intro:"Корабли в космосе по владельцам (снимок space\\units.dt на момент автосохранения сервера) и станции игроков (Data\\stations).",
+  fl_ships:"кораблей", fl_owners:"владельцев", fl_stations:"станций", fl_ship:"Корабль", fl_cargo:"Груз", fl_stations_t:"Станции", fl_size:"Размер",
+  ac_days:"Игроки по дням (60 дней)", ac_players:"игроков всего", ac_active:"Заходили за день", ac_reg:"Регистрации",
+  ac_cohorts:"Удержание по неделям регистрации", ac_cohorts_hint:"D1 — вернулись на следующий день, D7 — на 7–13 день, D30 — на 30–59 день после регистрации (считаются только недели, которым уже хватает времени).",
+  ac_week:"Неделя", ac_size:"Новых", ac_heat:"Когда играют", ac_heat_hint:"Среднее число игроков онлайн по дням недели и часам за последние 4 недели. Максимум:",
+  ac_wd:"Пн,Вт,Ср,Чт,Пт,Сб,Вс", ac_churn:"На каком уровне бросают", ac_churn_hint:"«Ушёл» — не заходил {d} дней.",
+  ac_quit1h:"бросили, наиграв меньше часа", ac_act:"Активны", ac_gone:"Ушли", ac_rate:"Отток",
+  lb_traders:"Торговцы (продажи)", lb_rweek:"Исследования за неделю (техов)", lb_rtotal:"Всего часов исследований",
+  lb_clans:"Кланы: рост рейтинга за неделю", lb_growth:"Рост", lb_since:"с", lb_clans_hint:"Рост считается по истории кланов, которую ведёт панель.",
+  lb_hint:"Богатство — склад + при себе. Торговцы — продажи через терминалы (и магазины, если «Торговля» уже открывалась). Исследования за неделю — по журналу трекинга техов.",
+  ad_title:"Инструменты админа", ad_intro:"Все действия — только для оффлайн-игроков (онлайн пропускаются), перед каждой правкой файл игрока бэкапится, всё пишется в аудит. Нужен пароль панели.",
+  ad_mass:"Массовая выдача предметов", ad_mass_hint:"Кому: ID через запятую, clan:N — весь клан, active:D — все, кто заходил за D дней (можно сочетать). Предмет — id или название из items.json. Кладётся на склад.",
+  ad_targets_ph:"напр. 12, 40, clan:3, active:7", ad_item_ph:"предмет (id или имя)", ad_give:"Выдать",
+  ad_mass_q:"Выдать всем выбранным оффлайн-игрокам?", ad_reason:"Причина пропуска",
+  ad_clantech:"Выдать технологию всему клану", ad_clantech_hint:"ID технологий через запятую (как в схеме изучения, напр. b3, wr2). Выдаётся каждому оффлайн-участнику.",
+  ad_techs_ph:"id технологий", ad_clantech_q:"Выдать технологии всем оффлайн-участникам клана?",
+  ad_rollback:"Откат инвентаря из бэкапа", ad_rollback_hint:"Бэкапы, которые панель сделала перед правками этого игрока. Откат заменяет весь инвентарь (склад или при себе) содержимым бэкапа; текущее состояние перед этим тоже бэкапится.",
+  ad_show_backups:"Показать бэкапы", ad_no_backups:"Бэкапов по этому игроку нет.", ad_when:"Когда", ad_where:"Где", ad_content:"Содержимое",
+  ad_restore:"Откатить", ad_restore_q:"Заменить инвентарь игрока содержимым этого бэкапа?", ad_restored:"откачено", ad_undo:"отменить можно бэкапом",
   fav_hint:"Показывается во вкладке браузера. PNG/ICO/JPEG/GIF/WebP до 512 КБ, лучше квадратная 64–256 px. Применяется сразу, без «Сохранить». Название панели — поле «Название панели» в блоке «Веб-панель» (после «Сохранить» обнови страницу).",
   ec_title:"Экономика сервера", ec_intro:"Сколько каждого предмета есть в мире: у игроков (склад + при себе), в сундуках и брошенное на картах (без природных кладов под лопату), в торговле (лоты и выручка терминалов/магазинов). Курс — медиана по предложениям в «Торговле». Динамика — по суточным снимкам, которые панель делает сама (копится с момента включения). Клик по строке — график и главные держатели.",
   ec_sort:"сортировка:", ec_s_total:"всего", ec_s_players:"у игроков", ec_s_cont:"в сундуках", ec_s_trade:"в торговле",
@@ -2389,7 +2479,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2473,6 +2563,25 @@ var T = {
   mi_by_clan:"by clan", mi_shops:"shops", mi_shops_hint:"Player shop markers on the map", mi_no_clans:"no clan land on this map",
   mi_blocks:"8×8 plots", mi_owners:"owners", mi_noclan:"no clan",
   fav_title:"Panel icon", fav_remove:"Remove", fav_big:"File is over 512 KB",
+  fl_title:"Player fleet", fl_intro:"Ships in space by owner (snapshot of space\\units.dt at the server's last autosave) and player stations (Data\\stations).",
+  fl_ships:"ships", fl_owners:"owners", fl_stations:"stations", fl_ship:"Ship", fl_cargo:"Cargo", fl_stations_t:"Stations", fl_size:"Size",
+  ac_days:"Players by day (60 days)", ac_players:"players total", ac_active:"Active that day", ac_reg:"Registrations",
+  ac_cohorts:"Retention by registration week", ac_cohorts_hint:"D1 — came back the next day, D7 — on days 7–13, D30 — on days 30–59 after registering (only weeks old enough are counted).",
+  ac_week:"Week", ac_size:"New", ac_heat:"When people play", ac_heat_hint:"Average players online by weekday and hour over the last 4 weeks. Max:",
+  ac_wd:"Mon,Tue,Wed,Thu,Fri,Sat,Sun", ac_churn:"At which level players quit", ac_churn_hint:"\"Gone\" — hasn't logged in for {d} days.",
+  ac_quit1h:"quit with under an hour played", ac_act:"Active", ac_gone:"Gone", ac_rate:"Churn",
+  lb_traders:"Traders (sales)", lb_rweek:"Research this week (techs)", lb_rtotal:"Total research hours",
+  lb_clans:"Clans: rating growth this week", lb_growth:"Growth", lb_since:"since", lb_clans_hint:"Growth comes from the clan history the panel keeps.",
+  lb_hint:"Wealth — stash + carried. Traders — terminal sales (plus shops once \"Trade\" has been opened). Weekly research — from the tech tracking log.",
+  ad_title:"Admin tools", ad_intro:"Everything applies to offline players only (online ones are skipped), each player file is backed up before editing, and everything is audited. Requires the panel password.",
+  ad_mass:"Mass item grant", ad_mass_hint:"To: comma-separated IDs, clan:N — a whole clan, active:D — everyone active in the last D days (can be combined). Item — id or name from items.json. Goes to the stash.",
+  ad_targets_ph:"e.g. 12, 40, clan:3, active:7", ad_item_ph:"item (id or name)", ad_give:"Grant",
+  ad_mass_q:"Grant to all selected offline players?", ad_reason:"Skip reason",
+  ad_clantech:"Grant a tech to a whole clan", ad_clantech_hint:"Comma-separated tech IDs (as in the research scheme, e.g. b3, wr2). Granted to every offline member.",
+  ad_techs_ph:"tech ids", ad_clantech_q:"Grant the techs to all offline clan members?",
+  ad_rollback:"Roll back inventory from a backup", ad_rollback_hint:"Backups the panel made before editing this player. A rollback replaces the whole inventory (stash or carried) with the backup's; the current state is backed up first.",
+  ad_show_backups:"Show backups", ad_no_backups:"No backups for this player.", ad_when:"When", ad_where:"Where", ad_content:"Contents",
+  ad_restore:"Roll back", ad_restore_q:"Replace the player's inventory with this backup?", ad_restored:"rolled back", ad_undo:"undo via backup",
   fav_hint:"Shown in the browser tab. PNG/ICO/JPEG/GIF/WebP up to 512 KB, square 64–256 px works best. Applied immediately, no \"Save\" needed. The panel name is the \"Panel title\" field in \"Web panel\" (reload the page after \"Save\").",
   ec_title:"Server economy", ec_intro:"How much of every item exists: with players (stash + carried), in chests and dropped on maps (natural buried stashes excluded), in trade (terminal/shop lots and revenue). Rate — median across \"Trade\" offers. Trend — from daily snapshots the panel takes itself (accumulates from when it's enabled). Click a row for the chart and top holders.",
   ec_sort:"sort:", ec_s_total:"total", ec_s_players:"with players", ec_s_cont:"in chests", ec_s_trade:"in trade",
@@ -2706,14 +2815,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","suspicious","clans","trade","economy","entry","buffs","food","craft","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,activity:tabActivity,leaders:tabLeaders,admin:tabAdmin,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -3756,6 +3865,144 @@ function tabSuspicious(v){
         el("button",{class:"small",onclick:load},[t("refresh")])])]),
     out]));
   load();
+}
+
+// ---- флот игроков (корабли в космосе по владельцам + станции) ----
+function fleetCard(){
+  var box=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  api("/api/fleet").then(function(d){
+    box.innerHTML="";
+    if(!d.ok){ box.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    box.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[d.ships+" "+t("fl_ships")+" · "+d.owners.length+" "+t("fl_owners")+" · "+d.stations.length+" "+t("fl_stations")]));
+    if(d.owners.length) box.appendChild(ltable([t("cl_player"),t("cl_name"),t("fl_ship"),t("pd_coords"),t("su_hp"),t("fl_cargo")],
+      [].concat.apply([], d.owners.map(function(o){ return o.ships.map(function(sh,i){ return {o:o, sh:sh, first:i===0}; }); })),
+      function(r){ var sh=r.sh;
+        return [r.first? (r.o.id? plLink(r.o.id,r.o.name) : "—") : "", r.first? (r.o.clan||"—") : "",
+          sh.model+(sh.moving? " · "+t("su_moving") : ""), "★"+sh.star+" · "+Math.round(sh.x)+", "+Math.round(sh.y),
+          String(sh.health), sh.cargo.length? el("span",{class:"small"},[sh.cargo.map(function(c){ return c.name+" ×"+fmtN(c.count); }).join(", ")]) : "—"]; }));
+    if(d.stations.length){
+      box.appendChild(el("div",{class:"small muted",style:"margin-top:10px"},[t("fl_stations_t")]));
+      box.appendChild(ltable([t("cl_name"),t("tr_owner"),t("cl_name")+" ("+t("clans")+")",t("pd_coords"),t("fl_size")], d.stations, function(x){
+        return [x.name||("#"+x.id), plLink(x.owner.id,x.owner.name), x.clan||"—", "★"+x.star+" · "+x.x+", "+x.y, x.size]; }));
+    }
+  }).catch(function(e){ box.innerHTML=""; box.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin:10px 0"},[el("h3",{},["🛰 "+t("fl_title")]), el("p",{class:"muted small"},[t("fl_intro")]), box]);
+}
+
+// ---- активность и удержание ----
+function pct(a){ return a && a[1]? Math.round(100*a[0]/a[1])+"% ("+a[0]+"/"+a[1]+")" : "—"; }
+function tabActivity(v){
+  var out=el("div",{},[el("p",{class:"muted"},["…"])]);
+  v.appendChild(out);
+  api("/api/activity").then(function(d){
+    out.innerHTML="";
+    if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    var g=el("div",{class:"row",style:"gap:16px;flex-wrap:wrap;align-items:flex-start"},[
+      lineChart(d.days.map(function(x){ return {t:Date.parse(x.d)/1000, v:x.active}; }), t("ac_active")),
+      lineChart(d.days.map(function(x){ return {t:Date.parse(x.d)/1000, v:x.reg}; }), t("ac_reg"))]);
+    out.appendChild(el("div",{class:"card"},[el("h3",{},[t("ac_days")+" · "+d.players+" "+t("ac_players")]), g]));
+    out.appendChild(el("div",{class:"card",style:"margin-top:12px;overflow:auto"},[el("h3",{},[t("ac_cohorts")]),
+      el("p",{class:"muted small"},[t("ac_cohorts_hint")]),
+      ltable([t("ac_week"),t("ac_size"),"D1","D7","D30"], d.cohorts.slice().reverse(), function(c){ return [c.week, String(c.size), pct(c.d1), pct(c.d7), pct(c.d30)]; })]));
+    // тепловая карта
+    var mx=0; d.heat.forEach(function(r){ r.forEach(function(v){ if(v>mx) mx=v; }); });
+    var days=t("ac_wd").split(","), tb=el("table",{class:"small",style:"border-collapse:collapse"},[
+      el("tr",{},[el("th",{},[""])].concat(Array.apply(null,{length:24}).map(function(_,hh){ return el("th",{style:"padding:2px 3px;font-weight:400"},[String(hh)]); })))]);
+    d.heat.forEach(function(r,wd){
+      tb.appendChild(el("tr",{},[el("th",{style:"padding:2px 6px;font-weight:400"},[days[wd]])].concat(r.map(function(val,hh){
+        var a=mx? val/mx : 0;
+        return el("td",{title:days[wd]+" "+hh+":00 — "+val,style:"width:22px;height:18px;background:rgba(76,141,255,"+(0.08+0.92*a).toFixed(2)+");border:1px solid var(--line)"},[""]); }))));
+    });
+    out.appendChild(el("div",{class:"card",style:"margin-top:12px;overflow:auto"},[el("h3",{},[t("ac_heat")]),
+      el("p",{class:"muted small"},[t("ac_heat_hint")+" "+mx]), tb]));
+    out.appendChild(el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("ac_churn")]),
+      el("p",{class:"muted small"},[t("ac_churn_hint").replace("{d}",d.churn_days)+" "+t("ac_quit1h")+": "+d.quit_first_hour]),
+      ltable([t("pd_level"),t("ac_act"),t("ac_gone"),t("ac_rate")], d.levels, function(r){ var tot=r.active+r.churned;
+        return [r.bucket, String(r.active), String(r.churned), tot? Math.round(100*r.churned/tot)+"%" : "—"]; })]));
+  }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+
+// ---- рейтинги ----
+function tabLeaders(v){
+  var out=el("div",{},[el("p",{class:"muted"},["…"])]);
+  v.appendChild(out);
+  function board(title, rows, fmt){
+    return el("div",{class:"card"},[el("h3",{},[title]), rows.length? ltable(["#",t("cl_player"),""], rows, function(r){
+      return [String(rows.indexOf(r)+1), plLink(r.id,r.name), el("b",{},[fmt? fmt(r.v) : fmtN(r.v)])]; }) : el("div",{class:"muted small"},["—"])]);
+  }
+  api("/api/leaderboards").then(function(d){
+    out.innerHTML="";
+    if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    var g=el("div",{class:"grid"},[]);
+    d.rich.forEach(function(r){ g.appendChild(board("💰 "+r.item, r.rows)); });
+    g.appendChild(board("🏪 "+t("lb_traders"), d.traders));
+    g.appendChild(board("🔬 "+t("lb_rweek"), d.research_week));
+    g.appendChild(board("📚 "+t("lb_rtotal"), d.research_total, function(v){ return fmtN(v)+" "+(S.lang==="ru"?"ч":"h"); }));
+    g.appendChild(el("div",{class:"card"},[el("h3",{},["⚑ "+t("lb_clans")]),
+      d.clans.length? ltable(["#",t("cl_name"),t("cl_rating"),t("lb_growth")], d.clans, function(c){
+        return [String(d.clans.indexOf(c)+1), c.name, fmtN(c.rating), fmtD(c.growth)]; }) : el("div",{class:"muted small"},["—"]),
+      el("p",{class:"muted small"},[t("lb_clans_hint")+(d.clans[0]&&d.clans[0].since? " ("+t("lb_since")+" "+d.clans[0].since+")":"")])]));
+    out.appendChild(g);
+    out.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[t("lb_hint")]));
+  }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+}
+
+// ---- инструменты админа (под паролем панели) ----
+function tabAdmin(v){
+  function resBox(){ return el("div",{style:"margin-top:8px"},[]); }
+  function showRes(box, d){
+    box.innerHTML="";
+    if(!d.ok){ box.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    box.appendChild(el("div",{class:"msg ok"},["✅ "+d.done+" / "+d.total]));
+    var bad=d.results.filter(function(r){ return !r.ok; });
+    if(bad.length) box.appendChild(ltable([t("cl_player"),t("ad_reason")], bad, function(r){ return [plLink(r.id,r.name), r.error||"—"]; }));
+  }
+  function run(body, box){
+    box.innerHTML=""; box.appendChild(el("span",{class:"muted small"},[t("working")]));
+    gatedApi("/api/admin-tools", body, function(d){ showRes(box,d); }, function(e){ box.innerHTML=""; box.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  // массовая выдача
+  var mgT=el("input",{type:"text",placeholder:t("ad_targets_ph"),style:"min-width:260px"});
+  var mgI=el("input",{type:"text",placeholder:t("ad_item_ph")}), mgC=el("input",{type:"number",min:"1",value:"1",style:"width:90px"});
+  var mgR=resBox();
+  // техи клану
+  var ctC=el("select",{},[]), ctT=el("input",{type:"text",placeholder:t("ad_techs_ph"),style:"min-width:200px"}), ctR=resBox();
+  api("/api/clans").then(function(c){ (c.clans||[]).forEach(function(x){ ctC.appendChild(el("option",{value:String(x.id)},[x.name+" ("+x.size+")"])); }); }).catch(function(){});
+  // откат
+  var rbU=el("input",{type:"number",placeholder:"ID",style:"width:100px"}), rbR=resBox();
+  function loadBackups(){
+    rbR.innerHTML=""; if(!rbU.value) return;
+    gatedApi("/api/admin-tools",{op:"backups",uid:rbU.value},function(d){
+      rbR.innerHTML="";
+      if(!d.ok){ rbR.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+      if(!d.backups.length){ rbR.appendChild(el("div",{class:"muted small"},[t("ad_no_backups")])); return; }
+      rbR.appendChild(ltable([t("ad_when"),t("ad_where"),t("ad_content"),""], d.backups, function(b){
+        return [b.dir.replace(/^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)(\d\d).*/,"$1-$2-$3 $4:$5:$6"), b.where==="stash"? t("pd_stash") : t("pd_carry"),
+          el("span",{class:"small"},[b.items.slice(0,8).map(function(i){ return i.name+" ×"+i.count; }).join(", ")+(b.items.length>8?" …":"")]),
+          el("button",{class:"small danger",onclick:function(){
+            if(!confirm(t("ad_restore_q"))) return;
+            gatedApi("/api/admin-tools",{op:"restore",uid:rbU.value,dir:b.dir,file:b.file},function(r){
+              rbR.insertBefore(el("div",{class:r.ok?"msg ok":"msg err"},[r.ok? "✅ "+t("ad_restored")+" ("+t("ad_undo")+" "+r.backup+")" : (r.error||"error")]), rbR.firstChild);
+            },function(e){ alert(errText(e)); }); }},[t("ad_restore")])]; }));
+    },function(e){ rbR.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  v.appendChild(el("div",{},[
+    el("div",{class:"card"},[el("h3",{},[t("ad_title")]), el("p",{class:"muted small"},[t("ad_intro")])]),
+    el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},["🎁 "+t("ad_mass")]), el("p",{class:"muted small"},[t("ad_mass_hint")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[mgT, mgI, el("span",{},["×"]), mgC,
+        el("button",{class:"small pri",onclick:function(){
+          if(!mgT.value.trim()||!mgI.value.trim()) return;
+          if(!confirm(t("ad_mass_q"))) return;
+          run({op:"mass_give",targets:mgT.value,item:mgI.value,count:parseInt(mgC.value,10)||1}, mgR); }},[t("ad_give")])]), mgR]),
+    el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},["🔬 "+t("ad_clantech")]), el("p",{class:"muted small"},[t("ad_clantech_hint")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[ctC, ctT,
+        el("button",{class:"small pri",onclick:function(){
+          if(!ctT.value.trim()) return;
+          if(!confirm(t("ad_clantech_q"))) return;
+          run({op:"clan_tech",clan:ctC.value,techs:ctT.value}, ctR); }},[t("ad_give")])]), ctR]),
+    el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},["↩ "+t("ad_rollback")]), el("p",{class:"muted small"},[t("ad_rollback_hint")]),
+      el("div",{class:"row",style:"gap:8px;align-items:center"},[rbU, el("button",{class:"small",onclick:loadBackups},[t("ad_show_backups")])]), rbR])
+  ]));
 }
 
 // ---- кланы ----
@@ -5076,6 +5323,7 @@ function drawSystem(subox, starId, su, gal){
         el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
       el("h3",{style:"margin-top:10px"},[t("su_starmap")]),
       spaceMapBlock(starId),
+      fleetCard(),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),
