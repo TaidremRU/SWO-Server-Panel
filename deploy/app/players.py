@@ -1134,6 +1134,25 @@ def mapdt_image(cfg, map_id, scale=None, claims=True, owner=None, force=False, b
     return png, "map%d.png" % map_id, {"w": res["w"], "h": res["h"], "scale": res["scale"]}
 
 
+def map_pixels(cfg, map_id):
+    """Сырые пиксели карты без клаймов: -> ``{ok, w, h, pixels}`` (RGB, w*h*3,
+    строка 0 — верх картинки = игровой y = h-1). Для панели игроков — туман войны
+    накладывается поверх, наружу целая карта не уходит."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    path = os.path.join(world_dir, "Data", "maps", "map%d.dt" % int(map_id))
+    if not os.path.exists(path):
+        return {"ok": False, "error": "нет файла map%d.dt" % int(map_id)}
+    d = mapdt.parse(path, world_dir=world_dir, keep_grid=False, paint=True,
+                    block_class=_block_class(world_dir), claims=False)
+    if not d.get("ok"):
+        return d
+    return {"ok": True, "w": d["w"], "h": d["h"], "pixels": bytes(d["pixels"])}
+
+
 def _store_owner_grid(path, mt, world_dir, res):
     grid = list(res["owner_grid"] or [])
     names = load_user_list(world_dir)

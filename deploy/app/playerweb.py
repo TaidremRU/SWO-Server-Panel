@@ -29,7 +29,9 @@ SESSION_TTL = 12 * 3600
 REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
 REMEMBER_RECHECK = 60        # как часто сверять, не сменил ли игрок пароль в игре
 LEADERS_CACHE_SEC = 300
-MAP_IMG_CACHE_SEC = 600    # одна картинка карты на всех (без клаймов), участки рисует браузер
+MAP_IMG_CACHE_SEC = 600    # сырые пиксели карты (без клаймов) — одни на всех, туман накладывается на каждый запрос
+FOG_RADIUS = 20            # клеток: видно вокруг персонажа и вокруг своих участков
+FOG_RGB = (22, 25, 31)
 MARKET_CACHE_SEC = 300      # полный проход по картам — десятки секунд, считаем в фоне
 
 
@@ -49,7 +51,7 @@ class PlayerWeb:
         self.nick_throttle = Throttle(max_fail=8, window=900, block=900)  # по нику (перебор с разных IP)
         self._cache = {}
         self._market = {"data": None, "ts": 0, "running": False}
-        self._map_img = {}           # map -> (ts, png)
+        self._map_img = {}           # map -> (ts, {w, h, pixels})
         self._map_lock = threading.Lock()
         self._srv = None
 
@@ -435,29 +437,60 @@ class PlayerWeb:
                         "territories": [{"x": (t.get("pos") or {}).get("x"), "y": (t.get("pos") or {}).get("y")}
                                         for t in raw.get("userTerritories") or [] if t.get("mapId") == mp]})
         out.sort(key=lambda x: -len(x["territories"]))
-        pos = ((players._read_json(os.path.join(wd, "Data", "units", "unit%s.json" % raw["unitId"])) or {}).get("pos")
-               if raw.get("unitId") is not None else None) or {}
-        return {"ok": True, "maps": out, "me": {"map": raw.get("mapId"), "x": pos.get("x"), "y": pos.get("y")}}
+        return {"ok": True, "maps": out, "me": self._my_pos(wd, raw), "fog_radius": FOG_RADIUS}
+
+    @staticmethod
+    def _fog(w, h, pixels, rects, r):
+        """Туман войны: всё закрашено FOG_RGB, кроме «скруглённых» прямоугольников
+        ``rects`` (x0, y0, x1, y1 — игровые клетки), расширенных на ``r`` клеток.
+        Строки картинки идут сверху, игровой y = h-1-строка."""
+        out = bytearray(bytes(FOG_RGB) * (w * h))
+        for x0, y0, x1, y1 in rects:
+            for gy in range(max(0, int(y0 - r)), min(h - 1, int(y1 + r)) + 1):
+                dy = 0 if y0 <= gy <= y1 else min(abs(gy - y0), abs(gy - y1))
+                if dy > r:
+                    continue
+                half = int((r * r - dy * dy) ** 0.5)
+                a, b = max(0, int(x0) - half), min(w - 1, int(x1) + half)
+                if a > b:
+                    continue
+                row = (h - 1 - gy) * w * 3
+                out[row + a * 3:row + (b + 1) * 3] = pixels[row + a * 3:row + (b + 1) * 3]
+        return bytes(out)
 
     def _api_my_map_image(self, uid, q):
-        """PNG карты без клаймов — одна на всех, раз в MAP_IMG_CACHE_SEC (отрисовка
-        большой карты — десятки секунд). Свои участки браузер рисует поверх. Отдаём
-        только карты, где у игрока есть участки или где он сейчас."""
+        """PNG карты с туманом войны: видно только FOG_RADIUS клеток вокруг
+        персонажа и вокруг своих участков — туман накладывается ЗДЕСЬ, целая карта
+        наружу не уходит. Сырые пиксели кэшируются на всех (отрисовка — десятки
+        секунд). Отдаём только карты, где у игрока есть участки или где он сейчас."""
         try:
             mp = int((q.get("map") or [""])[0])
         except ValueError:
             return {"ok": False, "error": "bad map"}
-        if mp not in self._my_map_ids(uid)[2]:
+        wd, raw, ids = self._my_map_ids(uid)
+        if mp not in ids:
             return {"ok": False, "error": "нет доступа к этой карте"}
         with self._map_lock:     # не рисовать одну карту параллельно
             hit = self._map_img.get(mp)
-            if hit and time.time() - hit[0] < MAP_IMG_CACHE_SEC:
-                return hit[1]
-            png, _fn, _meta = players.mapdt_image(self.cfg, mp, claims=False)
-            if not isinstance(png, (bytes, bytearray)):
-                return png or {"ok": False}
-            self._map_img[mp] = (time.time(), bytes(png))
-            return bytes(png)
+            if not hit or time.time() - hit[0] >= MAP_IMG_CACHE_SEC:
+                d = players.map_pixels(self.cfg, mp)
+                if not d.get("ok"):
+                    return d
+                hit = self._map_img[mp] = (time.time(), d)
+        m = hit[1]
+        rects = [(t["x"] * 8, t["y"] * 8, t["x"] * 8 + 7, t["y"] * 8 + 7)
+                 for t in ((tt.get("pos") or {}) for tt in raw.get("userTerritories") or [] if tt.get("mapId") == mp)
+                 if t.get("x") is not None and t.get("y") is not None]
+        me = self._my_pos(wd, raw)
+        if me.get("map") == mp and me.get("x") is not None:
+            rects.append((me["x"], me["y"], me["x"], me["y"]))
+        return players.mapdt._png_bytes(m["w"], m["h"], self._fog(m["w"], m["h"], m["pixels"], rects, FOG_RADIUS), 1)
+
+    @staticmethod
+    def _my_pos(wd, raw):
+        pos = ((players._read_json(os.path.join(wd, "Data", "units", "unit%s.json" % raw["unitId"])) or {}).get("pos")
+               if raw.get("unitId") is not None else None) or {}
+        return {"map": raw.get("mapId"), "x": pos.get("x"), "y": pos.get("y")}
 
     def _my_clan_id(self, uid):
         wd = players.find_world_dir(self.cfg)
@@ -815,44 +848,63 @@ function tabMap(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/my-maps",function(d){
     if(!d.maps.length){ box.appendChild(card("Карта",[el("div",{class:"muted"},["У вас пока нет участков."])])); return; }
-    var sel=el("select",{}), zoom=1, cur=null, sc=1;
+    var sel=el("select",{}), zoom=6, rot=315, cur=null, sc=1;
+    try{ var r0=parseInt(localStorage.getItem("swp_rot")); if(!isNaN(r0)) rot=r0; }catch(e){}
     d.maps.forEach(function(x,i){ sel.appendChild(el("option",{value:i},[x.name+" · участков: "+x.territories.length+(x.here?" · вы здесь":"")])); });
-    var img=el("img",{alt:"",style:"display:block;image-rendering:pixelated;max-width:none"});
-    var layer=el("div",{style:"position:relative;display:inline-block"},[img]);
-    var view=el("div",{style:"overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:8px;background:#000"},[layer]);
-    var tlist=el("div"), note=el("span",{class:"muted small"});
+    // как в админке: картинка поворачивается целиком (вместе с метками) внутри
+    // «сцены» размером с диагональ, чтобы повёрнутые углы не обрезались
+    var img=el("img",{alt:"",style:"display:block;image-rendering:pixelated;max-width:none;width:100%;height:100%"});
+    var layer=el("div",{style:"position:absolute;left:50%;top:50%;transform-origin:50% 50%"},[img]);
+    var stage=el("div",{style:"position:relative"},[layer]);
+    var view=el("div",{style:"overflow:auto;height:70vh;border:1px solid var(--line);border-radius:8px;background:rgb(22,25,31)"},[stage]);
+    var tlist=el("div"), zl=el("span",{class:"muted small"}), rl=el("span",{class:"muted small"}), st=el("span",{class:"muted small"});
+    function dims(){ return {W:img.naturalWidth*zoom, H:img.naturalHeight*zoom}; }
     function place(){
       if(!img.naturalWidth) return;
-      sc=img.naturalWidth/cur.w; img.style.width=(img.naturalWidth*zoom)+"px";
+      sc=img.naturalWidth/cur.w; var z=dims(), diag=Math.ceil(Math.sqrt(z.W*z.W+z.H*z.H));
+      stage.style.width=diag+"px"; stage.style.height=diag+"px";
+      layer.style.width=z.W+"px"; layer.style.height=z.H+"px";
+      layer.style.transform="translate(-50%,-50%) rotate("+rot+"deg)";
+      zl.textContent="×"+zoom; rl.textContent=(((rot%360)+360)%360)+"°";
       [].slice.call(layer.querySelectorAll(".mk")).forEach(function(e){ e.remove(); });
       var k=sc*zoom;
       cur.territories.forEach(function(t){ layer.appendChild(el("div",{class:"mk",title:"мой участок "+t.x+", "+t.y,
         style:"position:absolute;left:"+(t.x*8*k)+"px;top:"+((cur.h-t.y*8-8)*k)+"px;width:"+(8*k)+"px;height:"+(8*k)+"px;"
-          +"background:rgba(80,255,120,.35);outline:2px solid #3fff7a;box-sizing:border-box"})); });
+          +"background:rgba(80,255,120,.25);outline:2px solid #3fff7a;box-sizing:border-box"})); });
       if(d.me.map===cur.map && d.me.x!=null) layer.appendChild(el("div",{class:"mk",title:"вы здесь",
         style:"position:absolute;left:"+(d.me.x*k-6)+"px;top:"+((cur.h-d.me.y)*k-6)+"px;width:12px;height:12px;border-radius:50%;background:#ff3b30;border:2px solid #fff;box-shadow:0 0 4px #000"}));
     }
-    // x, y — клетки игры; картинка нарисована с осью Y вверх (как в игре), поэтому строка = h - y
-    function focus(x,y){ var k=sc*zoom; view.scrollLeft=x*k-view.clientWidth/2; view.scrollTop=(cur.h-y)*k-view.clientHeight/2; }
-    function focusMine(){ var t=cur.territories;
-      if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); focus(cx/t.length,cy/t.length); }
-      else if(d.me.map===cur.map) focus(d.me.x,d.me.y); }
-    function setZoom(z){ var k0=sc*zoom, mx=(view.scrollLeft+view.clientWidth/2)/k0, my=cur.h-(view.scrollTop+view.clientHeight/2)/k0;
-      zoom=Math.max(1,Math.min(8,z)); place(); focus(mx,my); note.textContent="×"+zoom; }
+    // клетка игры -> точка в «сцене» с учётом поворота (ось Y картинки — вверх, как в игре)
+    function toStage(x,y){ var k=sc*zoom, z=dims(), px=x*k-z.W/2, py=(cur.h-y)*k-z.H/2, a=rot*Math.PI/180,
+        c=Math.cos(a), s=Math.sin(a), diag=stage.offsetWidth;
+      return {x:diag/2+px*c-py*s, y:diag/2+px*s+py*c}; }
+    function fromStage(sx,sy){ var k=sc*zoom, z=dims(), diag=stage.offsetWidth, a=-rot*Math.PI/180, c=Math.cos(a), s=Math.sin(a),
+        dx=sx-diag/2, dy=sy-diag/2, px=dx*c-dy*s, py=dx*s+dy*c;
+      return {x:(px+z.W/2)/k, y:cur.h-(py+z.H/2)/k}; }
+    function focus(x,y){ var p=toStage(x,y); view.scrollLeft=p.x-view.clientWidth/2; view.scrollTop=p.y-view.clientHeight/2; }
+    function center(){ return fromStage(view.scrollLeft+view.clientWidth/2, view.scrollTop+view.clientHeight/2); }
+    function focusMine(){ if(d.me.map===cur.map && d.me.x!=null) return focus(d.me.x,d.me.y);
+      var t=cur.territories; if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); focus(cx/t.length,cy/t.length); } }
+    function keep(fn){ var c=center(); fn(); place(); focus(c.x,c.y); }
     function show(){
-      cur=d.maps[+sel.value]; zoom=4; note.textContent="×"+zoom; img.removeAttribute("src");
-      img.onload=function(){ place(); focusMine(); };
+      cur=d.maps[+sel.value]; st.textContent="загрузка карты…"; img.removeAttribute("src");
+      img.onload=function(){ st.textContent=""; place(); focusMine(); };
+      img.onerror=function(){ st.textContent="карта не загрузилась"; };
       img.src="/api/my-map-image?map="+cur.map;
       tlist.innerHTML="";
       if(cur.territories.length) tlist.appendChild(card("Участки на этой карте ("+cur.territories.length+")",[el("div",{class:"scroll",style:"max-height:260px"},[
         table(["#","Участок (X, Y)","Клетки",""],cur.territories,function(t){ return [cur.territories.indexOf(t)+1, t.x+", "+t.y,
           (t.x*8)+"–"+(t.x*8+7)+", "+(t.y*8)+"–"+(t.y*8+7), el("button",{onclick:function(){ focus(t.x*8+4,t.y*8+4); view.scrollIntoView({block:"nearest"}); }},["показать"])]; })])]));
     }
+    function setRot(v){ keep(function(){ rot=v; try{ localStorage.setItem("swp_rot",String(rot)); }catch(e){} }); }
     sel.addEventListener("change",show);
     box.appendChild(card("Мои участки на карте",[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
-      el("button",{onclick:function(){ setZoom(zoom-1); }},["−"]), el("button",{onclick:function(){ setZoom(zoom+1); }},["+"]), note,
-      el("button",{onclick:focusMine},["к моим участкам"])]),
-      el("div",{class:"muted small",style:"margin-bottom:6px"},["Зелёные квадраты — ваши участки, красная точка — вы. Первая загрузка карты может занять до минуты."]), view]));
+      el("button",{title:"повернуть против часовой на 45°",onclick:function(){ setRot(rot-45); }},["↺"]), rl,
+      el("button",{title:"повернуть по часовой на 45°",onclick:function(){ setRot(rot+45); }},["↻"]),
+      el("button",{onclick:function(){ keep(function(){ zoom=Math.max(1,zoom-1); }); }},["−"]), zl,
+      el("button",{onclick:function(){ keep(function(){ zoom=Math.min(16,zoom+1); }); }},["+"]),
+      el("button",{onclick:focusMine},["ко мне"]), st]),
+      el("div",{class:"muted small",style:"margin-bottom:6px"},["Видно "+d.fog_radius+" клеток вокруг вас и вокруг ваших участков — остальное скрыто туманом. Зелёные квадраты — ваши участки, красная точка — вы."]), view]));
     box.appendChild(tlist); show();
   });
 }
