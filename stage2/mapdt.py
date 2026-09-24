@@ -296,16 +296,23 @@ def _read_transport(r, version, item_ext, ctx):
 
 
 def _read_shop(r, version, item_ext, ctx):
+    # ZData.Shop: inventory — товар на продажу (по слоту), price[i] — цена слота i
+    # (ShopCost: itemId + count), storage — выручка, countUse — число продаж
     _w = ctx["where"]
     ctx["where"] = _w + "/shop"
-    for _ in range(r.i32()):                  # inventory (List<Item>)
-        _read_item(r, version, item_ext, ctx)
-    if r.boolean():                           # storage
-        _read_inventory(r, version, item_ext, ctx)
+    goods = [_read_item(r, version, item_ext, ctx) for _ in range(r.i32())]
+    storage = _read_inventory(r, version, item_ext, ctx) if r.boolean() else None
     ctx["where"] = _w
-    for _ in range(r.i32()):                  # price
-        r.i32(); r.i32()
-    r.i32()                                   # countUse
+    price = [(r.i32(), r.i32()) for _ in range(r.i32())]
+    count_use = r.i32()
+    shops = ctx.get("shops")
+    if shops is not None:
+        shops.append({"x": ctx["x"], "y": ctx["y"],
+                      "goods": [{"type": g["type"], "count": g["count"]} for g in goods],
+                      "price": [{"type": t, "count": c} for t, c in price],
+                      "storage": [{"type": i["type"], "count": i["count"]}
+                                  for i in ((storage or {}).get("items") or []) if i.get("count")],
+                      "sales": count_use})
 
 
 def _read_block(r, version, item_ext, ctx):
@@ -377,7 +384,7 @@ def _load_item_ext(world_dir):
 # --------------------------------------------------------------------- публичное
 def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
           paint=False, block_class=None, claims=True, only_owner=None, owners=False,
-          list_containers=False, container_cap=2000):
+          list_containers=False, container_cap=2000, list_shops=False):
     """Полный разбор map<N>.dt. -> dict. Не бросает — при ошибке ``ok=False``.
 
     ``want`` — множество id предметов для поиска; тогда в ответе есть ``hits`` =
@@ -401,7 +408,8 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
     item_ext = _load_item_ext(world_dir)
     want = set(want) if want else None
     ctx = {"want": want, "hits": [], "x": 0, "y": 0, "where": "", "cap": cap,
-           "containers_list": [] if list_containers else None, "container_cap": container_cap}
+           "containers_list": [] if list_containers else None, "container_cap": container_cap,
+           "shops": [] if list_shops else None}
     bc = block_class or {}
     r = _R(data)
     try:
@@ -482,7 +490,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
 
         owner = Counter()
         um_w, um_h = w // 8, h // 8
-        um_flat = [] if (want or paint or owners) else None
+        um_flat = [] if (want or paint or owners or list_shops) else None
         # userMap[x, y] = ReadUInt32(), x внешний цикл (0..w/8), y внутренний (0..h/8)
         for _ in range(um_w * um_h):
             uid = r.u32()
@@ -497,6 +505,11 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                 bx, by = hh["x"] // 8, hh["y"] // 8
                 oi = bx * um_h + by
                 hh["owner"] = um_flat[oi] if (bx < um_w and by < um_h and 0 <= oi < len(um_flat)) else 0
+
+        if um_flat is not None and list_shops:
+            for sh in ctx["shops"]:
+                oi = (sh["x"] // 8) * um_h + sh["y"] // 8
+                sh["owner"] = um_flat[oi] if 0 <= oi < len(um_flat) else 0
 
         # наложить клаймы на картинку
         if paint and um_flat and (claims or only_owner):
@@ -563,6 +576,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
             "hits_capped": bool(want) and len(ctx["hits"]) >= cap,
             "containers_list": ctx["containers_list"],
             "containers_list_capped": bool(list_containers) and len(ctx["containers_list"]) >= container_cap,
+            "shops": ctx["shops"],
             "pixels": px,
             "owner_grid": um_flat if (owners or paint) else None,
             "um_w": um_w, "um_h": um_h,
@@ -695,6 +709,38 @@ def list_containers(path, world_dir=None, item_names=None, cap=2000, min_items=1
         "containers": out,
         "capped": d.get("containers_list_capped", False),
     }
+
+
+# ------------------------------------------------ Data\game\terminals.dt2 (терминалы)
+def parse_terminals(path, world_dir=None):
+    """Торговые терминалы игроков (``ZServer.Game.TerminalManager.Save``):
+    int32 N, затем N × ``ZData.TradingTerminal.Save`` — userId(u32), countUse,
+    curId, lots[{id, items:List<Item>, cost:List<ShopCost>}], storage(Inventory),
+    lastTime(f64). Лот: игрок отдаёт ``items``, покупатель платит ``cost``."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return {"ok": False, "error": "не открыть файл: %s" % e}
+    item_ext = _load_item_ext(world_dir)
+    r = _R(data)
+    out = []
+    try:
+        for _ in range(r.i32()):
+            t = {"user_id": r.u32(), "sales": r.i32(), "cur_id": r.i32(), "lots": []}
+            for _ in range(r.i32()):
+                lot = {"id": r.i32()}
+                lot["items"] = [{"type": it["type"], "count": it["count"]}
+                                for it in (_read_item(r, MAP_VERSION, item_ext, _NOCTX) for _ in range(r.i32()))]
+                lot["cost"] = [{"type": r.i32(), "count": r.i32()} for _ in range(r.i32())]
+                t["lots"].append(lot)
+            inv = _read_inventory(r, MAP_VERSION, item_ext, _NOCTX)
+            t["storage"] = [{"type": i["type"], "count": i["count"]} for i in inv["items"] if i.get("count")]
+            t["last_time"] = r.f64()
+            out.append(t)
+    except (EOFError, struct.error) as e:
+        return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p}
+    return {"ok": True, "terminals": out, "trailing_bytes": r.rest()}
 
 
 # ------------------------------------------------------ Data\space\units.dt (корабли)

@@ -406,6 +406,11 @@ class WebUI:
         self._audit_lock = threading.Lock()
         self._tt_state = os.path.join(base, "tech_track_state.json")
         self._tt_log = os.path.join(base, "logs", "tech_track.jsonl")
+        self._ct_state = os.path.join(base, "clan_track_state.json")
+        self._ct_events = os.path.join(base, "logs", "clan_events.jsonl")
+        self._ct_points = os.path.join(base, "logs", "clan_points.jsonl")
+        self._trade_cache = None  # (ts, payload)
+        self._trade_job = None
         self._buff_path = os.path.join(base, "buff_notepad.json")
         self._stop = threading.Event()
         self._srv = None
@@ -462,6 +467,12 @@ class WebUI:
                     logging.info("techtrack: %d изменений", len(ev))
             except Exception:  # noqa: BLE001
                 logging.exception("techtrack: ошибка прохода")
+            try:
+                ev = players.clan_track_scan(self.cfg, self._ct_state, self._ct_events, self._ct_points)
+                if ev:
+                    logging.info("clantrack: %d событий", len(ev))
+            except Exception:  # noqa: BLE001
+                logging.exception("clantrack: ошибка прохода")
             if self._stop.wait(iv):
                 return
 
@@ -1091,6 +1102,68 @@ class WebUI:
             logging.exception("webui: clans %s", cid)
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_craft_catalog(self, h, method, q, sess):
+        """Всё, что можно скрафтить или получить станком (craft.json + machines.json)."""
+        try:
+            d = players.craft_catalog(self.cfg)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: craft_catalog")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_craft_plan(self, h, method, q, sess):
+        """GET ?item=<slug|имя>&qty=N[&uid=N|&clan=N] — раскладка до сырья."""
+        g = lambda k: (q.get(k) or [""])[0]
+        try:
+            d = players.craft_plan(self.cfg, g("item"), g("qty") or 1, g("uid") or None, g("clan") or None)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: craft_plan")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_clan_history(self, h, method, q, sess):
+        """GET ?id=N[&days=60] — графики и события клана (ведёт сама панель)."""
+        try:
+            d = players.clan_history(self.cfg, (q.get("id") or [""])[0], self._ct_events, self._ct_points,
+                                     (q.get("days") or ["60"])[0])
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: clan_history")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _api_trade(self, h, method, q, sess):
+        """Сводка торговли. Первый проход по всем картам долгий (десятки секунд),
+        поэтому: свежий кэш (<2 мин) — сразу {ready, data}; иначе фоновый job
+        (один на всех) — {job}, клиент опрашивает /api/job."""
+        now = time.time()
+        force = (q.get("force") or [""])[0] == "1"
+        if self._trade_cache and not force and now - self._trade_cache[0] < 120:
+            return self._json(h, {"ready": True, "data": self._trade_cache[1]})
+        with self._jobs_lock:
+            job = self._trade_job
+            if job and not job["done"] and job["id"] in self._jobs:
+                return self._json(h, {"job": job["id"]})
+            jid = secrets.token_hex(8)
+            job = {"id": jid, "done": False, "ok": None, "result": None,
+                   "started": now, "finished": None}
+            self._jobs[jid] = job
+            self._trade_job = job
+            while len(self._jobs) > 30:
+                self._jobs.pop(next(iter(self._jobs)))
+
+        def run():
+            try:
+                d = players.trade_report(self.cfg)
+            except Exception as e:  # noqa: BLE001
+                logging.exception("webui: trade_report")
+                d = {"ok": False, "error": str(e)}
+            if d.get("ok"):
+                self._trade_cache = (time.time(), d)
+            job.update(ok=bool(d.get("ok")), result=d, done=True, finished=time.time())
+
+        threading.Thread(target=run, name="trade", daemon=True).start()
+        return self._json(h, {"job": jid})
 
     def _api_food_ingredients(self, h, method, q, sess):
         """53 ингредиента кулинарии (Data\\product\\product_genes.json) с генами —
@@ -1918,7 +1991,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -1981,6 +2054,24 @@ var T = {
   ts_st_done:"изучено", ts_st_cur:"изучается сейчас", ts_st_avail:"доступно", ts_st_lock:"закрыто",
   ts_cov_legend:"знает хотя бы один (ярче — больше участников)",
   ts_hint:"Наведи на квадрат — название, время и статус. Ветка идёт слева направо, ответвления — новые строки под родителем.",
+  ts_unlocks:"открывает", ts_pick_hint:"Кликни по технологии — подсвечу путь до неё и покажу, сколько осталось.",
+  ts_path_left:"до неё осталось", ts_steps:"шаг.", ts_who_closer:"Кто из участников ближе всего (меньше часов до цели):",
+  ch_title:"История клана", ch_intro:"У игры истории кланов нет — панель сама раз в несколько минут сверяет clans.json и раз в час сохраняет точку рейтинга/CP/состава. Данные копятся с момента включения.",
+  ch_empty:"Пока пусто — история начнёт копиться после первых проходов трекинга.",
+  ch_joined:"вступил", ch_left:"ушёл", ch_role:"смена роли", ch_tech:"клан-технология", ch_renamed:"переименован",
+  ch_slots:"расширен состав", ch_created:"клан создан", ch_disbanded:"клан распущен",
+  cr_title:"Калькулятор крафта", cr_intro:"Выбери предмет и количество — разложу до сырья (крафт + станки), покажу промежуточные крафты, время, верстаки и нужные технологии. Если выбрать игрока или клан — отмечу, что у них уже изучено и сколько осталось до недостающего.",
+  cr_ph:"предмет (название или id)", cr_who:"технологии:", cr_who_none:"не проверять", cr_who_player:"игрок (ID)…",
+  cr_go:"Разложить", cr_sec:"с", cr_or:"или из", cr_raw:"сырьё", cr_time:"Время крафта", cr_benches:"Верстаки / станки",
+  cr_used_in:"Используется в", cr_techs:"Технологии", cr_tech:"Технология", cr_status:"Статус", cr_no_tech:"Технологии не нужны.",
+  cr_raw_total:"Сырьё всего", cr_item:"Предмет", cr_count:"Кол-во", cr_inter:"Промежуточные", cr_crafts:"Крафтов", cr_tree:"Дерево крафта",
+  tr_title:"Торговля", tr_intro:"Все предложения сервера: торговые терминалы игроков (Data\\game\\terminals.dt2) и магазины, стоящие на картах (.dt). Первый разбор всех карт занимает до минуты, дальше — кэш.",
+  tr_ph:"поиск по предмету", tr_src_all:"все источники", tr_src_term:"терминал", tr_src_shop:"магазин на карте",
+  tr_side_any:"отдают или хотят", tr_side_give:"продают (отдают)", tr_side_want:"покупают (хотят взамен)",
+  tr_offers:"предложений", tr_terms:"терминалов", tr_shops:"магазинов", tr_scan:"разбор",
+  tr_owner:"Владелец", tr_give:"Отдаёт", tr_want:"Хочет взамен", tr_rate:"Курс", tr_where:"Где",
+  tr_terms_list:"Терминалы игроков", tr_shops_list:"Магазины на картах", tr_lots:"Лотов", tr_sales:"Продаж",
+  tr_idle:"Не заходил", tr_storage:"Выручка на складе", tr_loading:"собираю данные по всем картам…",
   entry_shot:"Обновить снимок", entry_state:"Определить экран", entry_testclick:"Тест-клик по точке",
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
@@ -2091,7 +2182,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2154,6 +2245,24 @@ var T = {
   ts_st_done:"researched", ts_st_cur:"researching now", ts_st_avail:"available", ts_st_lock:"locked",
   ts_cov_legend:"known by at least one (brighter — more members)",
   ts_hint:"Hover a square for name, time and status. Branches run left to right, forks start new rows under the parent.",
+  ts_unlocks:"unlocks", ts_pick_hint:"Click a tech — I'll highlight the path to it and show what's left.",
+  ts_path_left:"left to it", ts_steps:"steps", ts_who_closer:"Which members are closest (fewest hours to the target):",
+  ch_title:"Clan history", ch_intro:"The game keeps no clan history — the panel diffs clans.json every few minutes and stores an hourly rating/CP/size point. Data accumulates from the moment it's enabled.",
+  ch_empty:"Empty so far — history starts after the first tracking passes.",
+  ch_joined:"joined", ch_left:"left", ch_role:"role change", ch_tech:"clan tech", ch_renamed:"renamed",
+  ch_slots:"roster expanded", ch_created:"clan created", ch_disbanded:"clan disbanded",
+  cr_title:"Craft calculator", cr_intro:"Pick an item and quantity — I'll break it down to raw materials (crafting + machines), with intermediate crafts, time, workbenches and required techs. Pick a player or clan to see what they already know and what's missing.",
+  cr_ph:"item (name or id)", cr_who:"techs:", cr_who_none:"don't check", cr_who_player:"player (ID)…",
+  cr_go:"Break down", cr_sec:"s", cr_or:"or from", cr_raw:"raw", cr_time:"Craft time", cr_benches:"Workbenches / machines",
+  cr_used_in:"Used in", cr_techs:"Techs", cr_tech:"Tech", cr_status:"Status", cr_no_tech:"No techs needed.",
+  cr_raw_total:"Raw materials total", cr_item:"Item", cr_count:"Qty", cr_inter:"Intermediate", cr_crafts:"Crafts", cr_tree:"Craft tree",
+  tr_title:"Trade", tr_intro:"Every offer on the server: players' trade terminals (Data\\game\\terminals.dt2) and shops placed on maps (.dt). The first pass over all maps takes up to a minute, then it's cached.",
+  tr_ph:"search by item", tr_src_all:"all sources", tr_src_term:"terminal", tr_src_shop:"map shop",
+  tr_side_any:"selling or buying", tr_side_give:"selling (gives)", tr_side_want:"buying (wants)",
+  tr_offers:"offers", tr_terms:"terminals", tr_shops:"shops", tr_scan:"scan",
+  tr_owner:"Owner", tr_give:"Gives", tr_want:"Wants", tr_rate:"Rate", tr_where:"Where",
+  tr_terms_list:"Player terminals", tr_shops_list:"Map shops", tr_lots:"Lots", tr_sales:"Sales",
+  tr_idle:"Idle", tr_storage:"Revenue in storage", tr_loading:"collecting data from all maps…",
   entry_shot:"Refresh screenshot", entry_state:"Detect screen", entry_testclick:"Test-click point",
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
@@ -2374,14 +2483,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","twinks","clans","entry","buffs","food","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","twinks","clans","trade","entry","buffs","food","craft","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -3006,7 +3115,8 @@ function techScheme(nodes, opt){
     var d= (pos[n.parent].row===pos[n.id].row) ? ("M"+(px+C/2)+" "+py+" H"+x)
       : ("M"+px+" "+(py+C/2)+" V"+y+" H"+x);
     var lit = cov? (cov[n.id]>0) : !!done[n.parent];
-    svg.appendChild(svgEl("path",{d:d,fill:"none",stroke:lit?"var(--mut)":"var(--line)","stroke-width":"1.2"}));
+    var hl = opt.highlight && opt.highlight[n.id];
+    svg.appendChild(svgEl("path",{d:d,fill:"none",stroke:hl?"var(--warn)":(lit?"var(--mut)":"var(--line)"),"stroke-width":hl?"2.2":"1.2"}));
   });
   var cnt={done:0,cur:0,avail:0,lock:0};
   list.forEach(function(n){
@@ -3022,9 +3132,13 @@ function techScheme(nodes, opt){
     else { st="lock"; fill="transparent"; stroke="var(--line)"; cnt.lock++; }
     var tip=n.label+"  ["+n.id+"]"+(n.cost_h!=null? "\n"+t("ts_cost")+": "+n.cost_h+" "+(S.lang==="ru"?"ч":"h"):"")
       +(n.level? "\n"+t("ts_level")+": "+n.level : "")
-      +"\n"+(cov? t("ts_known")+": "+(cov[n.id]||0)+" / "+total : t("ts_st_"+st));
-    var g=svgEl("g",{},[svgEl("title",{},[tip]),
-      svgEl("rect",{x:cx(n.id),y:cy(n.id),width:C,height:C,rx:3,fill:fill,"fill-opacity":op,stroke:stroke,"stroke-width":st==="avail"?1.6:1.2})]);
+      +"\n"+(cov? t("ts_known")+": "+(cov[n.id]||0)+" / "+total : t("ts_st_"+st))
+      +((n.unlocks&&n.unlocks.length)? "\n"+t("ts_unlocks")+": "+n.unlocks.join(", ") : "");
+    var hlN = opt.highlight && opt.highlight[n.id];
+    var g=svgEl("g",{style:opt.onPick?"cursor:pointer":null},[svgEl("title",{},[tip]),
+      svgEl("rect",{x:cx(n.id),y:cy(n.id),width:C,height:C,rx:3,fill:fill,"fill-opacity":op,
+        stroke:hlN?"var(--warn)":stroke,"stroke-width":hlN?2.4:(st==="avail"?1.6:1.2)})]);
+    if(opt.onPick) g.addEventListener("click",function(){ opt.onPick(n); });
     if(txt) g.appendChild(svgEl("text",{x:cx(n.id)+C/2,y:cy(n.id)+C-4,"text-anchor":"middle","font-size":"9",fill:"#fff"},[txt]));
     svg.appendChild(g);
   });
@@ -3051,6 +3165,240 @@ function techSchemeCard(title, mk){
   return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[title]), box]);
 }
 function setOf(arr){ var o={}; (arr||[]).forEach(function(x){ o[x]=true; }); return o; }
+// путь от корня ветки до технологии (включительно)
+function techPath(nodes,id){
+  var by={}; nodes.forEach(function(n){ by[n.id]=n; });
+  var chain=[], cur=by[id], guard=0;
+  while(cur && guard++<200){ chain.unshift(cur); cur=cur.parent? by[cur.parent] : null; }
+  return chain;
+}
+function pathCost(chain, done){
+  var miss=chain.filter(function(n){ return !done[n.id]; });
+  var h=0; miss.forEach(function(n){ h+=(n.cost_h||0); });
+  return {miss:miss, hours:Math.round(h*10)/10};
+}
+// схема + клик по узлу -> подсветка пути и панель info(node, chain)
+function schemeWithPlanner(nodes, baseOpt, info){
+  var holder=el("div",{},[]), panel=el("div",{style:"margin-top:10px"},[el("div",{class:"muted small"},[t("ts_pick_hint")])]);
+  function draw(hl){
+    holder.innerHTML="";
+    holder.appendChild(techScheme(nodes, Object.assign({}, baseOpt, {highlight:hl, onPick:pick})));
+  }
+  function pick(n){
+    var chain=techPath(nodes,n.id);
+    draw(setOf(chain.map(function(x){ return x.id; })));
+    panel.innerHTML=""; panel.appendChild(info(n,chain));
+  }
+  draw(null);
+  return el("div",{},[holder,panel]);
+}
+function techInfoHead(n){
+  return el("div",{},[el("b",{},[n.label+"  "]), el("span",{class:"muted small"},["["+n.id+"] · "+(n.family||"")]),
+    (n.unlocks&&n.unlocks.length)? el("div",{class:"small",style:"margin-top:4px"},[t("ts_unlocks")+": ",
+      el("span",{class:"chips",style:"display:inline-flex"}, n.unlocks.map(function(u){ return el("span",{class:"chip"},[u]); }))]) : null]);
+}
+function playerPlanInfo(done){
+  return function(n,chain){
+    var pc=pathCost(chain,done), hh=S.lang==="ru"?"ч":"h";
+    var list=el("div",{class:"chips",style:"margin-top:6px"}, chain.map(function(x){
+      return el("span",{class:"chip",style:done[x.id]?"color:var(--ok);border-color:var(--ok)":""},[(done[x.id]?"✓ ":"")+x.label]); }));
+    return el("div",{class:"card"},[techInfoHead(n),
+      el("div",{style:"margin-top:6px"},[ pc.miss.length
+        ? el("span",{},[t("ts_path_left")+": ", el("b",{},[pc.miss.length+" "+t("ts_steps")+" · ~"+pc.hours+" "+hh])])
+        : el("span",{class:"pill ok"},[t("ts_st_done")]) ]),
+      list]);
+  };
+}
+function clanPlanInfo(members){
+  return function(n,chain){
+    var hh=S.lang==="ru"?"ч":"h";
+    var rows=members.map(function(m){ var pc=pathCost(chain,setOf(m.techs)); return {m:m, n:pc.miss.length, h:pc.hours}; })
+      .sort(function(a,b){ return a.h-b.h || a.n-b.n; });
+    return el("div",{class:"card"},[techInfoHead(n),
+      el("div",{class:"muted small",style:"margin:6px 0"},[t("ts_who_closer")]),
+      ltable([t("cl_player"),t("ts_path_left")], rows, function(r){ return [plLink(r.m.id,r.m.name),
+        r.n? (r.n+" "+t("ts_steps")+" · ~"+r.h+" "+hh) : el("span",{class:"pill ok"},[t("ts_st_done")])]; })]);
+  };
+}
+
+// ---- мини-график (линия по точкам {t, v}) ----
+function lineChart(pts, title, fmt){
+  var W=600, H=120, P=6;
+  fmt=fmt||function(v){ return Number(v).toLocaleString(); };
+  var box=el("div",{style:"flex:1;min-width:220px"},[el("div",{class:"small muted"},[title])]);
+  if(pts.length<2){ box.appendChild(el("div",{class:"muted small"},[pts.length? fmt(pts[0].v) : "—"])); return box; }
+  var t0=pts[0].t, t1=pts[pts.length-1].t, lo=Infinity, hi=-Infinity;
+  pts.forEach(function(p){ if(p.v<lo) lo=p.v; if(p.v>hi) hi=p.v; });
+  if(hi===lo){ hi+=1; lo-=1; }
+  var d=pts.map(function(p,i){
+    var x=P+(W-2*P)*(t1===t0?0:(p.t-t0)/(t1-t0)), y=H-P-(H-2*P)*(p.v-lo)/(hi-lo);
+    return (i?"L":"M")+x.toFixed(1)+" "+y.toFixed(1); }).join(" ");
+  box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:120px;display:block",preserveAspectRatio:"none"},[
+    svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2","vector-effect":"non-scaling-stroke"})]));
+  var last=pts[pts.length-1].v, first=pts[0].v, dv=last-first;
+  box.appendChild(el("div",{class:"small"},[el("b",{},[fmt(last)]),
+    el("span",{style:"color:"+(dv>=0?"var(--ok)":"var(--err)")},["  "+(dv>=0?"+":"")+fmt(dv)]),
+    el("span",{class:"muted"},["  · "+new Date(t0*1000).toLocaleDateString()+" → "+new Date(t1*1000).toLocaleDateString()])]));
+  return box;
+}
+var CLAN_EV_KEY={joined:"ch_joined",left:"ch_left",role:"ch_role",tech:"ch_tech",renamed:"ch_renamed",
+  slots:"ch_slots",created:"ch_created",disbanded:"ch_disbanded"};
+function clanHistoryCard(cid){
+  var body=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  api("/api/clan-history?id="+cid).then(function(h){
+    body.innerHTML="";
+    if(!h.ok){ body.appendChild(el("div",{class:"msg err"},[h.error||"error"])); return; }
+    if(!h.series.length && !h.events.length){ body.appendChild(el("div",{class:"muted small"},[t("ch_empty")])); return; }
+    function ser(k){ return h.series.map(function(p){ return {t:p.t, v:p[k]}; }); }
+    body.appendChild(el("div",{class:"row",style:"gap:16px;flex-wrap:wrap;align-items:flex-start"},[
+      lineChart(ser("rating"),t("cl_rating")), lineChart(ser("cp"),"Clan Points"), lineChart(ser("size"),t("cl_size"))]));
+    if(h.events.length){
+      var box=el("div",{class:"small",style:"max-height:260px;overflow:auto;margin-top:10px"},[]);
+      h.events.forEach(function(e){
+        var txt=t(CLAN_EV_KEY[e.kind]||e.kind);
+        var who=e.uid!=null? plLink(e.uid,e.name) : null;
+        var extra= e.kind==="role"? " "+e.was+" → "+e.role : e.kind==="tech"? " "+(e.label||e.tech)
+          : e.kind==="renamed"? " ("+e.was+" → "+e.clan_name+")" : e.kind==="slots"? " "+e.was+" → "+e.max : "";
+        box.appendChild(el("div",{},[el("span",{class:"lg-t mono"},[e.ts+"  "]), txt+" ", who, extra]));
+      });
+      body.appendChild(box);
+    }
+  }).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("ch_title")]), el("p",{class:"muted small"},[t("ch_intro")]), body]);
+}
+
+// ---- крафт: раскладка до сырья ----
+var CRAFT_CAT=null;
+function tabCraft(v){
+  var inp=el("input",{type:"text",list:"craft-dl",placeholder:t("cr_ph"),style:"min-width:260px"});
+  var dl=el("datalist",{id:"craft-dl"},[]);
+  var qty=el("input",{type:"number",min:"1",value:"1",style:"width:80px"});
+  var whoSel=el("select",{},[el("option",{value:""},[t("cr_who_none")])]);
+  var uidInp=el("input",{type:"number",placeholder:"ID",style:"width:90px;display:none"});
+  var msg=el("span",{class:"muted small"},[]);
+  var out=el("div",{style:"margin-top:12px"},[]);
+  var byName={};
+  function loadCat(cb){
+    if(CRAFT_CAT) return cb(CRAFT_CAT);
+    api("/api/craft-catalog").then(function(d){ if(d.ok){ CRAFT_CAT=d; cb(d); } else msg.textContent=d.error||"error"; })
+      .catch(function(e){ msg.textContent=errText(e); });
+  }
+  loadCat(function(d){
+    d.items.forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name},[])); });
+  });
+  whoSel.appendChild(el("option",{value:"uid"},[t("cr_who_player")]));
+  api("/api/clans").then(function(c){ (c.clans||[]).forEach(function(x){
+    whoSel.appendChild(el("option",{value:"clan:"+x.id},[t("cl_name")+": "+x.name])); }); }).catch(function(){});
+  whoSel.addEventListener("change",function(){ uidInp.style.display=whoSel.value==="uid"?"":"none"; });
+  function node(n){
+    var hh=n.via==="craft"? (n.workbench? n.workbench+" · ":"")+n.crafts+"× · "+n.time+" "+t("cr_sec")
+      : n.via==="machine"? n.machine+(n.alts&&n.alts.length? " ("+t("cr_or")+" "+n.alts.join(", ")+")":"") : t("cr_raw");
+    var head=el("span",{},[el("b",{},[n.name]), " × "+n.need+"  ", el("span",{class:"muted small"},[hh])]);
+    if(!n.children || !n.children.length) return el("div",{style:"margin-left:14px"},[head]);
+    return el("details",{open:"",style:"margin-left:14px"},[el("summary",{},[head])].concat(n.children.map(node)));
+  }
+  function run(){
+    var key=inp.value.trim(); if(!key) return;
+    var id=byName[key.toLowerCase()]||key;
+    var q="/api/craft-plan?item="+encodeURIComponent(id)+"&qty="+(parseInt(qty.value,10)||1);
+    if(whoSel.value==="uid" && uidInp.value) q+="&uid="+encodeURIComponent(uidInp.value);
+    if(whoSel.value.indexOf("clan:")===0) q+="&clan="+whoSel.value.slice(5);
+    msg.textContent=t("working"); out.innerHTML="";
+    api(q).then(function(p){
+      msg.textContent="";
+      if(!p.ok){ out.appendChild(el("div",{class:"msg err"},[p.error||"error"])); return; }
+      var hh=S.lang==="ru"?"ч":"h", mins=Math.round(p.time_s/6)/10;
+      var g=el("div",{class:"grid"},[]);
+      g.appendChild(kvcard(p.name+" × "+p.qty,[
+        [t("cr_time"), p.time_s+" "+t("cr_sec")+(p.time_s>=60? " (~"+mins+" "+t("pd_min")+")":"")],
+        [t("cr_benches"), p.benches.length? el("div",{class:"chips"}, p.benches.map(function(b){ return el("span",{class:"chip"},[b]); })) : "—"],
+        [t("cr_used_in"), p.used_in.length? el("div",{class:"chips"}, p.used_in.map(function(b){ return el("span",{class:"chip"},[b]); })) : "—"]
+      ]));
+      g.appendChild(el("div",{class:"card"},[el("h3",{},[t("cr_techs")+(p.who? " · "+p.who:"")]),
+        p.techs.length? ltable([t("cr_tech"),t("cr_status")], p.techs, function(x){ return [x.label,
+          x.known===null? "—" : x.known? el("span",{class:"pill ok"},[t("ts_st_done")])
+            : el("span",{class:"pill warn"},[t("ts_path_left")+": "+x.missing_chain+" "+t("ts_steps")+" · ~"+x.missing_h+" "+hh])]; })
+          : el("div",{class:"muted small"},[t("cr_no_tech")])]));
+      g.appendChild(el("div",{class:"card"},[el("h3",{},[t("cr_raw_total")]),
+        ltable([t("cr_item"),t("cr_count")], p.raw, function(x){ return [x.name, Number(x.count).toLocaleString()]; })]));
+      if(p.intermediate.length) g.appendChild(el("div",{class:"card"},[el("h3",{},[t("cr_inter")]),
+        ltable([t("cr_item"),t("cr_count"),t("cr_crafts")], p.intermediate, function(x){ return [x.name, String(x.need), x.crafts? String(x.crafts) : "—"]; })]));
+      out.appendChild(g);
+      out.appendChild(el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("cr_tree")]), node(p.tree)]));
+    }).catch(function(e){ msg.textContent=errText(e); });
+  }
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") run(); });
+  v.appendChild(el("div",{},[
+    el("div",{class:"card"},[el("h3",{},[t("cr_title")]), el("p",{class:"muted small"},[t("cr_intro")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[inp, dl, el("span",{class:"small"},["×"]), qty,
+        el("span",{class:"small"},[t("cr_who")]), whoSel, uidInp,
+        el("button",{class:"small pri",onclick:run},[t("cr_go")]), msg])]),
+    out]));
+}
+
+// ---- торговля: терминалы игроков + магазины на картах ----
+function tabTrade(v){
+  var q=el("input",{type:"text",placeholder:t("tr_ph"),style:"min-width:240px"});
+  var src=el("select",{},[el("option",{value:""},[t("tr_src_all")]),el("option",{value:"terminal"},[t("tr_src_term")]),el("option",{value:"shop"},[t("tr_src_shop")])]);
+  var side=el("select",{},[el("option",{value:"any"},[t("tr_side_any")]),el("option",{value:"give"},[t("tr_side_give")]),el("option",{value:"want"},[t("tr_side_want")])]);
+  var msg=el("span",{class:"muted small"},[]);
+  var out=el("div",{style:"margin-top:12px"},[]);
+  var D=null;
+  function names(arr){ return arr.map(function(x){ return x.name+" ×"+Number(x.count).toLocaleString(); }).join(", "); }
+  function num(v){ return Number(v).toLocaleString(undefined,{maximumFractionDigits:v<10?3:1}); }
+  // курс «1 дорогого = N дешёвого» — чтобы не было 0.0002
+  function rate(o){
+    if(o.unit==null || !o.unit) return "—";
+    var g=o.give[0].name, w=o.want[0].name;
+    return o.unit>=1 ? ("1 "+g+" = "+num(o.unit)+" "+w) : ("1 "+w+" = "+num(1/o.unit)+" "+g);
+  }
+  function who(o){ return el("span",{},[o.online? el("span",{class:"dot ok",style:"margin-right:4px"}) : null, plLink(o.id,o.name),
+    o.clan? el("span",{class:"muted small"},[" · "+o.clan]) : null]); }
+  function render(){
+    out.innerHTML="";
+    if(!D) return;
+    var needle=q.value.trim().toLowerCase();
+    function hit(arr){ return arr.some(function(x){ return x.name.toLowerCase().indexOf(needle)>=0 || String(x.id)===needle; }); }
+    var rows=D.offers.filter(function(o){
+      if(src.value && o.src!==src.value) return false;
+      if(!needle) return true;
+      return side.value==="give"? hit(o.give) : side.value==="want"? hit(o.want) : (hit(o.give)||hit(o.want)); });
+    out.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[
+      rows.length+" / "+D.offers.length+" "+t("tr_offers")+" · "+D.terminals.length+" "+t("tr_terms")+" · "+D.shops.length+" "+t("tr_shops")+" · "+t("tr_scan")+" "+D.scan_sec+" s"]));
+    out.appendChild(el("div",{class:"card",style:"overflow:auto"},[ltable([t("tr_owner"),t("tr_give"),t("tr_want"),t("tr_rate"),t("tr_where")], rows.slice(0,600), function(o){
+      return [who(o.owner), names(o.give), names(o.want),
+        rate(o),
+        o.src==="terminal"? t("tr_src_term") : o.where]; })]));
+    out.appendChild(el("details",{style:"margin-top:12px"},[el("summary",{},[t("tr_terms_list")+" · "+D.terminals.length]),
+      ltable([t("tr_owner"),t("tr_lots"),t("tr_sales"),t("tr_idle"),t("tr_storage")], D.terminals, function(x){
+        return [who(x.owner), String(x.lots), String(x.sales), x.idle_h!=null? x.idle_h+" "+(S.lang==="ru"?"ч":"h") : "—", names(x.storage)||"—"]; })]));
+    out.appendChild(el("details",{style:"margin-top:8px"},[el("summary",{},[t("tr_shops_list")+" · "+D.shops.length]),
+      ltable([t("tr_owner"),t("tr_where"),t("tr_lots"),t("tr_sales"),t("tr_storage")], D.shops, function(x){
+        return [who(x.owner), "map "+x.map+" @ "+x.x+","+x.y, String(x.slots), String(x.sales), names(x.storage)||"—"]; })]));
+  }
+  function load(force){
+    msg.textContent=t("tr_loading");
+    api("/api/trade"+(force?"?force=1":"")).then(function(r){
+      if(r.ready){ msg.textContent=""; D=r.data; render(); return; }
+      var iv=setInterval(function(){
+        api("/api/job?id="+r.job).then(function(j){
+          if(!j.done) return;
+          clearInterval(iv); msg.textContent="";
+          var d=j.result||{};
+          if(!d.ok){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+          D=d; render();
+        }).catch(function(){ clearInterval(iv); msg.textContent=t("err_net"); });
+      },1500);
+    }).catch(function(e){ msg.textContent=errText(e); });
+  }
+  q.addEventListener("input",render); src.addEventListener("change",render); side.addEventListener("change",render);
+  v.appendChild(el("div",{},[
+    el("div",{class:"card"},[el("h3",{},[t("tr_title")]), el("p",{class:"muted small"},[t("tr_intro")]),
+      el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[q, side, src,
+        el("button",{class:"small",onclick:function(){ load(true); }},[t("refresh")]), msg])]),
+    out]));
+  load(false);
+}
 
 // ---- кланы ----
 var CLAN_SEL=null;
@@ -3107,8 +3455,9 @@ function clanDetail(out, cid){
         if(!s || s.blocked) return el("td",{style:"background:var(--line);opacity:.35"},[""]);
         return el("td",{},[s.user? plLink(s.user.id,s.user.name) : el("span",{class:"muted"},["·"])]); }))));
     });
-    g.appendChild(el("div",{class:"card"},[el("h3",{},[t("cl_spec")]), el("p",{class:"muted small"},[t("cl_spec_hint")]), mt]));
+    g.appendChild(el("div",{class:"card",style:"overflow:auto"},[el("h3",{},[t("cl_spec")]), el("p",{class:"muted small"},[t("cl_spec_hint")]), mt]));
     out.appendChild(g);
+    out.appendChild(clanHistoryCard(cid));
 
     var rows=d.members.map(function(m){ return [
       el("span",{},[m.online? el("span",{class:"dot ok",style:"margin-right:5px"}) : null, plLink(m.id,m.name)]),
@@ -3131,9 +3480,12 @@ function clanDetail(out, cid){
     function draw(nodes){
       holder.innerHTML="";
       var personal=function(n){ return !n.clan; };
-      holder.appendChild(sel.value===""
-        ? techScheme(nodes,{filter:personal, coverage:d.coverage, total:d.members.length})
-        : techScheme(nodes,{filter:personal, done:setOf(d.members[+sel.value].techs)}));
+      if(sel.value===""){
+        holder.appendChild(schemeWithPlanner(nodes,{filter:personal, coverage:d.coverage, total:d.members.length}, clanPlanInfo(d.members)));
+      } else {
+        var dn=setOf(d.members[+sel.value].techs);
+        holder.appendChild(schemeWithPlanner(nodes,{filter:personal, done:dn}, playerPlanInfo(dn)));
+      }
     }
     var card=techSchemeCard(t("cl_ptech_scheme"), function(nodes){
       sel.addEventListener("change",function(){ draw(nodes); }); draw(nodes);
@@ -3601,7 +3953,8 @@ function renderPlayerModal(d){
   b.appendChild(g);
 
   b.appendChild(techSchemeCard(t("pd_tech_scheme"), function(nodes){
-    return techScheme(nodes,{filter:function(n){ return !n.clan; }, done:setOf(r.tech_list), current:r.current}); }));
+    var dn=setOf(r.tech_list);
+    return schemeWithPlanner(nodes,{filter:function(n){ return !n.clan; }, done:dn, current:r.current}, playerPlanInfo(dn)); }));
 
   // sensitive blocks (each behind admin password)
   function gate(box, url, render){

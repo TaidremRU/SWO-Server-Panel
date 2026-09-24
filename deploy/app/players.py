@@ -1539,6 +1539,7 @@ def tech_tree(cfg):
         return {"ok": False, "error": "каталог мира не найден"}
     raw = _read_json(os.path.join(world_dir, "Data", "tech.json")) or {}
     meta = tech_meta(world_dir)
+    unl = tech_unlocks(world_dir)
     nodes = []
     for it in raw.get("items", []):
         tid = it.get("id")
@@ -1547,7 +1548,8 @@ def tech_tree(cfg):
         m = meta.get(tid) or {}
         nodes.append({"id": tid, "parent": it.get("parent"), "label": m.get("label") or tid,
                       "family": m.get("family") or "", "cost_h": m.get("cost_h"),
-                      "level": it.get("level"), "clan": bool(it.get("isClan"))})
+                      "level": it.get("level"), "clan": bool(it.get("isClan")),
+                      "unlocks": unl.get(tid, [])})
     return {"ok": True, "nodes": nodes}
 
 
@@ -1648,6 +1650,587 @@ def clan_detail(cfg, cid):
         "tech": ctech, "tech_named": [{"id": t, "label": tech_label(world_dir, t)} for t in ctech],
         "members": members, "slots": slots, "coverage": coverage,
     }
+
+
+# --- русские названия предметов (slug из Data\items.json -> текст из клиентской
+# локализации, секция items; 446/446 покрыто на 2026-09-24) ------------------
+_ITEM_NAMES_RU = {
+    'seed_grass': 'Семена травы', 'seed_bush': 'Семена куста', 'seed_waterlily': 'Семена кувшинки',
+    'seed_tree': 'Семена дерева', 'wood': 'Дерево', 'leaf': 'Лист', 'grass': 'Трава',
+    'berry': 'Ягода', 'wall_wood': 'Деревянная стена', 'door_wood': 'Деревянная дверь',
+    'floor_wood': 'Деревянный пол', 'workbench': 'Верстак', 'club': 'Дубина',
+    'axe_wood': 'Деревянный топор', 'chest_wood': 'Деревянный сундук', 'bed': 'Кровать',
+    'stone': 'Камень', 'coal': 'Уголь', 'iron_ore': 'Железная руда',
+    'pick_wood': 'Деревянная кирка', 'furnace': 'Печь', 'iron_bar': 'Железный слиток',
+    'meat': 'Мясо', 'bone': 'Кость', 'bow_wooden': 'Деревянный лук',
+    'arrow_bone': 'Костяная стрела', 'spear': 'Костяное копье', 'roast': 'Жаренное мясо',
+    'wooden_boat': 'Деревянная лодка', 'seed_spruce': 'Семена ели', 'seed_birch': 'Семена березы',
+    'seed_seaweed': 'Семена водорослей', 'copper_ore': 'Медная руда', 'nitrocalite': 'Нитрокалит',
+    'lead_ore': 'Свинцовая руда', 'titanium_ore': 'Титановая руда', 'uranium_ore': 'Урановая руда',
+    'leather': 'Кожа', 'sulfur': 'Сера', 'silver_ore': 'Серебрянная руда',
+    'gold_ore': 'Золотая руда', 'iron_powder': 'Железный порошок',
+    'coal_powder': 'Угольный порошок', 'iron_coal_powder': 'Стальной порошок',
+    'steel_bar': 'Стальной слиток', 'copper_bar': 'Медный слиток',
+    'nitrocalite_powder': 'Порошок нитрокалита', 'lead_bar': 'Свинцовый слиток',
+    'titanium_bar': 'Титановый слиток', 'uranium_bar': 'Урановый слиток',
+    'silver_bar': 'Серебрянный слиток', 'gold_bar': 'Золотой слиток', 'powder': 'Порох',
+    'crusher': 'Дробилка', 'iron_knife': 'Железный нож', 'iron_sword': 'Железный меч',
+    'crossbow': 'Арбалет', 'axe_stone': 'Каменный топор', 'axe_iron': 'Железный топор',
+    'pick_stone': 'Каменная кирка', 'pick_iron': 'Железная кирка', 'salve': 'Лечебная мазь',
+    'leather_clothes': 'Кожанная одежда', 'seed_rubber_tree': 'Семена каучукового дерева',
+    'rubber': 'Каучук', 'gum': 'Резина', 'oil': 'Нефть', 'kerosene': 'Керосин', 'pump': 'Насос',
+    'industrial_workbench': 'Индустриальный верстак', 'extractor': 'Экстрактор',
+    'distiller': 'Дистиллятор', 'sand': 'Песок', 'glass': 'Стекло', 'rocket_r1': 'Ракета R1',
+    'rocket_engine_re1': 'Ракетный двигатель RE-1', 'space_radar_sr1': 'Космический радар SR-1',
+    'oxygen_generator_og1': 'Генератор кислорода OG-1', 'meat_fish': 'Рыба',
+    'meat_human': 'Мясо человека', 'shovel_bone': 'Костяная лопата', 'hoe_bone': 'Костяная мотыга',
+    'seed_potatoes': 'Семена картофеля', 'potatoes': 'Картофель', 'seed_rice': 'Семена риса',
+    'rice': 'Рис', 'seed_corn': 'Семена кукурузы', 'corn': 'Кукуруза',
+    'seed_tomatoes': 'Семена помидоров', 'tomatoes': 'Помидоры', 'seed_onion': 'Семена лука',
+    'onion': 'Лук', 'seed_mushrooms': 'Семена грибов', 'mushrooms': 'Грибы',
+    'seed_carrot': 'Семена моркови', 'carrot': 'Морковь', 'seed_cabbage': 'Семена капусты',
+    'cabbage': 'Капуста', 'seed_pumpkin': 'Семена тыквы', 'pumpkin': 'Тыква',
+    'seed_beet': 'Семена свеклы', 'beet': 'Свекла', 'seed_dill': 'Семена укропа', 'dill': 'Укроп',
+    'seed_wheat': 'Семена пшеницы', 'wheat': 'Пшеница', 'seed_cucumber': 'Семена огурца',
+    'cucumber': 'Огурец', 'seed_strawberry': 'Семена клубники', 'strawberry': 'Клубника',
+    'seed_apple': 'Семена яблока', 'apple': 'Яблоко', 'seed_garlic': 'Семена чеснока',
+    'garlic': 'Чеснок', 'seed_grape': 'Семена винограда', 'grape': 'Виноград',
+    'seed_pepper': 'Семена перца', 'pepper': 'Перец',
+    'seed_sugar_cane': 'Семена сахарного тростника', 'sugar_cane': 'Сахарный тростник',
+    'seed_bananas': 'Семена бананов', 'bananas': 'Банан', 'seed_oranges': 'Семена апельсина',
+    'oranges': 'Апельсин', 'seed_lemons': 'Семена лимона', 'lemons': 'Лимон',
+    'seed_bell_pepper': 'Семена сладкого перца', 'bell_pepper': 'Сладкий перец',
+    'seed_pineapple': 'Семена ананаса', 'pineapple': 'Ананас', 'seed_watermelon': 'Семена арбуза',
+    'watermelon': 'Арбуз', 'seed_coconut': 'Семена кокоса', 'coconut': 'Кокос', 'flour': 'Мука',
+    'sugar': 'Сахар', 'salt': 'Соль', 'seed_tropical_tree': 'Семена тропического дерева',
+    'seed_baobab': 'Семена баобаба', 'seed_sequoia': 'Семена секвойи', 'cobalt': 'Кобальт',
+    'tungsten': 'Вольфрам', 'platinum': 'Платина', 'omicronium': 'Омикрониум', 'xirium': 'Ксириум',
+    'thaumin': 'Таумин', 'plutonium': 'Плутоний', 'faunitron': 'Фаунитрон', 'protonite': 'Протонит',
+    'cobalt_bar': 'Слиток кобальта', 'tungsten_bar': 'Слиток вольфрама',
+    'platinum_bar': 'Слиток платины', 'omicronium_bar': 'Слиток омикрониума',
+    'plutonium_bar': 'Слиток плутония', 'culinary_table': 'Кулинарный стол', 'dish': 'Блюдо',
+    'space_suit': 'Скафандр', 'wall_stone': 'Каменная стена', 'door_stone': 'Каменная дверь',
+    'floor_stone': 'Каменный пол', 'wall_brick': 'Кирпичная стена', 'door_brick': 'Кирпичная дверь',
+    'floor_brick': 'Кирпичный пол', 'wall_iron': 'Железная стена', 'door_iron': 'Железная дверь',
+    'floor_iron': 'Железный пол', 'iron_armor': 'Железная броня', 'steel_armor': 'Стальная броня',
+    'titan_armor': 'Титановая броня', 'iron_spear': 'Железное копье',
+    'arrow_iron': 'Железная стрела', 'musket': 'Мушкет', 'musket_bullet': 'Мушкетная пуля',
+    'revolver': 'Револьвер', 'revolver_bullet': 'Револьверная пуля', 'rifle': 'Ружье',
+    'rifle_bullet': 'Ружейная пуля', 'submachine_gun': 'Пистолет-пулемет',
+    'submachine_gun_bullet': 'Пуля B-1', 'fried_fish': 'Жаренная рыба',
+    'shovel_iron': 'Железная лопата', 'shovel_steel': 'Стальная лопата',
+    'shovel_titan': 'Титановая лопата', 'hoe_iron': 'Железная мотыга',
+    'hoe_steel': 'Стальная мотыга', 'hoe_titan': 'Титановая мотыга', 'pick_steel': 'Стальная кирка',
+    'pick_titan': 'Титановая кирка', 'axe_steel': 'Стальной топор', 'axe_titan': 'Титановый топор',
+    'press': 'Пресс', 'silver_coin': 'Серебрянные монеты', 'gold_coin': 'Золотые монеты',
+    'platinum_coin': 'Платиновые монеты', 'trading_station': 'Торговая станция',
+    'trade_scanner': 'Торговый сканнер', 'cigar': 'Сигары', 'stone_hammer': 'Каменный молот',
+    'steel_hammer': 'Стальной молот', 'iron_workbench': 'Железный верстак', 'box': 'Ящик',
+    'container': 'Контейнер', 'large_container': 'Большой контейнер',
+    'comfortable_bed': 'Комфортная кровать', 'titanium_bed': 'Титановая кровать',
+    'tungsten_bed': 'Вольфрамовая кровать', 'ground_cube': 'Грунтовый куб', 'ditch_dig': 'Землекоп',
+    'wooden_bridge': 'Деревянный мост', 'stone_bridge': 'Каменный мост',
+    'brick_bridge': 'Кирпичный мост', 'iron_bridge': 'Железный мост', 'car_1': 'Фургон V-1',
+    'car_engine1': 'Автомобильный двигатель CE-1', 'car_2': 'Фургон V-2', 'car_3': 'Фургон V-3',
+    'car_engine2': 'Автомобильный двигатель CE-2', 'car_engine3': 'Автомобильный двигатель CE-3',
+    'armored_car1': 'Бронеавтомобиль "Енот"', 'car_engine_ceh1': 'Автомобильный двигатель CEH-1',
+    'car_engine_ceh2': 'Автомобильный двигатель CEH-2',
+    'heavy_machine_gun1': 'Тяжелый пулемет "Кобра"',
+    'heavy_machine_gun_bullet1': 'Пулеметные пули HB-1', 'car_buggy': 'Багги',
+    'tech_booster': 'Ускоритель исследования', 'cobalt_furnace': 'Кобальтовая печь',
+    'cobalt_crusher': 'Кобальтовая дробилка', 'cobalt_extractor': 'Кобальтовый экстрактор',
+    'cobalt_distiller': 'Кобальтовый дистиллятор', 'cobalt_press': 'Кобальтовый пресс',
+    'rocket_jalopy': 'Ракета Jalopy', 'rocket_engine_jalopy': 'Ракетный двигатель Jalopy',
+    'oxygen_box': 'Кислородный ящик', 'space_gun_viper': 'Корабельная пушка "Гадюка"',
+    'space_gun_shell1': 'Снаряды SL-1', 'item_collector1': 'Сборщик предметов "Хомяк"',
+    'space_suit2': 'Скафандр S2', 'oxygen_generator_og2': 'Генератор кислорода OG-2',
+    'fat_tail': 'Курдючный жир', 'brain': 'Мозги', 'medicine_chest': 'Аптечка',
+    'energy_mixture': 'Энергосмесь', 'rocket_r2': 'Ракета R2', 'rocket_r3': 'Ракета R3',
+    'rocket_cargo1': 'Ракета RС1', 'rocket_cargo2': 'Ракета RС2',
+    'rocket_engine_re2': 'Ракетный двигатель RE-2', 'rocket_engine_re3': 'Ракетный двигатель RE-3',
+    'rocket_engine_sfe1': 'Ракетный двигатель SFE-1',
+    'rocket_engine_sfe2': 'Ракетный двигатель SFE-2',
+    'rocket_engine_sfe3': 'Ракетный двигатель SFE-3', 'xinitron': 'Ксинитрон',
+    'rocket_booster_rb1': 'Ракетный ускоритель RB-1', 'bone_flour': 'Костная мука',
+    'titan_cutter': 'Титановый резак', 'cobalt_cutter': 'Кобальтовый резак',
+    'tungsten_cutter': 'Вольфрамовый резак', 'omicronium_cutter': 'Омикрониумный резак',
+    'space_gun_anaconda': 'Корабельная пушка "Анаконда"', 'space_gun_shell2': 'Снаряды SL-2',
+    'space_gun_taipan': 'Корабельная пушка "Тайпан"', 'space_gun_shell3': 'Снаряды SL-3',
+    'cobalt_drill': 'Кобальтовый бур', 'cobalt_saw': 'Кобальтовая пила',
+    'tungsten_drill': 'Вольфрамовый бур', 'tungsten_saw': 'Вольфрамовая пила',
+    'omicronium_drill': 'Омикрониумный бур', 'omicronium_saw': 'Омикрониумная пила',
+    'iron_boat': 'Железная лодка', 'kidneys': 'Почки', 'liver': 'Печень', 'stomach': 'Желудок',
+    'lungs': 'Легкие', 'eyes': 'Глаза', 'spleen': 'Селезенка', 'ears': 'Уши', 'cartilage': 'Хрящи',
+    'heart': 'Сердце', 'lab_table': 'Лабораторный стол', 'mixture': 'Микстура',
+    'landing_area': 'Посадочная площадка', 'bio_scanner': 'Биосканер', 'poultry': 'Мясо птицы',
+    'repair_box': 'Ремонтный ящик', 'cobalt_armor': 'Кобальтовая броня',
+    'tungsten_armor': 'Вольфрамовая броня', 'omicronium_armor': 'Омикрониумная броня',
+    'cyber_workbench': 'Киберверстак', 'machine_gun_mg1': 'Пулемет MG-1', 'rifle_v1': 'Ружье V-1',
+    'bullet_b2': 'Пуля B-2', 'automat_m1': 'Автомат M-1', 'machine_gun_mg2': 'Пулемет MG-2',
+    'rifle_v2': 'Ружье V-2', 'fire_gun': 'Огнемет', 'electro_gun': 'Электропушка',
+    'bullet_e1': 'Заряд E-1', 'car_engine_ceh3': 'Автомобильный двигатель CEH-3',
+    'car_engine_ceh4': 'Автомобильный двигатель CEH-4',
+    'armored_car_chipmunk': 'Броневик "Бурундук"', 'tank_muskrat': 'Танк "Выхухоль"',
+    'tank_fox': 'Танк "Лиса"', 'tank_crocodile': 'Танк "Крокодил"', 'tank_wolf': 'Танк "Волк"',
+    'tank_rhinoceros': 'Танк "Носорог"', 'tank_bear': 'Танк "Медведь"',
+    'boat_crucian': 'Катер "Карась"', 'boat_pike': 'Катер "Щука"',
+    'amphibian_camel': 'Амфибия "Верблюд"', 'amphibian_elephant': 'Амфибия "Слон"',
+    'amphibian_polecat': 'Амфибия "Хорек"', 'amphibian_turtle': 'Амфибия "Черепаха"',
+    'iron_block': 'Железный блок', 'steel_block': 'Стальной блок', 'copper_block': 'Медный блок',
+    'lead_block': 'Свинцовый блок', 'titanium_block': 'Титановый блок',
+    'cobalt_block': 'Кобальтовый блок', 'gum_block': 'Резиновый блок',
+    'heavy_machine_gun2': 'Тяжелый пулемет "Гюрза"', 'light_cannon1': 'Пушка "Полоз"',
+    'light_cannon2': 'Пушка "Эфа"', 'medium_cannon1': 'Пушка "Мамба"',
+    'medium_cannon2': 'Пушка "Аспид"', 'heavy_cannon1': 'Пушка "Удав"',
+    'heavy_cannon2': 'Пушка "Питон"', 'heavy_machine_gun_bullet2': 'Пулеметные пули HB-2',
+    'gun_shell1': 'Снаряд S-1', 'gun_shell2': 'Снаряд S-2', 'gun_shell3': 'Снаряд S-3',
+    'gun_shell4': 'Снаряд S-4', 'gun_shell5': 'Снаряд S-5', 'gun_shell6': 'Снаряд S-6',
+    'ionium': 'Иониум', 'rocket_engine_i1': 'Ионный двигатель I-1',
+    'rocket_engine_i2': 'Ионный двигатель I-2', 'rocket_engine_n1': 'Ядерный двигатель N-1',
+    'rocket_engine_n2': 'Ядерный двигатель N-2', 'rocket_pterodactyl': 'Ракета "Птеродактиль"',
+    'rocket_carnotaurus': 'Ракета "Карнотавр"', 'rocket_tyrannosaurus': 'Ракета "Тираннозавр"',
+    'rocket_stegosaurus': 'Ракета "Стегозавр"', 'rocket_sauropod': 'Ракета "Зауропод"',
+    'space_radar_sr2': 'Космический радар SR-2', 'station_module': 'Модуль станции',
+    'station_control_panel': 'Панель управления станцией', 'nuclear_rod': 'Ядерный стержень',
+    'tungsten_block': 'Вольфрамовый блок', 'omicronium_block': 'Омикрониумный блок',
+    'hyperdrive': 'Гипердвигатель', 'space_suit3': 'Бронескафандр S3',
+    'space_suit4': 'Бронескафандр S4', 'titan_workbench': 'Титановый верстак',
+    'tungsten_workbench': 'Вольфрамовый верстак',
+    'space_gun_boomslang': 'Корабельная пушка "Бумсланг"',
+    'space_gun_krait': 'Корабельная пушка "Крайт"', 'space_gun_shell4': 'Снаряды SL-4',
+    'space_gun_shell5': 'Снаряды SL-5', 'hydroponics_unit': 'Блок гидропоники', 'paper': 'Бумага',
+    'drawing_table': 'Чертежный стол', 'white_drawing': 'Белый чертеж',
+    'yellow_drawing': 'Желтый чертеж', 'green_drawing': 'Зеленый чертеж',
+    'blue_drawing': 'Синий чертеж', 'red_drawing': 'Красный чертеж',
+    'black_drawing': 'Черный чертеж', 'planetary_scanner': 'Планетарный сканер',
+    'refrigerator': 'Холодильник', 'poisonous_moss': 'Ядовитый мох',
+    'sulfuric_acid': 'Серная кислота', 'biofuel': 'Биотопливо',
+    'landscaping_generator': 'Генератор озеленения', 'omicronium_pump': 'Омикрониумный насос',
+    'rocket_spinosaurus': 'Ракета "Спинозавр"', 'robot_rob1': 'Робот ROB-1',
+    'robot_rob2': 'Робот ROB-2', 'robot_rob3': 'Робот ROB-3', 'robot_rob4': 'Робот ROB-4',
+    'processor_p1': 'Процессор P-1', 'processor_p2': 'Процессор P-2',
+    'processor_p3': 'Процессор P-3', 'prog_module_mining': 'Модуль PMR Mining',
+    'prog_module_refueling': 'Модуль PMR Refueling', 'prog_module_farm': 'Модуль PMR Farm',
+    'planetary_stabilizer': 'Планетарный стабилизатор', 'car_kangaroo': 'Автомобиль "Кенгуру"',
+    'prog_module_transfer': 'Модуль PMR Transfer', 'prog_module_recycling': 'Модуль PMR Recycling',
+    'planet_blocker': 'Блокиратор планеты', 'recycling_workbench': 'Перерабатывающий верстак',
+    'robot_control_panel': 'Пульт управления роботами', 'whip': 'Кнут', 'feeder': 'Кормушка',
+    'feeder_refrigerator': 'Кормушка-холодильник', 'industrial_mixer': 'Индустриальный миксер',
+    'prog_module_collector': 'Модуль PMR Collector',
+    'prog_module_robot_refuel': 'Модуль PMR Robot Refuel',
+    'car_engine_cet': 'Автомобильный двигатель CET',
+    'car_engine_ceb': 'Автомобильный двигатель CEB', 'milk': 'Молоко', 'red_caviar': 'Красная икра',
+    'black_caviar': 'Черная икра', 'egg': 'Яйцо', 'honey': 'Мед', 'butter': 'Масло',
+    'curd': 'Творог', 'collector_container': 'Контейнер-собиратель', 'iridium': 'Иридий',
+    'electronium': 'Электрониум', 'epsilon_metal': 'Эпсилон-металл', 'vulcanite': 'Вулканит',
+    'cosmochlor': 'Космохлор', 'iridium_bar': 'Слиток иридиума',
+    'electronium_bar': 'Слиток электрониума', 'epsilon_metal_bar': 'Слиток эпсилон-металла',
+    'collider': 'Коллайдер', 'collider_block': 'Блок коллайдера', 'antimatter': 'Антиматерия',
+    'null_matter': 'Нуль-материя', 'quantum_workbench': 'Квантовый верстак',
+    'iridium_drill': 'Иридиевый бур', 'epsilon_drill': 'Эпсилон бур',
+    'quantum_drill': 'Квантовый бур', 'processor_p4': 'Процессор P-4',
+    'processor_p5': 'Процессор P-5', 'iridium_cutter': 'Иридиевый резак',
+    'epsilon_cutter': 'Эпсилон резак', 'quantum_cutter': 'Квантовый резак',
+    'wall_titan': 'Титановая стена', 'door_titan': 'Титановая дверь',
+    'floor_titan': 'Титановый пол', 'rocket_engine_quantum': 'Квантовый ракетный двигатель',
+    'rocket_diplodocus': 'Ракета "Диплодок"', 'iridium_armor': 'Иридиевая броня',
+    'epsilon_armor': 'Эпсилон броня', 'omicronium_furnace': 'Омикрониумная печь',
+    'omicronium_crusher': 'Омикрониумная дробилка',
+    'omicronium_extractor': 'Омикрониумный экстрактор',
+    'omicronium_distiller': 'Омикрониумный дистиллятор', 'omicronium_press': 'Омикрониумный пресс',
+    'quantum_hyperdrive': 'Квантовый гипердвигатель', 'extra_hydroponics': 'Экстра гидропоника',
+    'rescue_capsule': 'Спасательная капсула', 'portal': 'Портал',
+    'box_annihilator': 'Ящик аннигилятор',
+}
+
+
+def item_label(slug):
+    return _ITEM_NAMES_RU.get(slug) or slug or ""
+
+
+# --- крафт: Data\craft.json (ZData.CraftInfo) + Data\machines.json -----------
+_CRAFT_CACHE = {}  # world_dir -> (mtimes, data)
+
+
+def _craft_data(world_dir):
+    """-> {recipes: {slug: {time,count,tech,group,workbench,res:[(slug,n)]}},
+    machine: {product: [(machine, material, energy)]}, uses: {slug: [slug]}}."""
+    pc = os.path.join(world_dir, "Data", "craft.json")
+    pm = os.path.join(world_dir, "Data", "machines.json")
+    try:
+        mts = (os.path.getmtime(pc), os.path.getmtime(pm) if os.path.exists(pm) else 0)
+    except OSError:
+        return None
+    hit = _CRAFT_CACHE.get(world_dir)
+    if hit and hit[0] == mts:
+        return hit[1]
+    recipes, machine, uses = {}, {}, {}
+    for it in (_read_json(pc) or {}).get("items", []):
+        sid = it.get("id")
+        if not sid:
+            continue
+        res = [(r.get("id"), int(r.get("count") or 0)) for r in (it.get("res") or []) if r.get("id")]
+        recipes[sid] = {"time": float(it.get("time") or 0), "count": int(it.get("count") or 1) or 1,
+                        "tech": it.get("tech") or "", "group": it.get("group") or "",
+                        "workbench": it.get("workbench") or "", "res": res}
+        for rid, _n in res:
+            uses.setdefault(rid, []).append(sid)
+    for mc in (_read_json(pm) or {}).get("machines", []):
+        for x in mc.get("items") or []:
+            if x.get("product") and x.get("material"):
+                machine.setdefault(x["product"], []).append((mc.get("id"), x["material"], x.get("energy")))
+                uses.setdefault(x["material"], []).append(x["product"])
+    data = {"recipes": recipes, "machine": machine, "uses": uses}
+    _CRAFT_CACHE[world_dir] = (mts, data)
+    return data
+
+
+def craft_catalog(cfg):
+    """Все предметы, которые можно получить крафтом или станком."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    cd = _craft_data(world_dir)
+    if not cd:
+        return {"ok": False, "error": "нет Data\\craft.json"}
+    out = []
+    for sid, r in cd["recipes"].items():
+        out.append({"id": sid, "name": item_label(sid), "group": r["group"],
+                    "workbench": item_label(r["workbench"]) if r["workbench"] else "",
+                    "tech": r["tech"]})
+    for sid, srcs in cd["machine"].items():
+        if sid not in cd["recipes"]:
+            out.append({"id": sid, "name": item_label(sid), "group": "machine",
+                        "workbench": item_label(srcs[0][0]), "tech": ""})
+    out.sort(key=lambda x: x["name"].lower())
+    return {"ok": True, "items": out}
+
+
+def _who_techs(world_dir, uid=None, clan_id=None):
+    """-> (set техов, подпись) для проверки «изучено ли»: игрок — его techList,
+    клан — объединение techList участников + клановые техи."""
+    if uid not in (None, ""):
+        raw = _read_json(_user_file(world_dir, int(uid)))
+        nm = load_user_list(world_dir).get(int(uid)) or raw.get("name") or ("id %s" % uid)
+        return set(raw.get("techList") or []), nm
+    if clan_id not in (None, ""):
+        c = next((x for x in _clans_raw(world_dir) if x.get("id") == int(clan_id)), None)
+        if not c:
+            return set(), ""
+        s = set(c.get("tech") or [])
+        for u in c.get("users") or []:
+            s.update(_read_json(_user_file(world_dir, u.get("userId"))).get("techList") or [])
+        return s, c.get("name") or ""
+    return None, ""
+
+
+def craft_plan(cfg, item, qty=1, uid=None, clan_id=None):
+    """Раскладка предмета до сырья: дерево крафта, итоговое сырьё, промежуточные
+    крафты, время, верстаки/станки и нужные технологии (с отметкой, изучены ли
+    они у игрока ``uid`` или у клана ``clan_id``)."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    cd = _craft_data(world_dir)
+    if not cd:
+        return {"ok": False, "error": "нет Data\\craft.json"}
+    try:
+        qty = max(1, min(100000, int(qty or 1)))
+    except (TypeError, ValueError):
+        qty = 1
+    slug = str(item or "").strip()
+    if slug not in cd["recipes"] and slug not in cd["machine"]:
+        by_id, by_name = _items_full(world_dir)
+        low = slug.lower()
+        cand = [s for s in list(cd["recipes"]) + list(cd["machine"])
+                if s.lower() == low or item_label(s).lower() == low]
+        if not cand:
+            return {"ok": False, "error": "у «%s» нет рецепта крафта" % slug}
+        slug = cand[0]
+    rec, mach = cd["recipes"], cd["machine"]
+    raw_tot, inter, techs, benches = {}, {}, {}, {}
+    total_time = [0.0]
+
+    def expand(sid, need, path):
+        node = {"id": sid, "name": item_label(sid), "need": need}
+        if sid in rec and sid not in path and len(path) < 14:
+            r = rec[sid]
+            crafts = -(-need // r["count"])
+            node.update(via="craft", crafts=crafts, out=crafts * r["count"],
+                        workbench=item_label(r["workbench"]) if r["workbench"] else "",
+                        tech=r["tech"], time=round(crafts * r["time"], 1))
+            total_time[0] += crafts * r["time"]
+            if r["tech"]:
+                techs[r["tech"]] = techs.get(r["tech"], 0) + crafts
+            if r["workbench"]:
+                benches[r["workbench"]] = True
+            if path:
+                x = inter.setdefault(sid, {"id": sid, "name": item_label(sid), "need": 0, "crafts": 0})
+                x["need"] += need
+                x["crafts"] += crafts
+            node["children"] = [expand(rid, n * crafts, path | {sid}) for rid, n in r["res"]]
+        elif sid in mach and len(path) < 14 and any(m[1] not in path for m in mach[sid]):
+            mid, mat, energy = next(m for m in mach[sid] if m[1] not in path)
+            node.update(via="machine", machine=item_label(mid), energy=energy,
+                        alts=[item_label(m[1]) for m in mach[sid] if m[1] != mat])
+            benches[mid] = True
+            if path:
+                x = inter.setdefault(sid, {"id": sid, "name": item_label(sid), "need": 0, "crafts": 0})
+                x["need"] += need
+            node["children"] = [expand(mat, need, path | {sid})]
+        else:
+            node["via"] = "raw"
+            raw_tot[sid] = raw_tot.get(sid, 0) + need
+        return node
+
+    tree = expand(slug, qty, frozenset())
+    known, who = _who_techs(world_dir, uid, clan_id)
+    meta = tech_meta(world_dir)
+    tech_list = []
+    for tid in techs:
+        # нужна вся цепочка до теха, не только он сам
+        chain, cur, seen = [], tid, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            chain.append(cur)
+            cur = _tech_parent(world_dir, cur)
+        missing = [t for t in chain if known is not None and t not in known]
+        tech_list.append({"id": tid, "label": tech_label(world_dir, tid),
+                          "known": (tid in known) if known is not None else None,
+                          "missing_chain": len(missing),
+                          "missing_h": round(sum((meta.get(t) or {}).get("cost_min") or 0 for t in missing) / 60.0, 1)})
+    tech_list.sort(key=lambda x: (x["known"] is True, x["label"]))
+    return {
+        "ok": True, "item": slug, "name": item_label(slug), "qty": qty, "tree": tree,
+        "raw": sorted(({"id": k, "name": item_label(k), "count": v} for k, v in raw_tot.items()),
+                      key=lambda x: -x["count"]),
+        "intermediate": sorted(inter.values(), key=lambda x: x["name"].lower()),
+        "time_s": round(total_time[0], 1),
+        "benches": sorted(item_label(b) for b in benches),
+        "techs": tech_list, "who": who,
+        "used_in": sorted({item_label(u) for u in cd["uses"].get(slug, [])}),
+    }
+
+
+def _tech_parent(world_dir, tid):
+    p = os.path.join(world_dir, "Data", "tech.json")
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return None
+    hit = _TECH_PARENT_CACHE.get(p)
+    if not hit or hit[0] != mt:
+        hit = (mt, {it["id"]: it.get("parent") for it in (_read_json(p) or {}).get("items", []) if "id" in it})
+        _TECH_PARENT_CACHE[p] = hit
+    return hit[1].get(tid)
+
+
+_TECH_PARENT_CACHE = {}
+
+
+def tech_unlocks(world_dir):
+    """{tech_id: [RU-название предмета, ...]} — что открывает технология (craft.json)."""
+    cd = _craft_data(world_dir) if world_dir else None
+    out = {}
+    for sid, r in (cd or {}).get("recipes", {}).items():
+        if r["tech"]:
+            out.setdefault(r["tech"], []).append(item_label(sid))
+    return out
+
+
+# --- история кланов: панель сама снимает clans.json (у игры истории нет) -----
+def clan_track_scan(cfg, state_path, events_path, points_path, point_every=3600):
+    """Сравнить clans.json с прошлым снимком: события (вступил/ушёл/роль/
+    клан-тех/переименование/создан/распущен) -> ``events_path`` (jsonl);
+    раз в ``point_every`` секунд — точка рейтинга/CP/состава всех кланов ->
+    ``points_path`` (jsonl). -> список новых событий."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir or not os.path.exists(os.path.join(world_dir, "Data", "game", "clans.json")):
+        return []
+    names = load_user_list(world_dir)
+    st = _read_json(state_path) or {}
+    prev = st.get("clans")
+    now = time.time()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = {}
+    for c in _clans_raw(world_dir):
+        cur[str(c.get("id"))] = {
+            "name": c.get("name") or "", "rating": c.get("rating"), "cp": c.get("clanPoint"),
+            "max": c.get("maxUserCount"), "tech": list(c.get("tech") or []),
+            "users": {str(u.get("userId")): u.get("role") for u in c.get("users") or []},
+        }
+    events = []
+
+    def ev(cid, kind, **kw):
+        e = {"ts": ts, "clan": int(cid), "clan_name": (cur.get(cid) or prev.get(cid) or {}).get("name"), "kind": kind}
+        e.update(kw)
+        events.append(e)
+
+    def uname(uid):
+        return names.get(int(uid)) or ("id %s" % uid)
+
+    if prev is not None:
+        for cid, c in cur.items():
+            p = prev.get(cid)
+            if p is None:
+                ev(cid, "created", size=len(c["users"]))
+                continue
+            for uid, role in c["users"].items():
+                if uid not in p["users"]:
+                    ev(cid, "joined", uid=int(uid), name=uname(uid))
+                elif p["users"][uid] != role:
+                    ev(cid, "role", uid=int(uid), name=uname(uid), role=_CLAN_ROLES_RU.get(role, role),
+                       was=_CLAN_ROLES_RU.get(p["users"][uid], p["users"][uid]))
+            for uid in p["users"]:
+                if uid not in c["users"]:
+                    ev(cid, "left", uid=int(uid), name=uname(uid))
+            for t in c["tech"]:
+                if t not in p["tech"]:
+                    ev(cid, "tech", tech=t, label=tech_label(world_dir, t))
+            if c["name"] != p["name"]:
+                ev(cid, "renamed", was=p["name"])
+            if (c["max"] or 0) > (p.get("max") or 0):
+                ev(cid, "slots", max=c["max"], was=p.get("max"))
+        for cid in prev:
+            if cid not in cur:
+                ev(cid, "disbanded")
+    last_point = float(st.get("last_point") or 0)
+    write_point = now - last_point >= point_every
+    try:
+        if events:
+            os.makedirs(os.path.dirname(events_path), exist_ok=True)
+            with io.open(events_path, "a", encoding="utf-8") as f:
+                for e in events:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            _rotate(events_path, 3_000_000)
+        if write_point:
+            os.makedirs(os.path.dirname(points_path), exist_ok=True)
+            pt = {"ts": ts, "t": int(now), "c": {cid: [c["rating"], c["cp"], len(c["users"])]
+                                                 for cid, c in cur.items()}}
+            with io.open(points_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(pt, ensure_ascii=False, separators=(",", ":")) + "\n")
+            _rotate(points_path, 5_000_000)
+            last_point = now
+        tmp = state_path + ".swtmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"updated": ts, "last_point": last_point, "clans": cur}, f,
+                      ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, state_path)
+    except OSError:
+        logging.exception("clan_track: запись")
+    return events
+
+
+def clan_history(cfg, cid, events_path, points_path, days=60):
+    """Графики рейтинга/CP/состава клана + журнал событий по нему."""
+    try:
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad id"}
+    since = time.time() - max(1, int(days or 60)) * 86400
+    series = []
+    for ln in _read_text(points_path, tail_bytes=4_000_000).splitlines():
+        try:
+            p = json.loads(ln)
+        except ValueError:
+            continue
+        v = (p.get("c") or {}).get(str(cid))
+        if v and p.get("t", 0) >= since:
+            series.append({"t": p["t"], "rating": v[0], "cp": v[1], "size": v[2]})
+    events = []
+    for ln in _read_text(events_path, tail_bytes=2_000_000).splitlines():
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if e.get("clan") == cid:
+            events.append(e)
+    return {"ok": True, "series": series, "events": events[-300:][::-1]}
+
+
+# --- торговля: терминалы игроков (terminals.dt2) + магазины на картах (.dt) ----
+_SHOPS_CACHE = {}  # map path -> (mtime, [shop])
+
+
+def _shops_all(world_dir):
+    md = os.path.join(world_dir, "Data", "maps")
+    out = []
+    try:
+        files = sorted(os.listdir(md))
+    except OSError:
+        return out
+    for f in files:
+        m = re.match(r"map(\d+)\.dt$", f)
+        if not m:
+            continue
+        fp = os.path.join(md, f)
+        try:
+            mt = os.path.getmtime(fp)
+        except OSError:
+            continue
+        hit = _SHOPS_CACHE.get(fp)
+        if not hit or hit[0] != mt:
+            d = mapdt.parse(fp, world_dir=world_dir, list_shops=True)
+            hit = (mt, [dict(s, map=int(m.group(1))) for s in (d.get("shops") or [])] if d.get("ok") else [])
+            _SHOPS_CACHE[fp] = hit
+        out.extend(hit[1])
+    return out
+
+
+def trade_report(cfg):
+    """Все торговые предложения сервера: терминалы игроков (лот: отдаёт → хочет)
+    и магазины на картах (слот: товар → цена). Первый проход по картам долгий
+    (десятки секунд на больших мирах), дальше — кэш по mtime каждой карты."""
+    if mapdt is None:
+        return {"ok": False, "error": "модуль mapdt недоступен"}
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    t0 = time.time()
+    names = load_user_list(world_dir)
+    items = load_items(world_dir)
+    st = server_time(world_dir)
+    online = _online_now(world_dir)
+    clan_of = {u.get("userId"): c.get("name") for c in _clans_raw(world_dir) for u in c.get("users") or []}
+
+    def it(x):
+        slug = items.get(x["type"])
+        return {"id": x["type"], "name": item_label(slug) if slug else ("#%s" % x["type"]), "count": x["count"]}
+
+    def who(uid):
+        return {"id": uid, "name": names.get(uid) or ("id %s" % uid), "online": bool(online.get(uid)),
+                "clan": clan_of.get(uid) or ""}
+
+    offers, terminals, shops = [], [], []
+    tp = os.path.join(world_dir, "Data", "game", "terminals.dt2")
+    if os.path.exists(tp):
+        td = mapdt.parse_terminals(tp, world_dir)
+        for t in (td.get("terminals") or []) if td.get("ok") else []:
+            row = {"owner": who(t["user_id"]), "sales": t["sales"], "lots": len(t["lots"]),
+                   "idle_h": round((st - t["last_time"]) / 3600.0, 1) if st and t.get("last_time") else None,
+                   "storage": [it(x) for x in t["storage"]]}
+            terminals.append(row)
+            for lot in t["lots"]:
+                offers.append({"src": "terminal", "owner": row["owner"], "where": "",
+                               "give": [it(x) for x in lot["items"]], "want": [it(x) for x in lot["cost"]]})
+    for s in _shops_all(world_dir):
+        row = {"owner": who(s.get("owner") or 0), "map": s["map"], "x": s["x"], "y": s["y"],
+               "sales": s["sales"], "slots": len(s["goods"]), "storage": [it(x) for x in s["storage"]]}
+        shops.append(row)
+        for i, g in enumerate(s["goods"]):
+            if not g.get("count"):
+                continue
+            pr = s["price"][i] if i < len(s["price"]) else None
+            offers.append({"src": "shop", "owner": row["owner"], "where": "map %d @ %d,%d" % (s["map"], s["x"], s["y"]),
+                           "give": [it(g)], "want": [it(pr)] if pr else []})
+    # цена за единицу — только для простых лотов «1 товар за 1 вид оплаты»
+    for o in offers:
+        if len(o["give"]) == 1 and len(o["want"]) == 1 and o["give"][0]["count"]:
+            o["unit"] = round(o["want"][0]["count"] / float(o["give"][0]["count"]), 4)
+    terminals.sort(key=lambda x: -x["sales"])
+    shops.sort(key=lambda x: -x["sales"])
+    return {"ok": True, "offers": offers, "terminals": terminals, "shops": shops,
+            "scan_sec": round(time.time() - t0, 1)}
 
 
 # --- человеко-читаемые подписи к блокам/абилкам ------------------------------
