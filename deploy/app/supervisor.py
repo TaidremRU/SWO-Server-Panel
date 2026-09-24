@@ -74,7 +74,7 @@ def main():
             try:
                 from playerweb import PlayerWeb
 
-                pweb = PlayerWeb(cfg, state)
+                pweb = PlayerWeb(cfg, state, web=web)
                 pweb.start()
             except Exception:  # noqa: BLE001
                 logging.exception("supervisor: панель игроков не запустилась (продолжаю без неё)")

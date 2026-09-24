@@ -94,6 +94,8 @@ SETTINGS_SCHEMA = [
         ("playerweb.allowed_nets", "Разрешённые адреса", "Allowed addresses", "strlist",
          "пусто = пускать всех; для интернета — только через прокси с HTTPS"),
         ("playerweb.title", "Название", "Title", "str", "пусто = как у админ-панели"),
+        ("playerweb.admin_proxy", "Админка через панель игроков", "Admin panel via player panel", "bool",
+         "кнопка «Админка» у игроков с ролью в игре (модератор/админ/мастер) и /admin/ на порту панели игроков; вход — по отдельному админскому паролю"),
     ]),
     ("watchdog", "Watchdog", "Watchdog", [
         ("watchdog.enabled", "Включён", "Enabled", "bool", ""),
@@ -294,7 +296,8 @@ class AuthStore:
 
     def users(self):
         return [{"name": n, "role": self.role_of(n), "must_change": bool(u.get("must_change")),
-                 "updated": u.get("updated")} for n, u in sorted(self.d["users"].items())]
+                 "updated": u.get("updated"), "game_uid": u.get("game_uid"), "nick": u.get("nick")}
+                for n, u in sorted(self.d["users"].items())]
 
     def _admins(self):
         return [n for n in self.d["users"] if self.role_of(n) == "admin"]
@@ -350,6 +353,26 @@ class AuthStore:
                 raise _Bad("нельзя удалить последнего админа")
             self.d["users"].pop(name)
             self._save()
+
+    def game_uid_of(self, user):
+        u = self._u(user)
+        return u.get("game_uid") if u else None
+
+    def user_for_game(self, uid):
+        return next((n for n, u in self.d["users"].items() if u.get("game_uid") == int(uid)), None)
+
+    def add_game_user(self, uid, nick, pw, role):
+        """Пользователь панели, привязанный к игроку (вход — из панели игроков).
+        Логин — ник, если подходит, иначе player<uid>. -> логин."""
+        with self._lock:
+            name = nick if _NAME_RX.match(nick or "") and nick not in self.d["users"] else "player%d" % int(uid)
+            if name in self.d["users"]:
+                name = "player%d_%s" % (int(uid), secrets.token_hex(2))
+            u = self._make(pw, role, False)
+            u.update(game_uid=int(uid), nick=nick)
+            self.d["users"][name] = u
+            self._save()
+            return name
 
     def reset(self):
         """Сброс входа admin/admin + must_change (забытый пароль, без доступа к RDP) —
@@ -746,6 +769,59 @@ class WebUI:
             self._nets_key = raw
         return self._nets
 
+    # ------------------------------------------------- вход игроков-стаффа (порт 80)
+    # роль в игре (user<N>.json "role": 0 игрок, 1 модератор, 2 админ, 3 мастер) -> роль панели
+    GAME_ROLE_PANEL = {1: "moderator", 2: "admin", 3: "admin"}
+
+    def game_panel_role(self, uid):
+        """Какая роль панели положена игроку по его роли в игре (None — никакая)."""
+        wd = players.find_world_dir(self.cfg)
+        raw = players._read_json(players._user_file(wd, int(uid))) if wd else {}
+        try:
+            return self.GAME_ROLE_PANEL.get(int(raw.get("role") or 0))
+        except (TypeError, ValueError):
+            return None
+
+    def _effective_role(self, user):
+        """Роль пользователя панели; у привязанных к игроку — не выше роли в игре
+        (перепроверка раз в минуту), без роли в игре — None."""
+        role = self.auth.role_of(user)
+        uid = self.auth.game_uid_of(user)
+        if role is None or uid is None:
+            return role
+        cache = getattr(self, "_grole", {})
+        hit = cache.get(uid)
+        if not hit or time.time() - hit[0] > 60:
+            hit = (time.time(), self.game_panel_role(uid))
+            cache[uid] = hit
+            self._grole = cache
+        g = hit[1]
+        if not g:
+            return None
+        return role if ROLE_LEVEL[role] <= ROLE_LEVEL[g] else g
+
+    def enter_as_game_user(self, h, uid, nick, password, new_password, ip):
+        """Вход в админку из панели игроков. Первый раз — задать отдельный админский
+        пароль (не игровой), дальше — вход по нему. -> (status, dict, set_cookie|None)."""
+        role = self.game_panel_role(uid)
+        if not role:
+            return 403, {"error": "forbidden"}, None
+        user = self.auth.user_for_game(uid)
+        if user is None:
+            if not new_password:
+                return 200, {"ok": False, "need_setup": True}, None
+            code = players.player_code(self.cfg, uid) or ""
+            if len(new_password) < 8 or new_password == code or new_password.lower() in (nick.lower(), "admin", "password"):
+                return 400, {"error": "weak", "detail": "не короче 8 символов, не игровой пароль и не ник"}, None
+            user = self.auth.add_game_user(uid, nick, new_password, role)
+            self.audit(ip, user, "ПРИВЯЗКА игрока #%s (%s) к панели, роль %s" % (uid, nick, role))
+        elif not self.auth.verify(user, password or ""):
+            self.audit(ip, user, "НЕВЕРНЫЙ админский пароль (вход из панели игроков)")
+            return 403, {"error": "bad_password"}, None
+        tok, csrf = self.sessions.new(user, ip)
+        self.audit(ip, user, "вход в панель из панели игроков")
+        return 200, {"ok": True, "url": "/admin/"}, "sid=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (tok, SESSION_TTL)
+
     # ------------------------------------------------------------ права по ролям
     # viewer — просмотр; moderator — + как в Telegram (скриншот, перезапуск игры,
     # вход) и бан/разбан, нарушения, твинки; admin — всё. Не указанный POST —
@@ -782,9 +858,19 @@ class WebUI:
             return 3
         return 1
 
-    def dispatch(self, h, method):
+    def _proxied_page(self):
+        """Та же страница, но с адресами под /admin/ (панель игроков отдаёт админку
+        на своём порту, см. playerweb.admin_proxy)."""
+        if getattr(self, "_ppage", None) is None:
+            self._ppage = (PAGE.replace('"/api/', '"/admin/api/').replace('"/favicon.ico', '"/admin/favicon.ico'))
+        return self._ppage
+
+    def dispatch(self, h, method, prefix=""):
+        """``prefix="/admin"`` — запрос пришёл через панель игроков (порт 80): путь
+        уже без префикса, webui.allowed_nets не применяется (адреса отсекает сама
+        панель игроков по playerweb.allowed_nets), вход — как обычно, по паролю."""
         ip = h.client_address[0]
-        if not _ip_allowed(ip, self._allowed_nets()):
+        if not prefix and not _ip_allowed(ip, self._allowed_nets()):
             now = time.time()
             seen = getattr(self, "_denied_log", {})
             if now - seen.get(ip, 0) > 600:          # не спамить лог на каждый запрос
@@ -800,7 +886,7 @@ class WebUI:
             path, _, qs = h.path.partition("?")
             q = urllib.parse.parse_qs(qs)
             if path in ("/", "/index.html") and method == "GET":
-                return self._send(h, 200, "text/html; charset=utf-8", PAGE,
+                return self._send(h, 200, "text/html; charset=utf-8", self._proxied_page() if prefix else PAGE,
                                   {"Cache-Control": "no-store"})
             if path == "/favicon.ico":
                 return self._send_favicon(h)
@@ -836,7 +922,10 @@ class WebUI:
             if self.auth.must_change_of(sess["user"]):
                 return self._json(h, {"error": "must_change"}, 403)
 
-            role = self.auth.role_of(sess["user"])
+            role = self._effective_role(sess["user"])
+            if not role:        # игроку сняли роль в игре — админка больше недоступна
+                self.sessions.drop(tok)
+                return self._json(h, {"error": "auth"}, 401)
             need = self._need_level(route, method, q)
             if ROLE_LEVEL.get(role, 0) < need:
                 return self._json(h, {"error": "forbidden", "role": role}, 403)
@@ -956,7 +1045,7 @@ class WebUI:
                "langs": list(i18n.SUPPORTED)}
         if sess:
             out.update(username=sess["user"], csrf=sess["csrf"], must_change=self.auth.must_change_of(sess["user"]),
-                       role=self.auth.role_of(sess["user"]))
+                       role=self._effective_role(sess["user"]) or self.auth.role_of(sess["user"]))
         return self._json(h, out)
 
     def _api_login(self, h):

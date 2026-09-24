@@ -157,9 +157,10 @@ def _tr(obj, key=None):
 
 
 class PlayerWeb:
-    def __init__(self, cfg, state, ct_events=None, ct_points=None, tt_log=None):
+    def __init__(self, cfg, state, ct_events=None, ct_points=None, tt_log=None, web=None):
         self.cfg = cfg
         self.state = state
+        self.web = web               # админ-панель (WebUI) — для входа стаффа и /admin/ на этом порту
         base = cfg.get("base_dir") or os.path.dirname(os.path.abspath(__file__))
         self._base = base
         self._ct_events = ct_events or os.path.join(base, "logs", "clan_events.jsonl")
@@ -436,6 +437,13 @@ class PlayerWeb:
             if path in ("/", "/index.html") and method == "GET":
                 return self._send(h, 200, "text/html; charset=utf-8",
                                   PAGE.replace("__TITLE__", html.escape(self._title())), {"Cache-Control": "no-store"})
+            if path == "/admin" or path.startswith("/admin/"):
+                if not (self.web and self._pcfg().get("admin_proxy")):
+                    return self._send(h, 404, "text/plain; charset=utf-8", "not found")
+                if path == "/admin":
+                    return self._send(h, 302, "text/plain", "", {"Location": "/admin/"})
+                h.path = h.path[len("/admin"):]
+                return self.web.dispatch(h, method, prefix="/admin")
             if path == "/favicon.ico":
                 p = os.path.join(self._base, "favicon.img")
                 if os.path.exists(p):
@@ -452,9 +460,15 @@ class PlayerWeb:
                 return self._json(h, {"error": "csrf"}, 403)
             if route == "session" and method == "GET":
                 tok, s = self._session(h)
-                return self._json(h, {"authed": bool(s), "nick": s["nick"] if s else "", "title": self._title()})
+                return self._json(h, {"authed": bool(s), "nick": s["nick"] if s else "", "title": self._title(),
+                                      "staff": self._staff(s["uid"]) if s else None})
             if route == "login" and method == "POST":
                 return self._api_login(h)
+            if route == "admin-enter" and method == "POST":
+                tok, s = self._session(h)
+                if not s:
+                    return self._json(h, {"error": "auth"}, 401)
+                return self._api_admin_enter(h, s)
             tok, s = self._session(h)
             if not s:
                 return self._json(h, {"error": "auth"}, 401)
@@ -532,6 +546,37 @@ class PlayerWeb:
         if remember:
             cookie += "; Max-Age=%d" % REMEMBER_TTL
         return self._json(h, {"ok": True, "nick": nick}, set_cookie=cookie)
+
+    # ------------------------------------------------------------ вход в админку
+    def _staff(self, uid):
+        """Игрок с ролью выше обычной -> кнопка «Админка» (если включён /admin/ на этом порту)."""
+        if not (self.web and self._pcfg().get("admin_proxy")):
+            return None
+        role = self.web.game_panel_role(uid)
+        if not role:
+            return None
+        return {"role": role, "linked": self.web.auth.user_for_game(uid) is not None}
+
+    def _api_admin_enter(self, h, s):
+        """Вход в админку по ОТДЕЛЬНОМУ админскому паролю (первый раз — задать его)."""
+        if not (self.web and self._pcfg().get("admin_proxy")):
+            return self._json(h, {"error": "unknown"}, 404)
+        ip = h.client_address[0]
+        key = "a:%s" % s["uid"]
+        for thr, k in ((self.throttle, ip), (self.nick_throttle, key)):
+            ok, wait = thr.check(k)
+            if not ok:
+                return self._json(h, {"error": "throttled", "retry": wait}, 429)
+        b = self._body(h)
+        st, d, cookie = self.web.enter_as_game_user(h, s["uid"], s["nick"], str(b.get("password") or ""),
+                                                   str(b.get("new_password") or ""), ip)
+        if d.get("error") == "bad_password":
+            self.throttle.fail(ip)
+            self.nick_throttle.fail(key)
+        elif d.get("ok"):
+            self.throttle.ok(ip)
+            self.nick_throttle.ok(key)
+        return self._json(h, d, st, set_cookie=cookie)
 
     # --------------------------------------------------------------------- api
     def _api_me(self, uid, q):
@@ -1119,7 +1164,7 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 </style>
 </head>
 <body>
-<header><h1 id="ttl">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="lang" type="button" title="Русский / English"></button></header>
+<header><h1 id="ttl">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="admbtn" type="button" style="display:none"></button><button id="lang" type="button" title="Русский / English"></button></header>
 <nav id="nav" style="display:none"></nav>
 <main id="main"></main>
 <script>
@@ -1129,6 +1174,17 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Админка":"Admin",
+  "Новый админский пароль (от 8 символов)":"New admin password (8+ chars)",
+  "Админский пароль":"Admin password",
+  "Повторите пароль":"Repeat password",
+  "Пароли не совпадают":"Passwords do not match",
+  "Неверный админский пароль":"Wrong admin password",
+  "Пароль: не короче 8 символов, не игровой и не ник":"Password: 8+ chars, not your game password and not your nickname",
+  "Админ-панель":"Admin panel",
+  "Задайте отдельный админский пароль — не такой, как в игре. Он понадобится при каждом входе в админку.":"Set a separate admin password — different from your game one. You will need it every time you enter the admin panel.",
+  "Введите ваш админский пароль (не игровой).":"Enter your admin password (not the game one).",
+  "Отмена":"Cancel",
   "Сундуки":"Chests",
   "Мои сундуки":"My chests",
   "Найти предмет в сундуках":"Find an item in chests",
@@ -1482,8 +1538,30 @@ function itemBtn(id,name,n,onclick,title){
 function goBook(id){ try{ localStorage.setItem("swp_book",id); }catch(e){} S.tab="book"; render(); window.scrollTo(0,0); }
 function goCraft(id){ try{ localStorage.setItem("swp_craft_go",id); }catch(e){} S.tab="craft"; render(); window.scrollTo(0,0); }
 function withIco(key,label,size){ var i=ico(key,size); return i? el("span",{class:"iname"},[i,label]) : label; }
+// ---- вход в админку для стаффа: отдельный админский пароль (первый раз — задать)
+function openAdminEnter(){
+  var first=!(S.staff&&S.staff.linked);
+  var p1=el("input",{type:"password",autocomplete:first?"new-password":"current-password",placeholder:first?L("Новый админский пароль (от 8 символов)"):L("Админский пароль"),style:"width:100%;margin-bottom:8px"});
+  var p2=first? el("input",{type:"password",autocomplete:"new-password",placeholder:L("Повторите пароль"),style:"width:100%;margin-bottom:8px"}) : null;
+  var msg=el("div",{class:"msg err",style:"display:none;margin-top:8px"});
+  var bg=el("div",{style:"position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;display:flex;align-items:center;justify-content:center;padding:16px"});
+  function close(){ bg.remove(); }
+  function go(ev){ ev.preventDefault(); msg.style.display="none";
+    if(first&&p1.value!==p2.value){ msg.textContent=L("Пароли не совпадают"); msg.style.display=""; return; }
+    api("/api/admin-enter", first? {new_password:p1.value} : {password:p1.value}).then(function(d){
+      if(d.ok){ location.href=d.url||"/admin/"; return; }
+      if(d.need_setup){ S.staff.linked=false; close(); openAdminEnter(); } })
+      .catch(function(e){ msg.textContent= e.error==="bad_password"? L("Неверный админский пароль") : e.error==="weak"? L("Пароль: не короче 8 символов, не игровой и не ник") : errText(e)+(e.retry? " ("+e.retry+L(" с)"):""); msg.style.display=""; }); }
+  var form=el("form",{class:"card",style:"max-width:380px;width:100%",onsubmit:go},[
+    el("h3",{},[L("Админ-панель")]),
+    el("p",{class:"muted small"},[first? L("Задайте отдельный админский пароль — не такой, как в игре. Он понадобится при каждом входе в админку.") : L("Введите ваш админский пароль (не игровой).")]),
+    p1, p2, el("div",{class:"row"},[el("button",{class:"pri",type:"submit"},[L("Войти")]), el("button",{type:"button",onclick:close},[L("Отмена")])]), msg]);
+  bg.addEventListener("click",function(e){ if(e.target===bg) close(); });
+  bg.appendChild(form); document.body.appendChild(bg); p1.focus();
+}
 function setLang(v){ try{ localStorage.setItem("swp_lang",v); }catch(e){} location.reload(); }
 function render(){
+  var ab=$("#admbtn"); if(ab){ ab.style.display=(S.nick&&S.staff)?"":"none"; ab.textContent=L("Админка"); ab.onclick=openAdminEnter; }
   var lb=$("#lang"); if(lb){ lb.textContent=LANG==="en"? "RU" : "EN"; lb.onclick=function(){ setLang(LANG==="en"? "ru" : "en"); }; }
   if(S.nick && ICONS===null){ ICONS={none:true};
     api("/api/item-icons").then(function(d){ ICONS=d; if(!d.none) render(); }).catch(function(){}); }
@@ -1975,7 +2053,7 @@ function tabServer(m){
   });
 }
 
-api("/api/session").then(function(d){ S.nick=d.authed? d.nick:""; if(d.title) document.title=d.title; render(); })
+api("/api/session").then(function(d){ S.nick=d.authed? d.nick:""; S.staff=d.staff||null; if(d.title) document.title=d.title; render(); })
   .catch(function(){ render(); });
 </script>
 </body>
