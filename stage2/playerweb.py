@@ -337,7 +337,8 @@ class PlayerWeb:
                 return self._json(h, {"error": "unknown"}, 404)
             d = fn(s["uid"], q)
             if isinstance(d, (bytes, bytearray)):
-                return self._send(h, 200, "image/png", bytes(d), {"Cache-Control": "private, max-age=60"})
+                ttl = 86400 if route == "item-icons-png" else 60
+                return self._send(h, 200, "image/png", bytes(d), {"Cache-Control": "private, max-age=%d" % ttl})
             return self._json(h, d, 200 if d.get("ok") else 404)
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: %s %s", method, getattr(h, "path", "?"))
@@ -541,6 +542,36 @@ class PlayerWeb:
                 "terminals": [strip(t) for t in self._trade_own["terminals"] if t["owner_id"] == uid],
                 "shops": [strip(sh) for sh in self._trade_own["shops"] if sh["owner_id"] == uid],
                 "offers": [{k: v for k, v in o.items() if k != "owner_id"} for o in mine]}
+
+    # ------------------------------------------------------------ иконки предметов
+    def _icons(self):
+        """Атлас иконок (``build_item_icons.py`` → item_icons.png/.json в base_dir).
+        Графика игры в репозиторий не кладётся — нет файлов, нет и иконок."""
+        pj = os.path.join(self._base, "item_icons.json")
+        try:
+            mt = os.path.getmtime(pj)
+        except OSError:
+            return None
+        hit = self._cache.get("icons")
+        if hit and hit[0] == mt:
+            return hit[1]
+        d = players._read_json(pj) or {}
+        # подписи на русском -> slug: многие ответы API отдают предметы по имени
+        d["label"] = {players.item_label(k): k for k in d.get("idx") or {}}
+        d["ok"] = True
+        d["v"] = int(mt)      # версия в URL картинки: пересобрали атлас — браузер не возьмёт старый из кэша
+        self._cache["icons"] = (mt, d)
+        return d
+
+    def _api_item_icons(self, uid, q):
+        return self._icons() or {"ok": True, "none": True}
+
+    def _api_item_icons_png(self, uid, q):
+        try:
+            with open(os.path.join(self._base, "item_icons.png"), "rb") as f:
+                return f.read()
+        except OSError:
+            return {"ok": False, "error": "нет атласа иконок"}
 
     # ------------------------------------------------------------------ история
     def _api_history(self, uid, q):
@@ -884,6 +915,8 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .card.fill{display:flex;flex-direction:column}
 .card.fill>.grow{flex:1 1 0;min-height:80px;max-height:none;overflow:auto;align-content:flex-start}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ico{display:inline-block;flex:0 0 auto;background-repeat:no-repeat;vertical-align:middle}
+.iname{display:inline-flex;align-items:center;gap:6px}
 @media (max-width:600px){main{padding:10px}
   nav{flex-wrap:nowrap;overflow-x:auto;padding:6px 10px;scrollbar-width:none} nav::-webkit-scrollbar{display:none}
   nav button{flex:0 0 auto} header{padding:8px 10px}}
@@ -941,7 +974,20 @@ function renderLogin(){
 
 // ---------------------------------------------------------------- каркас
 var TABS=[["me","Профиль"],["hist","История"],["tech","Изучение"],["craft","Крафт"],["book","Справочник"],["market","Рынок"],["map","Карта"],["clan","Клан"],["chat","Чат"],["server","Сервер"]];
+// иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
+var ICONS=null;
+function ico(key,size){
+  if(!ICONS||ICONS.none||!key) return null;
+  var slug=(ICONS.idx[key]!=null)? key : ICONS.label[key], i=ICONS.idx[slug];
+  if(i==null) return null;
+  size=size||20;
+  return el("span",{class:"ico",style:"background-image:url(/api/item-icons-png?v="+ICONS.v+");width:"+size+"px;height:"+size+"px;background-position:-"+((i%ICONS.cols)*size)+"px -"+(Math.floor(i/ICONS.cols)*size)+"px;"
+    +"background-size:"+(ICONS.cols*size)+"px auto"});
+}
+function withIco(key,label,size){ var i=ico(key,size); return i? el("span",{class:"iname"},[i,label]) : label; }
 function render(){
+  if(S.nick && ICONS===null){ ICONS={none:true};
+    api("/api/item-icons").then(function(d){ ICONS=d; if(!d.none) render(); }).catch(function(){}); }
   var m=$("#main"), nav=$("#nav"), who=$("#who"); m.innerHTML=""; nav.innerHTML=""; who.innerHTML="";
   if(!S.nick){ nav.style.display="none"; return renderLogin(); }
   nav.style.display="";
@@ -957,7 +1003,7 @@ var PARAM={0:"Энергия",1:"Сытость",2:"Здоровье",3:"Мет�
   7:"Генетика A",8:"Генетика B",9:"Генетика C",10:"Генетика D",11:"Кислород",12:"Очки генетики"};
 var LPARAM={0:"Опыт",1:"Уровень",2:"Очки распределения"};
 function invTable(rows){ if(!rows||!rows.length) return el("div",{class:"muted"},["пусто"]);
-  return el("div",{class:"scroll"},[table(["Предмет","Кол-во","Прочность"],rows,function(r){ return [r.name, r.count, r.durability==null?"":r.durability]; })]); }
+  return el("div",{class:"scroll"},[table(["Предмет","Кол-во","Прочность"],rows,function(r){ return [withIco(r.name,r.name,24), r.count, r.durability==null?"":r.durability]; })]); }
 function tabMe(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/me",function(d){
@@ -1075,13 +1121,14 @@ function tabCraft(m){
       if(!d.ok){ plan.appendChild(errBox(d)); return; }
       var out=[el("div",{class:"muted small"},["Время крафта: "+Math.round(d.time_s)+" с"+(d.benches.length?" · нужно: "+d.benches.join(", "):"")])];
       out.push(el("h3",{style:"margin-top:10px"},["Сырьё"]));
-      out.push(table(["Ресурс","Нужно"],d.raw,function(r){ return [r.name,r.count]; }));
+      out.push(table(["Ресурс","Нужно"],d.raw,function(r){ return [withIco(r.id,r.name),r.count]; }));
       if(d.intermediate.length){ out.push(el("h3",{style:"margin-top:10px"},["Промежуточное"]));
-        out.push(table(["Предмет","Нужно","Крафтов"],d.intermediate,function(r){ return [r.name,r.need,r.crafts||""]; })); }
+        out.push(table(["Предмет","Нужно","Крафтов"],d.intermediate,function(r){ return [withIco(r.id,r.name),r.need,r.crafts||""]; })); }
       if(d.techs.length){ out.push(el("h3",{style:"margin-top:10px"},["Технологии"]));
         out.push(table(["Технология","У меня"],d.techs,function(x){ return [x.label, x.known? el("span",{class:"pill ok"},["изучено"])
           : el("span",{class:"pill warn"},["нет · ещё "+x.missing_chain+" шаг(ов), ~"+x.missing_h+" ч"])]; })); }
-      plan.appendChild(card(d.name+" × "+d.qty,out));
+      var c=card(d.name+" × "+d.qty,out), ic=ico(d.item,32); if(ic){ ic.style.marginRight="8px"; c.firstChild.insertBefore(ic,c.firstChild.firstChild); }
+      plan.appendChild(c);
     });
   }
   m.appendChild(card("Раскладка до сырья",[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},["Посчитать"])]),
@@ -1090,6 +1137,8 @@ function tabCraft(m){
 
 // ---------------------------------------------------------------- рынок
 function fmtItems(a){ return (a||[]).map(function(x){ return x.name+" ×"+x.count; }).join(", ")||"—"; }
+function itemsEl(a){ if(!a||!a.length) return "—";
+  return el("span",{style:"display:inline-flex;flex-wrap:wrap;gap:4px 10px"},a.map(function(x){ return withIco(x.name,x.name+" ×"+x.count,18); })); }
 function median(a){ a=a.slice().sort(function(x,y){ return x-y; }); var n=a.length; return n? (n%2? a[(n-1)/2] : (a[n/2-1]+a[n/2])/2) : null; }
 function num(v){ return v==null? "" : (v>=100? Math.round(v).toLocaleString("ru") : String(Math.round(v*100)/100)); }
 // курс простого лота: «N валюты за 1 шт», а если товар дешёвый — «1 валюты = N шт»
@@ -1116,13 +1165,13 @@ function tabMarket(m){
         var k=r.side+"|"+r.item+"|"+r.cur; (g[k]=g[k]||{item:r.item,cur:r.cur,side:r.side,u:[]}).u.push(r.p); });
       var ps=Object.keys(g).map(function(k){ return g[k]; }).sort(function(a,b){ return b.u.length-a.u.length; });
       if(ps.length) sum.appendChild(card("Цена за 1 шт",[table(["Товар","Сделка","Платят","Мин","Медиана","Макс","Лотов"],ps,function(x){
-        return [x.item,x.side,x.cur,num(Math.min.apply(null,x.u)),num(median(x.u)),num(Math.max.apply(null,x.u)),x.u.length]; })]));
+        return [withIco(x.item,x.item,18),x.side,withIco(x.cur,x.cur,18),num(Math.min.apply(null,x.u)),num(median(x.u)),num(Math.max.apply(null,x.u)),x.u.length]; })]));
     }
     rows.sort(function(a,b){ return (a.unit==null)-(b.unit==null) || (a.unit||0)-(b.unit||0); });
     var shown=rows.slice(0,300);
     list.appendChild(card("Предложения ("+rows.length+(rows.length>shown.length?", показаны первые "+shown.length:"")+")",[
       rows.length? el("div",{class:"scroll",style:"max-height:600px"},[table(["Отдаёт","Просит","Курс","Продавец","Где"],shown,function(o){
-        return [fmtItems(o.give),fmtItems(o.want),rate(o),
+        return [itemsEl(o.give),itemsEl(o.want),rate(o),
           el("span",{},[o.owner+(o.clan?" ["+o.clan+"]":""), o.mine? el("span",{class:"pill ok",style:"margin-left:6px"},["моё"]):null]), o.where]; })])
       : el("div",{class:"muted"},[t? "ничего не нашлось" : "предложений нет"])]));
   }
@@ -1142,11 +1191,11 @@ function tabMarket(m){
     var k=[];
     d.terminals.forEach(function(t){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Терминал"]),
       el("span",{class:"muted"},["  · лотов "+t.lots+" · продаж "+t.sales+(t.idle_h!=null?" · не заходил "+t.idle_h+" ч":"")]),
-      el("div",{class:"small"},["На складе терминала: "+fmtItems(t.storage)])])); });
+      el("div",{class:"small"},["На складе терминала: ",itemsEl(t.storage)])])); });
     d.shops.forEach(function(sh){ k.push(el("div",{style:"margin-bottom:8px"},[el("b",{},["Магазин · "+sh.where]),
       el("span",{class:"muted"},["  · слотов "+sh.slots+" · продаж "+sh.sales]),
-      el("div",{class:"small"},["Выручка: "+fmtItems(sh.storage)])])); });
-    if(d.offers.length) k.push(el("div",{class:"scroll",style:"max-height:260px"},[table(["Отдаю","Прошу","Курс","Где"],d.offers,function(o){ return [fmtItems(o.give),fmtItems(o.want),rate(o),o.where]; })]));
+      el("div",{class:"small"},["Выручка: ",itemsEl(sh.storage)])])); });
+    if(d.offers.length) k.push(el("div",{class:"scroll",style:"max-height:260px"},[table(["Отдаю","Прошу","Курс","Где"],d.offers,function(o){ return [itemsEl(o.give),itemsEl(o.want),rate(o),o.where]; })]));
     own.appendChild(card("Моя торговля",k));
   }).catch(function(){});
   m.appendChild(sum); m.appendChild(list); fetchM();
@@ -1258,7 +1307,8 @@ function tabBook(m){
     load(out,"/api/handbook?item="+encodeURIComponent(id),function(d){
       if(!d.ok){ out.appendChild(errBox(d)); return; }
       inp.value=d.name;
-      function lnk(x){ return el("a",{href:"#",onclick:function(e){ e.preventDefault(); open(x.id); }},[x.name]); }
+      function lnk(x){ var a=el("a",{href:"#",onclick:function(e){ e.preventDefault(); open(x.id); }},[x.name]), i=ico(x.id,18);
+        return i? el("span",{class:"iname"},[i,a]) : a; }
       function list(a){ var w=el("span"); a.forEach(function(x,i){ if(i) w.appendChild(document.createTextNode(", ")); w.appendChild(x); }); return w; }
       var k=[];
       if(d.flags.length) k.push(el("div",{class:"chips",style:"margin-bottom:8px"},d.flags.map(function(f){ return el("span",{class:"chip"},[f]); })));
@@ -1274,6 +1324,7 @@ function tabBook(m){
         k.push(el("div",{class:"scroll",style:"max-height:200px"},[list(d.used_in.map(lnk))])); }
       if(d.on_market) k.push(el("div",{class:"small",style:"margin-top:12px"},["На рынке: продают — "+d.on_market.sell+" лот(ов), просят взамен — "+d.on_market.buy+" ",
         el("a",{href:"#",onclick:function(e){ e.preventDefault(); try{ localStorage.setItem("swp_mq",d.name); }catch(_){} S.tab="market"; render(); }},["открыть на рынке"])]));
+      var big=ico(d.id,64); if(big) k.unshift(el("div",{style:"margin-bottom:8px"},[big]));
       out.appendChild(card(d.name,k));
     }); }
   api("/api/handbook").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});

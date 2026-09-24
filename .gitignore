@@ -23,6 +23,8 @@ inv_track_state.json
 webui_auth.json
 playerweb_remember.json
 playerweb_explored.json
+item_icons.png
+item_icons.json
 webui_audit.log
 webui_auth_selftest.json
 
