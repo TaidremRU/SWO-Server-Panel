@@ -1914,12 +1914,10 @@ function tabHist(m){
     var s=function(k){ return d.points.map(function(p){ return {t:p.t,v:p[k]}; }).filter(function(p){ return p.v!=null; }); };
     box.appendChild(card(L("Моя история"),[el("div",{class:"muted small"},[d.since? L("Панель записывает снимок раз в час с ")+new Date(d.since*1000).toLocaleDateString(LOC)+L(" — графики будут расти со временем.")
       : L("Снимки ещё не делались — первый появится в течение часа.")])]));
-    box.appendChild(el("div",{class:"grid"},[
-      card("",[chart(d.techs,{title:L("Изучено технологий"),y:L("техов"),x:L("дата")})]),
-      card("",[chart(s("level"),{title:L("Уровень"),y:L("уровень"),x:L("дата")})]),
-      card("",[chart(s("rating"),{title:L("Рейтинг"),y:L("рейтинг"),x:L("дата")})]),
-      card("",[chart(s("play_h"),{title:L("Наиграно"),y:L("часов"),x:L("дата")})]),
-      card("",[chart(s("research_h"),{title:L("Вложено в исследования"),y:L("часов"),x:L("дата")})])]));
+    // друг под другом, каждый на всю ширину
+    [[d.techs,L("Изучено технологий"),L("техов")],[s("level"),L("Уровень"),L("уровень")],[s("rating"),L("Рейтинг"),L("рейтинг")],
+     [s("play_h"),L("Наиграно"),L("часов")],[s("research_h"),L("Вложено в исследования"),L("часов")]].forEach(function(c){
+      box.appendChild(card("",[chart(c[0],{title:c[1],y:c[2],x:L("дата"),wide:true})])); });
   });
 }
 
@@ -2103,7 +2101,8 @@ function chart(pts,o){
   var d=pts.map(function(p,i){ return (i?"L":"M")+X(p.t).toFixed(1)+" "+Y(p.v).toFixed(1); }).join(" ");
   kids.push(svgEl("path",{d:d+" L"+X(t1)+" "+(H-B)+" L"+X(t0)+" "+(H-B)+" Z",fill:"var(--acc)","fill-opacity":"0.12",stroke:"none"}));
   kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--acc)","stroke-width":"2"}));
-  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[o.x||L("время")]));
+  var xl=o.x||L("время"); if(span<=2*86400 && xl===L("дата")) xl=L("время");   // на оси часы, а не даты
+  kids.push(svgEl("text",{x:(L+W-R)/2,y:H-2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)"},[xl]));
   kids.push(svgEl("text",{x:12,y:(T+H-B)/2,"text-anchor":"middle","font-size":"11",fill:"var(--mut)",transform:"rotate(-90 12 "+((T+H-B)/2)+")"},[o.y||""]));
   box.appendChild(svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:auto;display:block"},kids));
   return box;
