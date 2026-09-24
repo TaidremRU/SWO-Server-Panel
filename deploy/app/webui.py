@@ -2253,7 +2253,7 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", activity:"Активность", leaders:"Рейтинги", admin:"Админ", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", activity:"Активность", leaders:"Рейтинги", admin:"Админ", fleet:"Флот", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -2479,7 +2479,7 @@ var T = {
   pd_skill_pfx:"Навык", pd_skill_hint:"название неизвестно панели — по 2% к чему-то за уровень",
   ago:"назад", never:"нет данных", n_a:"н/д" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", fleet:"Fleet", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -2815,14 +2815,14 @@ function header(){
   return el("header",{},out);
 }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
+  var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
   var nav=el("nav",{}, tabs.map(function(id){
     return el("button",{class:S.tab===id?"active":"",onclick:function(){ S.tab=id; localStorage.setItem("sw_tab",id); render(); }},[t(id)]);
   }));
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,activity:tabActivity,leaders:tabLeaders,admin:tabAdmin,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,activity:tabActivity,leaders:tabLeaders,admin:tabAdmin,fleet:tabFleet,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -3886,8 +3886,10 @@ function fleetCard(){
         return [x.name||("#"+x.id), plLink(x.owner.id,x.owner.name), x.clan||"—", "★"+x.star+" · "+x.x+", "+x.y, x.size]; }));
     }
   }).catch(function(e){ box.innerHTML=""; box.appendChild(el("div",{class:"msg err"},[errText(e)])); });
-  return el("div",{class:"card",style:"margin:10px 0"},[el("h3",{},["🛰 "+t("fl_title")]), el("p",{class:"muted small"},[t("fl_intro")]), box]);
+  return el("div",{class:"card",style:"overflow:auto"},[el("h3",{},["🛰 "+t("fl_title")]), el("p",{class:"muted small"},[t("fl_intro")]), box]);
 }
+
+function tabFleet(v){ v.appendChild(fleetCard()); }
 
 // ---- активность и удержание ----
 function pct(a){ return a && a[1]? Math.round(100*a[0]/a[1])+"% ("+a[0]+"/"+a[1]+")" : "—"; }
@@ -3938,7 +3940,7 @@ function tabLeaders(v){
     g.appendChild(board("🏪 "+t("lb_traders"), d.traders));
     g.appendChild(board("🔬 "+t("lb_rweek"), d.research_week));
     g.appendChild(board("📚 "+t("lb_rtotal"), d.research_total, function(v){ return fmtN(v)+" "+(S.lang==="ru"?"ч":"h"); }));
-    g.appendChild(el("div",{class:"card"},[el("h3",{},["⚑ "+t("lb_clans")]),
+    g.appendChild(el("div",{class:"card wide",style:"overflow:auto"},[el("h3",{},["⚑ "+t("lb_clans")]),
       d.clans.length? ltable(["#",t("cl_name"),t("cl_rating"),t("lb_growth")], d.clans, function(c){
         return [String(d.clans.indexOf(c)+1), c.name, fmtN(c.rating), fmtD(c.growth)]; }) : el("div",{class:"muted small"},["—"]),
       el("p",{class:"muted small"},[t("lb_clans_hint")+(d.clans[0]&&d.clans[0].since? " ("+t("lb_since")+" "+d.clans[0].since+")":"")])]));
@@ -5323,7 +5325,6 @@ function drawSystem(subox, starId, su, gal){
         el("span",{class:"muted"},["X "+bd.minx+"…"+bd.maxx+" · Y "+bd.miny+"…"+bd.maxy]) ]),
       el("h3",{style:"margin-top:10px"},[t("su_starmap")]),
       spaceMapBlock(starId),
-      fleetCard(),
       su.ships.length? scT(ltable(["#",t("col_name"),t("pd_coords"),t("su_vel"),t("su_hp"),t("su_cargo"),""], su.ships, function(s){
         return [ el("span",{class:"mono"},[String(s.id)]),
           s.user_id? plLink(s.user_id, s.name) : el("span",{class:"muted"},["—"]),
