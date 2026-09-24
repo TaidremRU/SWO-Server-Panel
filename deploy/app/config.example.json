@@ -41,7 +41,7 @@
   "_monitor_comment": "Фоновая проверка: есть ли server_name в списке публичных Steam-лобби. Нет N проверок подряд -> уведомление всем админам И модераторам; повтор каждые repeat_alert_seconds (0 = один раз); возврат -> сообщение «снова в списке».",
   "monitor": {
     "enabled": true,
-    "server_name": "AstralSigma",
+    "server_name": "MyServer",
     "interval_seconds": 300,
     "misses_before_alert": 2,
     "repeat_alert_seconds": 3600
@@ -67,11 +67,7 @@
 
   "game_window_size": [1024, 768],
   "login_flow": {
-    "_comment": "координаты в % ширины/высоты окна игры (xp,yp: 0..100) — не зависят от реального "
-                "разрешения/DPI конкретной машины. Настраивать удобнее всего через вкладку «Вход» "
-                "веб-панели (клик по свежему скрину сам подставляет xp/yp); nav.py shot/clickp — "
-                "запасной путь через SSH. Старый формат (абсолютные пиксели x,y при game_window_size) "
-                "по-прежнему поддерживается для уже настроенных конфигов.",
+    "_comment": "координаты в % ширины/высоты окна игры (xp,yp: 0..100) — не зависят от реального разрешения/DPI конкретной машины. Настраивать удобнее всего через вкладку «Вход» веб-панели (клик по свежему скрину сам подставляет xp/yp); nav.py shot/clickp — запасной путь через SSH. Старый формат (абсолютные пиксели x,y при game_window_size) по-прежнему поддерживается для уже настроенных конфигов.",
     "menu_steps": [
       {"action": "click", "xp": 84.57, "yp": 64.58, "wait": 2.5, "tag": "game"},
       {"action": "click", "xp": 43.95, "yp": 37.76, "wait": 2.5, "tag": "local"},
@@ -82,15 +78,7 @@
     "await_menu_timeout": 60,
     "await_login_timeout": 120,
     "await_ingame_timeout": 150,
-    "_account_steps_comment": "опционально: шаги ДО клика по Ok, выполняются только если задан "
-                              "cfg.active_account — напр. очистить поле логина и напечатать его "
-                              "заново под нужный аккаунт. {account_user}/{account_password} — "
-                              "подставляются из активной записи cfg.game_accounts. Пример: "
-                              "[{\"action\":\"click\",\"xp\":41,\"yp\":38,\"tag\":\"loginfield\"}, "
-                              "{\"action\":\"key\",\"key\":\"ctrla\"}, "
-                              "{\"action\":\"type\",\"text\":\"{account_user}\"}, "
-                              "{\"action\":\"key\",\"key\":\"tab\"}, "
-                              "{\"action\":\"type\",\"text\":\"{account_password}\"}]",
+    "_account_steps_comment": "опционально: шаги ДО клика по Ok, выполняются только если задан cfg.active_account — напр. очистить поле логина и напечатать его заново под нужный аккаунт. {account_user}/{account_password} — подставляются из активной записи cfg.game_accounts. Пример: [{\"action\":\"click\",\"xp\":41,\"yp\":38,\"tag\":\"loginfield\"}, {\"action\":\"key\",\"key\":\"ctrla\"}, {\"action\":\"type\",\"text\":\"{account_user}\"}, {\"action\":\"key\",\"key\":\"tab\"}, {\"action\":\"type\",\"text\":\"{account_password}\"}]",
     "account_steps": [],
     "_after_ingame_comment": "шаги ПОСЛЕ входа в мир (напр. открыть чат кликом по иконке в тулбаре); пусто = ничего",
     "after_ingame": [
@@ -107,7 +95,7 @@
     "_super_admin_comment": "получает копию каждой команды/кнопки других админов и модераторов; пусто -> берётся первый из allowed_user_ids",
     "default_lang": "ru",
     "_lang_comment": "язык по умолчанию (ru|en); каждый пользователь может сменить командой /lang",
-    "proxy": "socks5h://192.168.0.222:2080",
+    "proxy": "socks5h://127.0.0.1:1080",
     "poll_timeout": 50,
     "alerts_enabled": true
   },

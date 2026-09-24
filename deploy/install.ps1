@@ -3,7 +3,7 @@
   Вызывается из setup.bat уже ПОСЛЕ создания venv и копирования файлов в $BaseDir.
 
   Пример ручного запуска:
-    powershell -ExecutionPolicy Bypass -File install.ps1 -BaseDir C:\Users\alex\sigmabot -Autologon -User alex -Password 1
+    powershell -ExecutionPolicy Bypass -File install.ps1 -BaseDir C:\Users\<USER>\sigmabot -Autologon -User <USER> -Password <ПАРОЛЬ>
 #>
 param(
   [string]$BaseDir = "$env:USERPROFILE\sigmabot",

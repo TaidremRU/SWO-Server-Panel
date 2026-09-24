@@ -37,7 +37,7 @@ Telegram-бота. Держит Steam и игру запущенными, пос
    По умолчанию всё ставится в `%USERPROFILE%\sigmabot`. Свой путь и автологон:
 
    ```bat
-   setup.bat C:\Users\alex\sigmabot /autologon alex МОЙ_ПАРОЛЬ
+   setup.bat C:\Users\<USER>\sigmabot /autologon <USER> <ПАРОЛЬ>
    ```
 
    `setup.bat` создаёт venv, ставит зависимости, копирует файлы, регистрирует
@@ -101,7 +101,7 @@ Telegram-бота. Держит Steam и игру запущенными, пос
 |---|---|---|
 | `/status` | админ, модератор | CPU/RAM/диск, аптайм; Steam (+вход в аккаунт); игра (PID, RAM, окно, «в меню / вход выполняется / в игре»); сессия/RDP; счётчики перезапусков |
 | `/shot` | админ, модератор | скриншот окна игры (работает и в простаивающей сессии) |
-| `/servers` | админ | список публичных серверов (Steam-лобби): имя, игроки, карта, версия; **AstralSigma** подсвечивается 👑 и поднимается наверх |
+| `/servers` | админ | список публичных серверов (Steam-лобби): имя, игроки, карта, версия; ваш сервер (`monitor.server_name`) подсвечивается 👑 и поднимается наверх |
 | `/restartgame` | админ, модератор | **перезапуск игры + сразу авто-вход в мир** (`stop → start → seq login`), в конце — скриншот |
 | `/login` | админ, модератор | пройти вход в игру вручную |
 | `/lang ru\|en` | админ, модератор | язык интерфейса |
@@ -157,12 +157,12 @@ Sigma World Online не публикует game-серверы в мастер-�
 
 **Монитор** (`config.json` → `monitor`, поток `srvmonitor` в супервизоре):
 первая проверка через ~90 c, дальше каждые `interval_seconds` (300). Если
-`server_name` (`AstralSigma`) отсутствует `misses_before_alert` (2) проверок
+`server_name` (имя вашего сервера) отсутствует `misses_before_alert` (2) проверок
 подряд — рассылка **всем админам И модераторам**
 «⚠️ … пропал из публичного списка серверов Steam»; повтор каждые
 `repeat_alert_seconds` (3600, `0` = один раз); вернулся → «✅ … снова в списке»
 один раз. Ошибка запроса списка — тик пропускается (не «пропажа»). Состояние
-(`monitor_astral` в `state.json`) переживает рестарт бота.
+(в `state.json`) переживает рестарт бота.
 
 ---
 
@@ -243,7 +243,7 @@ REM скрин: %BASE%\logs\nav\latest.png  — по нему меряете к�
                         Ok (в цикле, пока не ingame)
 
 Задача SigmaConsoleGuard (SYSTEM, по событию отключения RDP 24/40)
-  └─ console_guard.ps1  ->  tscon <сессия alex> /dest:console
+  └─ console_guard.ps1  ->  tscon <сессия пользователя> /dest:console
 ```
 
 **Почему консольная сессия обязательна:** SendInput/фокус в игру работают только
@@ -276,7 +276,7 @@ Get-Content C:\...\sigmabot\logs\supervisor.log -Tail 40 -Wait
 
 ```powershell
 'SigmaSteamBot','SigmaNav','SigmaConsoleGuard' | % { Unregister-ScheduledTask -TaskName $_ -Confirm:$false }
-Remove-Item -Recurse C:\Users\alex\sigmabot
+Remove-Item -Recurse C:\Users\<USER>\sigmabot
 ```
 
 ---

@@ -1,12 +1,10 @@
-<!-- SPDX note: private project — TaidremRU/SWO-Server-Panel (ex sigmabot_win) -->
-
 # SWO Server Panel
 
 *(ex `SigmaSteamBot` — проект перерос простой лаунчер-бот и стал полноценной серверной панелью; история и репозиторий те же, см. [«Переименование»](#переименование--renaming))*
 
-**RU:** Автозапуск, авто-вход и веб-панель + Telegram-бот для управления сервером **Sigma World Online** (Steam AppID `1690980`) на выделенной Windows-VM. Держит Steam и игру запущенными, сам проходит вход в мир, отдаёт статус/скриншоты и список публичных серверов. Плюс — инструментарий аналитики и реверс-инжиниринга игровых данных: карта мира и бинарных `.dt`-карт (террейн, машины, контейнеры, владение землёй), карта космоса и звёздных систем/кластеров, поиск предметов по всему миру и у всех игроков, детект твинков, трекинг исследований, карточки игроков, бэкапы, безопасная правка инвентаря — всё через один браузер, без доступа к серверу.
+**RU:** Автозапуск, авто-вход и веб-панель + Telegram-бот для управления сервером **Sigma World Online** (Steam AppID `1690980`) на выделенной Windows-VM. Держит Steam и игру запущенными, сам проходит вход в мир, отдаёт статус/скриншоты и список публичных серверов. Плюс — инструментарий аналитики и реверс-инжиниринга игровых данных: карта мира и бинарных `.dt`-карт (террейн, машины, контейнеры, владение землёй), карта космоса и звёздных систем/кластеров, поиск предметов по всему миру и у всех игроков, кланы с историей и схемой исследований, торговля и экономика сервера, калькулятор крафта и оптимизаторы рецептов, детект твинков и мониторинг нарушений, трекинг исследований, карточки игроков, бэкапы, безопасная правка инвентаря — всё через один браузер, без доступа к серверу.
 
-**EN:** Auto-start, auto-login and a web panel + Telegram bot for running a **Sigma World Online** (Steam AppID `1690980`) server on a dedicated Windows VM. Keeps Steam and the game running, walks the in-game login itself, serves status / screenshots / the public server list. Plus an analytics and reverse-engineering toolkit for the game's own data: a world map and binary `.dt`-map viewer (terrain, machines, containers, land ownership), a space/star-system/cluster map, world- and player-wide item search, twink detection, research tracking, player cards, backups, and safe inventory editing — all from one browser tab, no server shell access needed.
+**EN:** Auto-start, auto-login and a web panel + Telegram bot for running a **Sigma World Online** (Steam AppID `1690980`) server on a dedicated Windows VM. Keeps Steam and the game running, walks the in-game login itself, serves status / screenshots / the public server list. Plus an analytics and reverse-engineering toolkit for the game's own data: a world map and binary `.dt`-map viewer (terrain, machines, containers, land ownership), a space/star-system/cluster map, world- and player-wide item search, clans with history and a research scheme, server trade and economy, a craft calculator and recipe optimizers, twink detection and a violation monitor, research tracking, player cards, backups, and safe inventory editing — all from one browser tab, no server shell access needed.
 
 **Языки / Languages:** [Русский](#русский) · [English](#english)
 
@@ -16,14 +14,14 @@
 
 ### Что это
 
-Один процесс (`supervisor.py`), запускаемый задачей планировщика `SigmaSteamBot` при входе в систему (автологон `alex`). Внутри — два потока:
+Один процесс (`supervisor.py`), запускаемый задачей планировщика `SigmaSteamBot` при входе в систему (автологон выбранного пользователя Windows). Внутри — два потока:
 
 | Поток | Задача |
 |---|---|
 | **watchdog** | следит, что Steam и игра запущены; поднимает упавшее; после старта игры сам проходит вход в мир; каждые ~30 c пишет снапшот в `state.json` |
 | **bot** | Telegram long-polling **через SOCKS5-прокси** (с VM `api.telegram.org` напрямую недоступен); команды, кнопки, алерты |
-| **webui** | HTTP-панель на `0.0.0.0:8080` — то же, что бот, + правка ролей и просмотр логов; вход по логину/паролю |
-| *(+ поток `srvmonitor`)* | раз в 5 минут проверяет, есть ли сервер `AstralSigma` в списке публичных Steam-лобби |
+| **webui** | HTTP-панель на порту `8080` — то же, что бот, + аналитика, правка ролей и настроек; вход по логину/паролю, доступ только из разрешённых сетей |
+| *(+ поток `srvmonitor`)* | раз в 5 минут проверяет, есть ли ваш сервер (`monitor.server_name`) в списке публичных Steam-лобби |
 
 Вход в игру (`Game → Local → ✔ Show server in the public Steam list → Play → окно Login → Ok`) прогоняется отдельной задачей `SigmaNav` — фоновому потоку не даёт фокус окна `SetForegroundWindow`. Игра рендерится и принимает ввод только в **активной консольной сессии**; задача `SigmaConsoleGuard` возвращает сессию на консоль при отключении RDP.
 
@@ -35,7 +33,7 @@
        ├─ watchdog   держит Steam+игру → авто-вход → state.json
        ├─ bot        Telegram long-poll через SOCKS5 (обёртка над curl.exe)
        │              ├─ поток-отправитель (сеть не блокирует опрос)
-       │              └─ srvmonitor: раз в 5 мин serverlist.fetch → есть ли AstralSigma
+       │              └─ srvmonitor: раз в 5 мин serverlist.fetch → есть ли ваш сервер
        ├─ webui      http.server на 0.0.0.0:8080 — тот же функционал + роли + логи
        │              (статус из last_snapshot watchdog'а, живой collect() по кнопке)
        └─ вход в игру → runner.run_nav("seq login")
@@ -86,7 +84,7 @@
 |---|---|---|
 | `/status` | админ, модератор | CPU/RAM/диск, аптайм; Steam (+вход в аккаунт); игра (PID, RAM, окно, «в меню / вход выполняется / в игре»); сессия/RDP; счётчики перезапусков |
 | `/shot` | админ, модератор | скриншот окна игры |
-| `/servers` | **админ** | список публичных серверов (Steam-лобби): имя, игроки, карта, версия. **AstralSigma** подсвечивается 👑 и поднимается наверх |
+| `/servers` | **админ** | список публичных серверов (Steam-лобби): имя, игроки, карта, версия. ваш сервер (`monitor.server_name`) подсвечивается 👑 и поднимается наверх |
 | `/restartgame` | админ, модератор | перезапуск игры **+ сразу авто-вход в мир**, в конце скриншот |
 | `/login` | админ, модератор | пройти вход в игру вручную |
 | `/lang ru\|en` | админ, модератор | язык интерфейса |
@@ -120,7 +118,7 @@ Sigma World Online **не регистрирует game-серверы** в ма
 - вернулся → `✅ <name> снова в публичном списке` (один раз), счётчик сбрасывается;
 - запрос списка не удался → тик пропускается (не считается «пропажей»), только запись в лог.
 
-Состояние (`monitor_astral` в `state.json`) переживает перезапуск бота — повторных ложных тревог после рестарта нет.
+Состояние монитора хранится в `state.json` и переживает перезапуск бота — повторных ложных тревог после рестарта нет.
 
 ### Discord-стата
 
@@ -134,18 +132,23 @@ Sigma World Online **не регистрирует game-серверы** в ма
 
 ### Веб-панель
 
-HTTP-поток внутри супервизора (`webui.py`), слушает `webui.host:webui.port` (по умолчанию `0.0.0.0:8080`) — `http://<ip-vm>:8080/`. Правило фаервола на порт ставит `install.ps1`. Протокол обычный HTTP — панель **только для локальной сети**.
+HTTP-поток внутри супервизора (`webui.py`), слушает `webui.host:webui.port` (по умолчанию `0.0.0.0:8080`) — `http://<ip-vm>:8080/`. Правило фаервола на порт ставит `install.ps1`. Протокол обычный HTTP — панель рассчитана **на локальную сеть**.
+
+- **Доступ по адресам** — `webui.allowed_nets` («Настройки» → «Веб-панель»): IP и подсети через запятую. Пусто (по умолчанию) — пускаются только частные/локальные сети (`10.*`, `172.16–31.*`, `192.168.*`, link-local); все остальные получают `403` ещё до страницы входа. Сама VM (`127.0.0.1`) пускается всегда — на случай неудачного списка; сохранить список, в который не входит ваш текущий адрес, панель не даст.
 
 - **Вход** — логин/пароль из `webui_auth.json` (в `base_dir`, в `.gitignore`). При первом запуске создаётся **`admin` / `admin`** с флагом `must_change`: до смены пароля доступен только экран смены (минимум 6 символов, не `admin`). Хэш — PBKDF2-HMAC-SHA256; сессия — cookie `sid` в памяти процесса (TTL 12 ч); POST защищены CSRF-токеном; неудачные входы — лок-аут по IP (5 попыток → пауза 60 c).
 - **Дашборд** — карты VM / Steam / игра / watchdog / внутренности бота (аптайм процесса, потоки, очередь отправки, возраст снапшота) / монитор сервера, плюс живой скриншот экрана VM. Автообновление раз в 5 c только при активной вкладке; статус берётся из `last_snapshot`, который пишет watchdog, — нагрузки на супервизор почти нет. Кнопка «Обновить (живой опрос)» дёргает `sysinfo.collect()` по требованию.
 - **Действия** — то же, что у бота: `startgame` / `stopgame` / `restartgame` (перезапуск + вход) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (с подтверждением) + `restarttask` (перезапуск задачи `SigmaSteamBot` через одноразовую задачу планировщика — переживает `schtasks /End` самого себя, в отличие от прежнего detached-процесса) и `testalert` (тестовое сообщение админам через `bot.push_alert`). Длинные операции идут заданием, панель опрашивает результат.
-- **Серверы** — тот же список Steam-лобби (`serverlist.fetch`, кэш 45 c), AstralSigma наверху.
+- **Серверы** — тот же список Steam-лобби (`serverlist.fetch`, кэш 45 c), ваш сервер наверху.
 - **Настройки** — полноценный редактор `config.json` прямо из браузера (см. ниже), плюс роли (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) применяются на лету (`Bot.apply_roles`) без перезапуска.
 - **Логи** — хвост `supervisor.log` (фильтр по уровню, автообновление, скачивание), аудит панели (`webui_audit.log` — кто/когда/что нажал, отдельно от Telegram-аудита) и галерея скринов последовательности входа (`logs/nav/*.png`).
 - **Игроки** — список и онлайн-статус игроков локального сервера + поиск предмета у всех игроков (см. ниже).
 - **Карта** — карта мира, разбор бинарных `.dt`-карт и карта космоса/звёздных систем (см. ниже).
-- **Кланы** — список кланов и полная карточка клана: состав, специализации, клановые и личные технологии (см. ниже).
-- **Микстуры** и **Кулинария** — оптимизаторы рецептов по точным формулам игры (см. ниже).
+- **Кланы** — список кланов и полная карточка клана: состав, специализации, клановые и личные технологии, история (см. ниже).
+- **Торговля** и **Экономика** — все торговые предложения сервера; сколько каждого предмета в мире и как это меняется (см. ниже).
+- **Нарушения** — подсказки модераторам: всплески инвентаря, подозрительно быстрые исследования, аномальные цены (см. ниже).
+- **Микстуры**, **Кулинария**, **Крафт** — оптимизаторы рецептов по точным формулам игры и калькулятор крафта до сырья (см. ниже).
+- **Название и иконка** — `webui.title` («Настройки» → «Веб-панель») задаёт шапку и заголовок вкладки браузера; карточка «Иконка панели» в «Настройках» — загрузка своей иконки (PNG/ICO/JPEG/GIF/WebP до 512 КБ, хранится рядом с конфигом). Удобно, когда панелей несколько (напр. основной и тестовый сервер).
 
 Интерфейс двуязычный (ru/en, тумблер в шапке, выбор в `localStorage` браузера), тёмная/светлая тема. Отключить панель целиком — `webui.enabled = false` в `config.json`.
 
@@ -173,11 +176,12 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 
 Вкладка **«Карта»** — вся работа с картами и бинарными данными мира, реверс-инжиниренными без исходников игры (см. `stage2/mapdt.py`, `stage2/players.py`):
 
-- **Таблица мира** — по каждой карте: онлайн, аватары, территории, размер. **Карта 0 = космос** — игра считает таких игроков онлайн, хотя фактически они могут быть оффлайн. Внемировые (космические) карты подписаны именем и координатами звёздной системы (`🪐 Ryk Xive (x, y)`), которые находятся сопоставлением ID карты с объектом в `Data\world\star<N>.json` — это соответствие подтверждено на всех 26 внемировых картах прод-сервера.
+- **Таблица мира** — по каждой карте: онлайн, аватары, территории, размер. **Карта 0 = космос** — игра считает таких игроков онлайн, хотя фактически они могут быть оффлайн. Внемировые (космические) карты подписаны именем и координатами звёздной системы (`🪐 <система> (x, y)`), которые находятся сопоставлением ID карты с объектом в `Data\world\star<N>.json` — соответствие проверено на реальном мире.
 - **Разбор `.dt`** — ссылка «показать карту» у каждой карты → полный разбор бинарного `Data\maps\map<N>.dt` (точный порт сериализации `Map.Load`/`MapCell.Read`/… из исходника игры): гистограмма блоков/растительности (с русскими названиями — тексты вытащены из клиентской локализации, `resources.assets`), машины (печь/дробилка/…), точки руды (те же id-коды и те же русские названия, что у блоков), содержимое всех наземных/подземных контейнеров, сетка владения землёй (8×8-блоки → владелец), газ/заражение, кислородная карта. Основная карта — 512×512, ~13 c на первый разбор, дальше из кэша.
+  - **Режимы карты мира:** «по кланам» — участки окрашены цветом клана владельца, легенда с площадью и числом владельцев, в подсказке под курсором — клан; «магазины» — значки магазинов игроков.
   - **Просмотрщик карты** — PNG-рендер (свой энкодер, без Pillow) с наведением (блок/владелец под курсором), приближением колёсиком мыши (25–400 %) с зумом к курсору, перетаскиванием («рука»), свободным вращением (по умолчанию 315°, центрируется в любом повороте) и наложением сетки владения землёй. Кнопка **«⟳ пересмотреть»** рядом с вращением — принудительно перерисовывает карту заново, игнорируя кэш по времени изменения файла (на случай, если реальные данные обновились, а кэш — нет).
 - **Территории** — все `userTerritories` игроков с владельцами, фильтр по карте.
-- **Поиск предмета в мире** — id или имя предмета (можно подстроку, напр. `tech_booster`), выбрать карту или «весь мир» → для каждого совпадения координаты `(x, y)`, контейнер (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), количество и прочность. Скан всего мира — до ~2 мин (72 карты), кэш по mtime каждой карты. Эндпоинт `GET /api/mapdt-find?map=N|all&item=<id|имя>`.
+- **Поиск предмета в мире** — id или имя предмета (можно подстроку, напр. `tech_booster`), выбрать карту или «весь мир» → для каждого совпадения координаты `(x, y)`, контейнер (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), количество и прочность. Скан всего мира — до пары минут на крупном мире, кэш по mtime каждой карты. Эндпоинт `GET /api/mapdt-find?map=N|all&item=<id|имя>`.
 - **Космос** — звёздные системы и галактика, распарсенные из `Data\space\units.dt` (корабли/метеориты/капсулы — порт `ZData.SpaceUnit.Read`) и `Data\world\star<N>.json`/`cluster<N>.json` (реверс-инжиниринг без исходников, ID объекта = порядковый номер в файле, подтверждён совпадением с игровым ID):
   - переключатель **кластер → звёздная система** (в игре несколько кластеров, в каждом — несколько систем);
   - точечная карта системы (планеты/астероиды/корабли/метеориты/капсулы), приближение и перетаскивание как у `.dt`-карты, координаты под курсором;
@@ -189,7 +193,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 Вкладка **«Твинки»** — детект мультиаккаунтов, после ввода **своего пароля от панели** (чувствительно; попытка в аудит). Три сигнала:
 
 - **По паролю (`code`)** — аккаунты с одинаковым паролем (из `Data\users\user<N>.json`). Самый надёжный: люди переиспользуют пароль на альтах. Показывается только длина пароля и список аккаунтов, **сам пароль не выводится**.
-- **По IP** — из `Logs\log_net_ip.txt` (`ник = IP = InterNetwork = порт`); `config.json → players.twink_ignore_ips` — какие IP игнорировать (на текущей VM все клиенты идут через релей `127.0.0.2` — реальных IP нет, эта секция пустая).
+- **По IP** — из `Logs\log_net_ip.txt` (`ник = IP = InterNetwork = порт`); `config.json → players.twink_ignore_ips` — какие IP игнорировать (например, адрес локального релея, если все клиенты подключаются через него и реальных IP в логе нет).
 - **По железу** — одинаковые `videoCard` + разрешение экрана (много ложных срабатываний, помечено).
 
 Каждая группа — ID + ник (ссылка на карточку). Порог «мин. аккаунтов» настраивается.
@@ -207,11 +211,41 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Схема клановых технологий** (`isClan` в `tech.json`, изученные — `clan.tech`).
 - **Личные технологии участников** — по умолчанию «покрытие»: сколько участников знают каждую технологию; в списке можно выбрать конкретного участника.
 
-Эндпоинты: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`.
+- **Кто ближе к цели** — клик по технологии в схеме личных технологий: участники по возрастанию часов, оставшихся до неё.
+- **История клана** — у игры её нет, панель ведёт сама (тот же фоновый поток, что трекинг техов): события «вступил / ушёл / смена роли / новая клановая технология / переименование / расширение состава» (`logs\clan_events.jsonl`) и почасовые точки рейтинга, Clan Points и состава (`logs\clan_points.jsonl`) — графики и журнал в карточке клана. Копится с момента включения.
+
+Эндпоинты: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`, `GET /api/clan-history?id=N`.
+
+### Крафт
+
+Вкладка **«Крафт»** — калькулятор по `Data\craft.json` (рецепты: верстак, время, выход, нужная технология) и `Data\machines.json` (печь, дробилка, экстрактор и т.д.: материал → продукт). Выбрать предмет и количество → раскладка до сырья: итоговое сырьё, промежуточные крафты, общее время, нужные верстаки и станки, дерево крафта и «где ещё используется». Если выбрать игрока или клан — для каждой нужной технологии видно, изучена ли она и сколько шагов/часов осталось до неё. Эндпоинты: `GET /api/craft-catalog`, `GET /api/craft-plan?item=…&qty=N[&uid=N|&clan=N]`.
+
+### Торговля
+
+Вкладка **«Торговля»** — все предложения сервера из двух источников, оба бинарные и разобраны по коду игры:
+
+- **торговые терминалы игроков** — `Data\game\terminals.dt2` (формат `TerminalManager.Save` / `TradingTerminal.Save`): лоты «игрок отдаёт → хочет взамен», число продаж, выручка на складе, когда владелец заходил;
+- **магазины на картах** — блоки `Shop` внутри `map<N>.dt`: товар и цена по слотам, продажи, выручка; владелец определяется по участку земли.
+
+Поиск по предмету (продают / покупают), фильтр по источнику, курс вида «1 X = N Y». Первый проход по всем картам — до минуты-двух на крупном мире, дальше кэш по времени изменения каждой карты. Эндпоинт `GET /api/trade` (фоновое задание, клиент опрашивает `/api/job`).
+
+### Экономика
+
+Вкладка **«Экономика»** — сколько каждого предмета есть в мире: у игроков (склад + при себе), в сундуках и брошенным на картах (природные клады под лопату не считаются), в торговле. По каждому предмету — число держателей, главные держатели, медианный курс по торговым предложениям и изменение за сутки/неделю. Динамика — по суточным снимкам, которые панель делает сама в фоне (`logs\economy_daily.jsonl`); клик по предмету — график по дням. Проход по картам общий с «Торговлей». Эндпоинты: `GET /api/economy`, `GET /api/economy-item?id=N`.
+
+### Нарушения
+
+Вкладка **«Нарушения»** — открывается после ввода пароля панели (связывает аккаунты), просмотр пишется в аудит. Панель сама раз в несколько минут сравнивает всех игроков (журнал `logs\suspicious.jsonl`):
+
+- **всплеск инвентаря** — рост монет/ускорителей выше порога (`players.suspicious.watch` в `config.json`) или любого предмета в 10+ раз; рядом — у кого в тот же интервал столько же убыло (возможная передача), с пометкой, если это связанный аккаунт (общий пароль или IP, как во вкладке «Твинки»);
+- **быстрое исследование** — изучено технологий дороже, чем прошло времени плюс потрачено ускорителей (технология, выданная через панель, тоже сюда попадёт — сверяйтесь с аудитом);
+- **аномальные цены** — лоты в торговле, чей курс в 10+ раз отличается от медианы той же пары «товар → оплата».
+
+Это подсказки для проверки, а не автоматические выводы.
 
 ### Микстуры и кулинария
 
-Обе формулы восстановлены декомпиляцией `GameAssembly.dll` (Il2CppDumper + Ghidra) и проверены на всех рецептах, которые реально посчитал сервер (микстуры — 366/366, блюда — 2305/2305), так что оптимизаторы считают точно, а не угадывают. Таблицы ингредиентов генерятся сервером один раз на мир (`Data\product\`), у каждого мира свои.
+Обе формулы восстановлены декомпиляцией `GameAssembly.dll` (Il2CppDumper + Ghidra) и проверены на всех рецептах, которые реально посчитал сервер (совпадение 100 % на реальном мире), так что оптимизаторы считают точно, а не угадывают. Таблицы ингредиентов генерятся сервером один раз на мир (`Data\product\`), у каждого мира свои.
 
 - **Микстуры** (`buff_balance.json`, `buff_lib.json`): отметить имеющиеся ингредиенты и нужный эффект → полный перебор упорядоченных четвёрок, топ-5. Плюс загрузка клиентского `buff_notepad.json` (память опробованных смесей лежит у игрока, не на сервере).
 - **Кулинария** (`product_balance.json`, `product_genes.json`, `product_lib.json`): 4 ингредиента в сетке 2×2, порядок важен. Сытость = произведение попарных «балансов» по строкам и столбцам сетки × 0.3125; гены блюда = XOR генов ингредиентов. Съеденное блюдо даёт сытость +N, энергию +N/5 и +N/5 к каждому своему гену (Генетика A–D); когда все четыре ≥ 100 — +1 очко генетики. Блюдо сытнее максимума игрока игра съесть не даёт — поэтому в оптимизаторе есть фильтр «макс. сытость» и выбор обязательных генов. Ниже — все блюда, когда-либо приготовленные на сервере (фильтр по ингредиенту, сортировка по сытости).
@@ -236,7 +270,7 @@ HTTP-поток внутри супервизора (`webui.py`), слушает
 - **Профиль:** уровень, рейтинг, страна, видеокарта, разрешение экрана, всего часов, «последняя сессия N ч назад», бан + когда снят
 - **Клан** (из `Data\game\clans.json`): имя, рейтинг, состав с именами (👑 лидер) и переходами на карточки · **Друзья** (из `friends.json`)
 - **Исследования:** текущее + ~время до конца (по `serverTime` из `Data\game\settings.json`), изучено техов, бустер · **Миссии**
-- **Схема изучения** — всё дерево `Data\tech.json` (SVG): изучено / изучается / доступно / закрыто, подсказка с названием и временем изучения
+- **Схема изучения** — всё дерево `Data\tech.json` (SVG): изучено / изучается / доступно / закрыто, подсказка с названием, временем изучения и тем, что технология открывает. **Планировщик:** клик по технологии подсвечивает путь к ней и показывает, сколько шагов и часов осталось
 - **Позиция:** карта / координаты / точка респавна / список территорий
 - **Аватар:** статы (`paramList`) полосками, навыки, способности с русскими названиями (slug'и из `Data\ability.json`, тексты — из клиентской локализации, как и у блоков/руды выше), склад и «при себе» с названиями предметов (из `Data\items.json`)
 - **Сессии:** всего / часов онлайн / средняя / макс, гистограмма активности по часам суток, последние 15 сессий
@@ -262,7 +296,9 @@ setup.bat
 
 ### Настройки из панели
 
-Вкладка **«Настройки»** — редактор `config.json` без ручной правки файла: общие параметры, веб-панель, watchdog, монитор сервера, источник данных «Игроков», Telegram (токен полем `secret` — один раз введённый не показывается повторно), Steam/список серверов. Плюс:
+Вкладка **«Настройки»** — редактор `config.json` без ручной правки файла: общие параметры, веб-панель (в т.ч. разрешённые адреса и название панели), watchdog, монитор сервера, Discord-стата, источник данных «Игроков», Telegram (токен полем `secret` — один раз введённый не показывается повторно), Steam/список серверов. Плюс:
+
+- **Иконка панели** — загрузка своей иконки для вкладки браузера (применяется сразу);
 
 - **Игровые аккаунты** — список логин/пароль с выбором активного (для авто-входа несколькими аккаунтами на одной VM);
 - **`login_flow` (продвинутое)** — сырой JSON координат клика входа, для нестандартного разрешения окна;
@@ -306,14 +342,14 @@ Get-Content <BASE>\logs\supervisor.log -Tail 40 -Wait
 
 ### What it is
 
-A single process (`supervisor.py`) launched by the `SigmaSteamBot` scheduled task at logon (auto-logon as `alex`). It runs two threads:
+A single process (`supervisor.py`) launched by the `SigmaSteamBot` scheduled task at logon (auto-logon as the chosen Windows user). It runs two threads:
 
 | Thread | Job |
 |---|---|
 | **watchdog** | keeps Steam and the game running; relaunches whatever died; after the game starts, walks the in-game login itself; writes a `state.json` snapshot every ~30 s |
 | **bot** | Telegram long-polling **through a SOCKS5 proxy** (`api.telegram.org` is unreachable directly from the VM); commands, buttons, alerts |
-| **webui** | HTTP panel on `0.0.0.0:8080` — same as the bot, plus role editing and log viewing; login/password auth |
-| *(+ `srvmonitor` thread)* | every 5 minutes checks whether the `AstralSigma` server is present in the public Steam lobby list |
+| **webui** | HTTP panel on port `8080` — same as the bot, plus analytics, role and settings editing; login/password auth, access from allowed networks only |
+| *(+ `srvmonitor` thread)* | every 5 minutes checks whether your server (`monitor.server_name`) is present in the public Steam lobby list |
 
 The in-game login (`Game → Local → ✔ Show server in the public Steam list → Play → Login window → Ok`) runs in a dedicated `SigmaNav` task — a background thread can't take window focus (`SetForegroundWindow`). The game renders and accepts input only in an **active console session**; the `SigmaConsoleGuard` task redirects the session back to the console when RDP disconnects.
 
@@ -325,7 +361,7 @@ SigmaSteamBot task (AtLogon, Interactive/Highest, auto-restart every 2 min)
        ├─ watchdog    keeps Steam+game → auto-login → state.json
        ├─ bot         Telegram long-poll via SOCKS5 (wrapper over curl.exe)
        │               ├─ sender thread (network never blocks polling)
-       │               └─ srvmonitor: every 5 min serverlist.fetch → is AstralSigma listed
+       │               └─ srvmonitor: every 5 min serverlist.fetch → is your server listed
        ├─ webui       http.server on 0.0.0.0:8080 — same features + roles + logs
        │               (status from watchdog's last_snapshot, live collect() on demand)
        └─ game login → runner.run_nav("seq login")
@@ -375,7 +411,7 @@ Language is per-user (`/lang ru|en` or the “🌐 Language” button), stored i
 |---|---|---|
 | `/status` | admin, moderator | CPU/RAM/disk, uptime; Steam (+ signed in); game (PID, RAM, window, “at menu / logging in / in game”); session/RDP; restart counters |
 | `/shot` | admin, moderator | game-window screenshot |
-| `/servers` | **admin** | public server list (Steam lobbies): name, players, map, version. **AstralSigma** is highlighted 👑 and pinned to the top |
+| `/servers` | **admin** | public server list (Steam lobbies): name, players, map, version. your server (`monitor.server_name`) is highlighted 👑 and pinned to the top |
 | `/restartgame` | admin, moderator | restart the game **and immediately auto-login to the world**, screenshot at the end |
 | `/login` | admin, moderator | run the in-game login manually |
 | `/lang ru\|en` | admin, moderator | interface language |
@@ -409,7 +445,7 @@ The `srvmonitor` thread in the supervisor. First check ~90 s after start, then e
 - back → `✅ <name> is back in the public list` (once), counter reset;
 - if the list request itself fails → the tick is skipped (not counted as “missing”), logged only.
 
-State (`monitor_astral` in `state.json`) survives a bot restart — no repeated false alarms after a restart.
+The monitor state lives in `state.json` and survives a bot restart — no repeated false alarms after a restart.
 
 ### Discord stats
 
@@ -423,18 +459,23 @@ Goes through the same SOCKS5 proxy as Telegram (`telegram.proxy`) — nothing ex
 
 ### Web UI
 
-An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webui.port` (default `0.0.0.0:8080`) — `http://<vm-ip>:8080/`. `install.ps1` adds the firewall rule for the port. Plain HTTP — the panel is **LAN-only**.
+An HTTP thread inside the supervisor (`webui.py`), listening on `webui.host:webui.port` (default `0.0.0.0:8080`) — `http://<vm-ip>:8080/`. `install.ps1` adds the firewall rule for the port. Plain HTTP — the panel is meant **for a LAN**.
+
+- **Address allowlist** — `webui.allowed_nets` ("Settings" → "Web panel"): IPs and subnets, comma-separated. Empty (the default) — only private/local networks get in (`10.*`, `172.16–31.*`, `192.168.*`, link-local); everyone else gets a `403` before even the login page. The VM itself (`127.0.0.1`) is always allowed, in case of a bad list; the panel refuses to save a list that doesn't include your current address.
 
 - **Login** — username/password from `webui_auth.json` (in `base_dir`, gitignored). On first start it is created as **`admin` / `admin`** with a `must_change` flag: until the password is changed only the change-password screen is available (min 6 chars, not `admin`). Hash — PBKDF2-HMAC-SHA256; session — an in-memory `sid` cookie (12 h TTL); POSTs are CSRF-token protected; failed logins are rate-limited per IP (5 tries → 60 s lock-out).
 - **Dashboard** — VM / Steam / game / watchdog / bot-internals (process uptime, threads, send queue, snapshot age) / server-monitor cards, plus a live VM screenshot. Auto-refresh every 5 s only while the tab is visible; status comes from the `last_snapshot` the watchdog already writes — near-zero extra load on the supervisor. The “Refresh (live poll)” button calls `sysinfo.collect()` on demand.
 - **Actions** — same as the bot: `startgame` / `stopgame` / `restartgame` (restart + login) / `restartsteam` / `login` / `watchdog on|off` / `restartvm` / `stopbot` (confirmed) plus `restarttask` (restarts the `SigmaSteamBot` task via a one-time scheduled task — survives its own `schtasks /End`, unlike the old detached-process approach) and `testalert` (a test message to admins via `bot.push_alert`). Long operations run as a job the panel polls.
-- **Servers** — the same Steam-lobby list (`serverlist.fetch`, 45 s cache), AstralSigma pinned to the top.
+- **Servers** — the same Steam-lobby list (`serverlist.fetch`, 45 s cache), your server pinned to the top.
 - **Settings** — a full `config.json` editor right in the browser (see below), plus roles (`allowed_user_ids` / `moderator_user_ids` / `super_admin_id` / `default_lang` / `alerts_enabled`) applied live (`Bot.apply_roles`) with no restart needed.
 - **Logs** — tail of `supervisor.log` (level filter, auto-refresh, download), the panel audit (`webui_audit.log` — who/when/what, separate from the Telegram audit) and a gallery of login-sequence screenshots (`logs/nav/*.png`).
 - **Players** — local-server player list and online status, plus an item search across all players' inventories (see below).
 - **Map** — the world map, binary `.dt`-map viewer, and the space/star-system map (see below).
-- **Clans** — the clan list and a full clan card: roster, specializations, clan and personal techs (see below).
-- **Mixtures** and **Cooking** — recipe optimizers built on the game's exact formulas (see below).
+- **Clans** — the clan list and a full clan card: roster, specializations, clan and personal techs, history (see below).
+- **Trade** and **Economy** — every trade offer on the server; how much of every item exists and how that changes (see below).
+- **Violations** — leads for moderators: inventory spikes, suspiciously fast research, abnormal prices (see below).
+- **Mixtures**, **Cooking**, **Craft** — recipe optimizers built on the game's exact formulas and a craft-to-raw-materials calculator (see below).
+- **Title and icon** — `webui.title` ("Settings" → "Web panel") sets the header and the browser tab title; the "Panel icon" card in "Settings" uploads your own icon (PNG/ICO/JPEG/GIF/WebP up to 512 KB, stored next to the config). Handy when you run several panels (e.g. a main and a test server).
 
 The interface is bilingual (ru/en, header toggle, choice in the browser `localStorage`), with a dark/light theme. Disable the panel entirely with `webui.enabled = false` in `config.json`.
 
@@ -462,11 +503,12 @@ Per-map online/avatars/territories and item search moved to their own **"Map"** 
 
 The **"Map"** tab — everything about maps and the game's binary world data, reverse-engineered without access to the game's source (see `stage2/mapdt.py`, `stage2/players.py`):
 
-- **World table** — per map: online, avatars, territories, size. **Map 0 = space** — the game counts these players as online even though they may actually be offline. Off-world (space) maps are labeled with the name and coordinates of their star system (`🪐 Ryk Xive (x, y)`), found by matching the map ID to an object in `Data\world\star<N>.json` — this mapping was verified against all 26 off-world maps on the production server.
+- **World table** — per map: online, avatars, territories, size. **Map 0 = space** — the game counts these players as online even though they may actually be offline. Off-world (space) maps are labeled with the name and coordinates of their star system (`🪐 <system> (x, y)`), found by matching the map ID to an object in `Data\world\star<N>.json` — the mapping was verified on a real world.
 - **`.dt` decoding** — a "show map" link per map → full decode of the binary `Data\maps\map<N>.dt` (an exact port of the game's own `Map.Load`/`MapCell.Read`/… serialization): histograms of blocks/vegetation (with Russian display names, pulled from the client's own localization, `resources.assets`), machines (furnace/crusher/…), ore points (same id space and same Russian names as blocks), the contents of every ground/underground container, the land-ownership grid (8×8 blocks → owner), gas/infection, oxygen map. The main map is 512×512, ~13 s for the first parse, cached afterwards.
+  - **World map modes:** "by clan" — plots are tinted with the owner's clan color, a legend with area and owner count, the clan shows in the hover info; "shops" — player shop markers.
   - **Map viewer** — a PNG render (own encoder, no Pillow) with hover info (block/owner under the cursor), mouse-wheel zoom-to-cursor (25–400%), drag-to-pan, free rotation (315° by default, stays centered at any angle), and a land-ownership overlay. A **"⟳ rescan"** button next to the rotation controls force-redraws the map, bypassing the file-mtime cache (for when the real data changed but the cache didn't notice).
 - **Territories** — every player's `userTerritories` with owners, filterable by map.
-- **Find an item in the world** — type an item id or name (a substring works, e.g. `tech_booster`), pick a map or "whole world" → every match lists its `(x, y)`, the container (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), the count and durability. A whole-world scan takes up to ~2 min (72 maps); cached per map mtime. Endpoint `GET /api/mapdt-find?map=N|all&item=<id|name>`.
+- **Find an item in the world** — type an item id or name (a substring works, e.g. `tech_booster`), pick a map or "whole world" → every match lists its `(x, y)`, the container (`container:underground` / `machine.fuel` / `block` / `vehicle` / `unit` / `shop` / `block.res`), the count and durability. A whole-world scan takes up to a couple of minutes on a large world; cached per map mtime. Endpoint `GET /api/mapdt-find?map=N|all&item=<id|name>`.
 - **Space** — star systems and the galaxy, parsed from `Data\space\units.dt` (ships/meteorites/pods — a port of `ZData.SpaceUnit.Read`) and `Data\world\star<N>.json`/`cluster<N>.json` (reverse-engineered without source; an object's ID is its sequential position in the file, verified to match the in-game ID):
   - a **cluster → star system** picker (the game has several clusters, each with several systems);
   - a scatter map of the system (planets/asteroids/ships/meteorites/pods) with the same zoom/pan as the `.dt` viewer, coordinates under the cursor;
@@ -475,7 +517,7 @@ The **"Map"** tab — everything about maps and the game's binary world data, re
 
 ### Twinks
 
-The **"Twinks"** tab detects accounts that connected from the same IP, from `Logs\log_net_ip.txt` (`nick = IP = InterNetwork = port`). Opens after you enter **your own panel password** (IPs + linking accounts are sensitive; the attempt is audited). Shows groups: IP → list of accounts (ID, nickname linking to the card, connection count, first/last seen, the account's other IPs), sorted by group size. The "min accounts per IP" threshold is adjustable (default 2). `config.json → players.twink_ignore_ips` — IPs to skip (e.g. the local relay `127.0.0.2` that all clients go through on the current VM — there are no real client IPs in the log there).
+The **"Twinks"** tab detects accounts that connected from the same IP, from `Logs\log_net_ip.txt` (`nick = IP = InterNetwork = port`). Opens after you enter **your own panel password** (IPs + linking accounts are sensitive; the attempt is audited). Shows groups: IP → list of accounts (ID, nickname linking to the card, connection count, first/last seen, the account's other IPs), sorted by group size. The "min accounts per IP" threshold is adjustable (default 2). `config.json → players.twink_ignore_ips` — IPs to skip (e.g. a local relay address, if every client connects through it and the log has no real client IPs).
 
 ### Clans
 
@@ -486,11 +528,41 @@ The **"Clans"** tab (`Data\game\clans.json`, game class `ZData.Clan`). List: mem
 - **Clan tech scheme** (`isClan` in `tech.json`, researched ones — `clan.tech`).
 - **Members' personal techs** — by default "coverage": how many members know each tech; pick a member from the list to see theirs.
 
-Endpoints: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`.
+- **Who's closest** — click a tech in the personal-tech scheme: members sorted by hours left to it.
+- **Clan history** — the game keeps none, so the panel does (same background thread as tech tracking): "joined / left / role change / new clan tech / renamed / roster expanded" events (`logs\clan_events.jsonl`) and hourly rating, Clan Points and size points (`logs\clan_points.jsonl`) — charts and a log in the clan card. Accumulates from when it's enabled.
+
+Endpoints: `GET /api/clans`, `GET /api/clans?id=N`, `GET /api/tech-tree`, `GET /api/clan-history?id=N`.
+
+### Craft
+
+The **"Craft"** tab — a calculator over `Data\craft.json` (recipes: workbench, time, output, required tech) and `Data\machines.json` (furnace, crusher, extractor, etc.: material → product). Pick an item and a quantity → a breakdown to raw materials: total raw materials, intermediate crafts, total time, required workbenches and machines, the craft tree and "used in". Pick a player or a clan to see, for every required tech, whether it's known and how many steps/hours are left to it. Endpoints: `GET /api/craft-catalog`, `GET /api/craft-plan?item=…&qty=N[&uid=N|&clan=N]`.
+
+### Trade
+
+The **"Trade"** tab — every offer on the server from two sources, both binary and decoded from the game's code:
+
+- **player trade terminals** — `Data\game\terminals.dt2` (the `TerminalManager.Save` / `TradingTerminal.Save` format): "player gives → wants in return" lots, sales count, revenue in storage, when the owner was last around;
+- **map shops** — `Shop` blocks inside `map<N>.dt`: goods and price per slot, sales, revenue; the owner comes from the land plot.
+
+Search by item (selling / buying), a source filter, rates like "1 X = N Y". The first pass over all maps takes up to a minute or two on a large world, then it's cached per map mtime. Endpoint `GET /api/trade` (a background job, the client polls `/api/job`).
+
+### Economy
+
+The **"Economy"** tab — how much of every item exists: with players (stash + carried), in chests and dropped on maps (natural buried stashes excluded), in trade. Per item — holder count, top holders, the median rate across trade offers and the 24 h / 7 d change. Trends come from daily snapshots the panel takes itself in the background (`logs\economy_daily.jsonl`); click an item for its daily chart. The map pass is shared with "Trade". Endpoints: `GET /api/economy`, `GET /api/economy-item?id=N`.
+
+### Violations
+
+The **"Violations"** tab — opens after you enter the panel password (it links accounts), and viewing is audited. Every few minutes the panel diffs all players itself (log `logs\suspicious.jsonl`):
+
+- **inventory spike** — coins/boosters rising above a threshold (`players.suspicious.watch` in `config.json`) or any item growing 10×+; next to it — who lost about as much in the same interval (a possible transfer), flagged if that's a linked account (shared password or IP, as in the "Twinks" tab);
+- **fast research** — techs worth more than the elapsed time plus boosters spent (a tech granted via the panel lands here too — check the audit);
+- **abnormal prices** — trade lots whose rate is 10×+ off the median for the same "goods → payment" pair.
+
+These are leads to check, not automatic verdicts.
 
 ### Mixtures & cooking
 
-Both formulas were recovered by decompiling `GameAssembly.dll` (Il2CppDumper + Ghidra) and verified against every recipe the server actually computed (mixtures 366/366, dishes 2305/2305) — the optimizers compute exactly, they don't guess. Ingredient tables are generated by the server once per world (`Data\product\`), each world has its own.
+Both formulas were recovered by decompiling `GameAssembly.dll` (Il2CppDumper + Ghidra) and verified against every recipe the server actually computed (a 100 % match on a real world) — the optimizers compute exactly, they don't guess. Ingredient tables are generated by the server once per world (`Data\product\`), each world has its own.
 
 - **Mixtures** (`buff_balance.json`, `buff_lib.json`): tick the ingredients you have and the effect you want → full search over ordered 4-ingredient combos, top 5. Plus upload of the client's `buff_notepad.json` (the tried-mix memory lives on the player's machine, not the server).
 - **Cooking** (`product_balance.json`, `product_genes.json`, `product_lib.json`): 4 ingredients in a 2×2 grid, order matters. Satiety = product of the pairwise "balances" along the grid's rows and columns × 0.3125; dish genes = XOR of the ingredients' genes. Eating a dish gives satiety +N, energy +N/5 and +N/5 to each of its genes (Genetics A–D); once all four reach 100 — +1 genetics point. The game refuses a dish above the player's max satiety — hence the "max satiety" filter and the required-genes picker. Below — every dish ever cooked on the server (filter by ingredient, sort by satiety).
@@ -515,7 +587,7 @@ The world folder is set via `config.json → players`: `localserver_root` (empty
 - **Profile:** level, rating, country, GPU, screen resolution, total hours, "last session N h ago", ban + when it lifts
 - **Clan** (from `Data\game\clans.json`): name, rating, members with names (👑 leader) and cross-links · **Friends** (from `friends.json`)
 - **Research:** current + est. time left (via `serverTime` from `Data\game\settings.json`), techs done, booster · **Missions**
-- **Research scheme** — the whole `Data\tech.json` tree (SVG): researched / in progress / available / locked, tooltip with name and research time
+- **Research scheme** — the whole `Data\tech.json` tree (SVG): researched / in progress / available / locked, tooltip with name, research time and what the tech unlocks. **Planner:** click a tech to highlight the path to it and see how many steps and hours are left
 - **Position:** map / coords / respawn point / territory list
 - **Avatar:** stats (`paramList`) as bars, skills, named abilities in Russian (slugs from `Data\ability.json`, display text pulled from the client's own localization, same as blocks/ore above), stash and carried inventory with item names (from `Data\items.json`)
 - **Sessions:** total / hours online / avg / max, activity histogram by hour of day, last 15 sessions
@@ -541,7 +613,9 @@ Optional arguments: `setup.bat [BASE_DIR] [/autologon USER PASSWORD]` — a cust
 
 ### Settings from the panel
 
-The **"Settings"** tab is a `config.json` editor with no manual file editing: general options, web panel, watchdog, server monitor, the "Players" data source, Telegram (the token is a `secret` field — once set, it's never shown again), Steam/server list. Plus:
+The **"Settings"** tab is a `config.json` editor with no manual file editing: general options, web panel (including allowed addresses and the panel title), watchdog, server monitor, Discord stats, the "Players" data source, Telegram (the token is a `secret` field — once set, it's never shown again), Steam/server list. Plus:
+
+- **Panel icon** — upload your own browser-tab icon (applied immediately);
 
 - **Game accounts** — a list of login/password pairs with an active one selected (for auto-login with several accounts on one VM);
 - **`login_flow` (advanced)** — the raw JSON of login click coordinates, for a non-standard window resolution;
@@ -586,17 +660,3 @@ After `/stopbot` (task disabled, Telegram won’t help): the **“Запусти
 **RU:** Проект стартовал как `sigmabot_win` — простой авто-логин + Telegram-бот. По мере роста (веб-панель, аналитика, реверс-инжиниринг игровых форматов, карта космоса) он перерос исходный масштаб, и репозиторий был переименован в **`SWO-Server-Panel`** прямо на GitHub — вся история и коммиты сохранены, ссылки со старого имени редиректят на новое.
 
 **EN:** The project started as `sigmabot_win` — a simple auto-login + Telegram bot. As it grew (web panel, analytics, reverse-engineered game formats, the space map) it outgrew that scope, and the GitHub repository was renamed to **`SWO-Server-Panel`** in place — full history and commits are preserved, and links to the old name redirect to the new one.
-
-### Скриншоты / Screenshots
-
-**RU:** С тестового сервера (`ApexSigma`) — реальные данные игроков с прода (`AstralSigma`) в скриншоты не попадают.
-
-| Дашборд | Действия |
-|---|---|
-| ![Дашборд](docs/screenshots/dashboard.png) | ![Действия](docs/screenshots/actions.png) |
-
-| Карта | Микстуры |
-|---|---|
-| ![Карта](docs/screenshots/map.png) | ![Микстуры](docs/screenshots/buffs.png) |
-
-**EN:** From the test server (`ApexSigma`) — no live player data from production (`AstralSigma`) ever shows up in screenshots.

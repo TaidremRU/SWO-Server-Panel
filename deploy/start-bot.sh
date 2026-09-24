@@ -2,17 +2,17 @@
 # Поднять SigmaSteamBot на VM после /stopbot: включает и запускает задачу планировщика.
 # (после /stopbot задача ОТКЛЮЧЕНА, поэтому нужен именно Enable, потом Start.)
 #
-# Переменные окружения (значения по умолчанию в скобках):
-#   SIGMA_VM_HOST (192.168.0.106)  SIGMA_VM_USER (alex)
-#   SIGMA_VM_PASS (1)              SIGMA_TASK    (SigmaSteamBot)
-#   SIGMA_BASE_DIR (C:\Users\alex\gamebot\stage2)  — только для подсказки про логи
+# Переменные окружения:
+#   SIGMA_VM_HOST, SIGMA_VM_USER, SIGMA_VM_PASS — адрес VM и учётка Windows (обязательно)
+#   SIGMA_TASK     (SigmaSteamBot)
+#   SIGMA_BASE_DIR (%USERPROFILE%\sigmabot) — только для подсказки про логи
 set -euo pipefail
 
-HOST="${SIGMA_VM_HOST:-192.168.0.106}"
-USER_="${SIGMA_VM_USER:-alex}"
-PASS="${SIGMA_VM_PASS:-1}"
+HOST="${SIGMA_VM_HOST:?задайте SIGMA_VM_HOST — адрес VM}"
+USER_="${SIGMA_VM_USER:?задайте SIGMA_VM_USER — пользователь Windows на VM}"
+PASS="${SIGMA_VM_PASS:?задайте SIGMA_VM_PASS — его пароль}"
 TASK="${SIGMA_TASK:-SigmaSteamBot}"
-BASE="${SIGMA_BASE_DIR:-C:\\Users\\alex\\gamebot\\stage2}"
+BASE="${SIGMA_BASE_DIR:-%USERPROFILE%\\sigmabot}"
 
 command -v sshpass >/dev/null || { echo "нужен sshpass (apt install sshpass)"; exit 1; }
 
