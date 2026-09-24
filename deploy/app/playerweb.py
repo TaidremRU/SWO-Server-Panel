@@ -440,6 +440,14 @@ class PlayerWeb:
             if path == "/admin" or path.startswith("/admin/"):
                 if not (self.web and self._pcfg().get("admin_proxy")):
                     return self._send(h, 404, "text/plain; charset=utf-8", "not found")
+                # только тем, кто уже вошёл в админку (кнопка «Админка» у стаффа) и сохранил роль;
+                # остальным — 403 без формы входа: подбирать пароль здесь не через что
+                if not self.web.session_ok(h):
+                    return self._send(h, 403, "text/html; charset=utf-8",
+                                      '<!doctype html><meta charset="utf-8"><title>403</title>'
+                                      '<p style="font:16px system-ui;margin:40px">403 — админка открывается только '
+                                      'через кнопку «Админка» в <a href="/">панели игрока</a> '
+                                      '(для игроков с ролью в игре).</p>')
                 if path == "/admin":
                     return self._send(h, 302, "text/plain", "", {"Location": "/admin/"})
                 h.path = h.path[len("/admin"):]

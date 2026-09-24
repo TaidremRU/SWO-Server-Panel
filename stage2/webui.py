@@ -800,6 +800,12 @@ class WebUI:
             return None
         return role if ROLE_LEVEL[role] <= ROLE_LEVEL[g] else g
 
+    def session_ok(self, h):
+        """Есть ли у запроса действующая сессия админки с ролью (для /admin/ на порту
+        панели игроков: без неё — 403, даже формы входа не видно)."""
+        tok, sess = self._session_of(h)
+        return bool(sess and self._effective_role(sess["user"]))
+
     def enter_as_game_user(self, h, uid, nick, password, new_password, ip):
         """Вход в админку из панели игроков. Первый раз — задать отдельный админский
         пароль (не игровой), дальше — вход по нему. -> (status, dict, set_cookie|None)."""
