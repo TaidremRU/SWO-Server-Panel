@@ -20,6 +20,7 @@ PBKDF2-HMAC-SHA256. Сессия — cookie ``sid`` (в памяти проце�
 доступ к этому боксу).
 """
 import base64
+import collections
 import copy
 import hashlib
 import http.cookies
@@ -869,6 +870,10 @@ class WebUI:
             sub = parts[2] if len(parts) > 2 else ""
             if sub in ("secret", "sensitive", "inventory"):
                 return 3
+            if sub == "view-as":
+                return 4        # «глазами игрока» — только GM
+            if sub in ("where", "journal"):
+                return 2
             if sub == "moderate":
                 return 2        # точнее — в _api_player_moderate (бан/разбан модератору, остальное админу)
             return 1
@@ -1033,6 +1038,10 @@ class WebUI:
                     return self._api_player_inventory(h, pid, sess)
                 if sub == "moderate" and method == "POST":
                     return self._api_player_moderate(h, pid, sess)
+                if sub in ("where", "journal", "history") and method == "GET":
+                    return self._api_player_extra(h, pid, sub, q, sess)
+                if sub == "view-as" and method == "POST":
+                    return self._api_player_view_as(h, pid, sess)
                 return self._json(h, {"error": "unknown"}, 404)
 
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
@@ -1395,6 +1404,86 @@ class WebUI:
                    "ПОКАЗАНЫ приваты/IP игрока #%s (%d сообщ., %d IP)"
                    % (pid, len(d.get("private", [])), len(d.get("distinct_ips", []))))
         return self._json(h, d)
+
+    # ---------------------------------------- инструменты из панели игрока (для админки)
+    def _pw(self):
+        """Панель игроков в этом же процессе (её кэши сундуков/рынка и снимки цен). Если
+        она выключена — свой экземпляр без веб-сервера (данные считаются по запросу)."""
+        pw = getattr(self, "pweb", None)
+        if pw is None:
+            from playerweb import PlayerWeb
+            pw = PlayerWeb(self.cfg, self.state, web=self)
+        if not pw._market["data"] and not pw._market["running"]:
+            pw._market["running"] = True
+            threading.Thread(target=pw._market_build, name="pw-market", daemon=True).start()
+        return pw
+
+    def _api_player_extra(self, h, pid, sub, q, sess):
+        try:
+            uid = int(pid)
+        except ValueError:
+            return self._json(h, {"error": "bad"}, 400)
+        pw = self._pw()
+        if sub == "where":
+            d = pw._api_where(uid, q)
+        elif sub == "history":
+            d = pw._api_history(uid, q)
+        else:
+            d = dict(pw._api_journal(uid, q))
+            if d.get("ok") and sess.get("role") == "gm":
+                d["events"] = sorted(d["events"] + self._panel_events(uid), key=lambda e: -e["t"])[:2000]
+                d["kinds"] = dict(collections.Counter(e["kind"] for e in d["events"]))
+        return self._json(h, d, 200 if d.get("ok") else 404)
+
+    def _panel_events(self, uid, days=30):
+        """Действия игрока в панели игроков и (если он стафф) в админке — из журнала активности."""
+        since = time.time() - days * 86400
+        rows = [r for r in self.act.query(src="player", user=str(uid), since=since, limit=1500)["rows"]
+                if r.get("uid") == uid]
+        linked = self.auth.user_for_game(uid)
+        if linked:
+            rows += [r for r in self.act.query(src="admin", user=linked, since=since, limit=1500)["rows"]
+                     if r.get("user") == linked]
+        out = []
+        for r in rows:
+            where = "Админка" if r.get("src") == "admin" else "Панель игрока"
+            ev = r.get("ev")
+            if ev == "ui":
+                det = "[%s] %s: %s" % (r.get("tab", ""), r.get("a", ""), r.get("d", ""))
+            elif ev in ("req", "page", "denied", "probe"):
+                qs = "&".join("%s=%s" % kv for kv in (r.get("q") or {}).items())
+                det = "%s %s%s → %s" % (r.get("m", ""), r.get("path", ""), ("?" + qs) if qs else "", r.get("st"))
+            else:
+                det = " · ".join(str(x) for x in (ev, r.get("d"), r.get("ip")) if x)
+            if "[GM " in str(r.get("user") or ""):       # это GM смотрел «глазами игрока», а не сам игрок
+                where += " · " + str(r["user"])[str(r["user"]).index("[GM "):]
+            out.append({"t": int(r.get("t", 0)), "kind": "panel", "label": where, "detail": det})
+        return out
+
+    def _api_player_view_as(self, h, pid, sess):
+        ok, b = self._reauth(h, sess, "глазами игрока #%s" % pid)
+        if not ok:
+            return b
+        pwc = self.cfg.get("playerweb") or {}
+        if not pwc.get("enabled") or getattr(self, "pweb", None) is None:
+            return self._json(h, {"error": "bad", "detail": "панель игроков выключена"}, 400)
+        try:
+            uid = int(pid)
+        except ValueError:
+            return self._json(h, {"error": "bad"}, 400)
+        wd = players.find_world_dir(self.cfg)
+        nick = (players.load_user_list(wd) if wd else {}).get(uid)
+        if not nick:
+            return self._json(h, {"error": "bad", "detail": "нет такого игрока"}, 404)
+        t = self.pweb.make_view_link(uid, nick, sess["user"])
+        self.audit(_cip(h), sess["user"], "ГЛАЗАМИ ИГРОКА #%s (%s) — выдана ссылка" % (uid, nick))
+        return self._json(h, {"ok": True, "port": int(pwc.get("port", 80)), "path": "/view-as?t=" + t})
+
+    def _api_price_history(self, h, method, q, sess):
+        return self._json(h, self._pw()._api_price_history(None, q))
+
+    def _api_season_rating(self, h, method, q, sess):
+        return self._json(h, self._cached("season-rating", lambda: players.season_rating(self.cfg), ttl=60))
 
     def _api_items(self, h, method, q, sess):
         try:
@@ -2881,6 +2970,14 @@ var T = {
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
   entry_add_step:"+ шаг из выбранной точки", entry_use_pick:"взять выбранную точку", entry_saved:"Сохранено",
   log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)", log_act:"Журнал активности", log_blocks:"Блокировки входа",
+  fl_near:"рядом:", fl_transit:"в пути, вдали от объектов системы",
+  ph_title:"История цен рынка", ph_intro:"Цена за 1 шт. по предложениям у терминалов и магазинов — снимок раз в час (панель игроков, копится с 25.09.2026). Резкие изменения — медианная цена в той же валюте изменилась на 50% и больше за сутки или неделю: демпинг, накрутка, перекачка ценностей через рынок.", ph_snaps:"снимков", ph_alerts:"Резкие изменения цен", ph_noalerts:"Резких изменений цен нет.", ph_item:"Предмет (валюта)", ph_period:"За", ph_was:"Было", ph_now:"Сейчас", ph_lots:"Лотов", ph_pick:"график цены предмета", ph_median:"Медианная цена", ph_min:"Минимальная цена", ph_other:"Также продают за",
+  sr_title:"Сезонный рейтинг — полностью", sr_intro:"Игроков с очками в сезоне: {n} из {all}. Награда по месту — фиксированная шкала (места 1–6). «Получено» — сколько раз и сколько ускорителей игрок получил за всё время.", sr_last:"Последняя раздача", sr_find:"ник или клан", sr_clan:"Клан", sr_points:"Очки", sr_gap:"Отставание от места выше", sr_reward:"Награда сейчас", sr_got:"Получено",
+  pt_title:"Инструменты", pt_where:"Всё имущество", pt_where_ph:"фильтр по предмету", pt_total:"Итого предметов", pt_place:"Где", pt_items:"Что лежит", pt_market_pending:"Склад терминала появится через пару минут — собираются данные рынка.",
+  pt_journal:"Журнал игрока", pt_journal_hint:"События игрока из журналов сервера и панели в одной ленте. Кнопки — показать/скрыть категорию.", pt_journal_gm:"События игрока из журналов сервера и панели в одной ленте, плюс (для GM) его действия в панели игроков и в админке за 30 дней — категория «Панель». Кнопки — показать/скрыть категорию.",
+  pt_when:"Когда", pt_event:"Событие", pt_k_tech:"Техи", pt_k_research:"Исследование", pt_k_booster:"Ускорители", pt_k_level:"Уровни", pt_k_clan:"Клан", pt_k_death:"Смерти", pt_k_reward:"Награды", pt_k_role:"Роли", pt_k_land:"Участки", pt_k_session:"Сессии", pt_k_panel:"Панель",
+  pt_hist:"Графики", pt_techs:"Изучено техов", pt_hist_none:"Истории пока нет — снимки делаются раз в час.", pt_hist_since:"Снимки с",
+  pt_viewas:"Глазами игрока", pt_viewas_hint:"Ссылка одноразовая и действует 60 секунд. Откроет панель игрока от его имени только на чтение на 30 минут; вход и все действия записываются в журнал активности. Выход — кнопкой «Выйти из просмотра» вверху страницы.", pt_viewas_open:"Открыть панель игрока глазами",
   sg_title:"Генерация космоса", sg_run:"Анализировать", sg_intro:"Что в космосе (звёздные системы, кластеры, стартовая карта новичков) создано или изменено после первоначальной генерации мира и когда. Три независимых признака: порядок номеров звёзд в кластерах (не зависит от дат), даты файлов (если мир копировали или восстанавливали — это даты копирования) и история по бэкапам мира; плюс дата обновления игры в Steam. Только чтение.",
   sg_world:"Мир", sg_gen:"Генерация мира", sg_stars:"Звёздных систем", sg_missing:"нет номеров:", sg_clusters:"Кластеров", sg_start:"Стартовая карта новичков", sg_was:"было", sg_steam:"Обновление игры в Steam", sg_backups:"Бэкапов мира",
   sg_concl:"Выводы", sg_late:"Системы, созданные или изменённые после генерации", sg_what:"Что", sg_when:"Когда", sg_cluster:"Кластер", sg_objs:"Объектов (план./спутн./астер.)", sg_planets:"Планеты",
@@ -3126,6 +3223,14 @@ var T = {
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
   entry_add_step:"+ step from picked point", entry_use_pick:"use picked point", entry_saved:"Saved",
   log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)", log_act:"Activity log", log_blocks:"Login blocks",
+  fl_near:"near:", fl_transit:"in transit, far from system objects",
+  ph_title:"Market price history", ph_intro:"Price per 1 item from terminal and shop offers — hourly snapshot (player panel, collected since 2026-09-25). Sharp changes — the median price in the same currency moved by 50% or more over a day or a week: dumping, inflation, value transfer via the market.", ph_snaps:"snapshots", ph_alerts:"Sharp price changes", ph_noalerts:"No sharp price changes.", ph_item:"Item (currency)", ph_period:"Over", ph_was:"Was", ph_now:"Now", ph_lots:"Lots", ph_pick:"item price chart", ph_median:"Median price", ph_min:"Lowest price", ph_other:"Also sold for",
+  sr_title:"Season rating — full", sr_intro:"Players with season points: {n} of {all}. Reward by place is a fixed scale (places 1–6). “Received” — how many times and how many boosters the player got in total.", sr_last:"Last payout", sr_find:"nick or clan", sr_clan:"Clan", sr_points:"Points", sr_gap:"Behind the place above", sr_reward:"Reward now", sr_got:"Received",
+  pt_title:"Tools", pt_where:"All property", pt_where_ph:"filter by item", pt_total:"Items total", pt_place:"Where", pt_items:"What", pt_market_pending:"Terminal storage will appear in a couple of minutes — market data is being collected.",
+  pt_journal:"Player journal", pt_journal_hint:"The player's events from server and panel logs in one feed. Buttons show/hide a category.", pt_journal_gm:"The player's events from server and panel logs in one feed, plus (GM) their actions in the player panel and admin panel for 30 days — the “Panel” category. Buttons show/hide a category.",
+  pt_when:"When", pt_event:"Event", pt_k_tech:"Techs", pt_k_research:"Research", pt_k_booster:"Boosters", pt_k_level:"Levels", pt_k_clan:"Clan", pt_k_death:"Deaths", pt_k_reward:"Rewards", pt_k_role:"Roles", pt_k_land:"Plots", pt_k_session:"Sessions", pt_k_panel:"Panel",
+  pt_hist:"Charts", pt_techs:"Techs learned", pt_hist_none:"No history yet — snapshots are hourly.", pt_hist_since:"Snapshots since",
+  pt_viewas:"View as player", pt_viewas_hint:"One-time link valid for 60 seconds. Opens the player panel as this player, read-only, for 30 minutes; the login and every action are recorded in the activity log. Exit with the “Exit view” button at the top.", pt_viewas_open:"Open the player panel as",
   sg_title:"Space generation", sg_run:"Analyze", sg_intro:"What in space (star systems, clusters, newcomer start map) was created or changed after the initial world generation, and when. Three independent signals: star id order within clusters (date-independent), file dates (after a copy/restore these are copy dates) and world backup history; plus the Steam game update date. Read-only.",
   sg_world:"World", sg_gen:"World generation", sg_stars:"Star systems", sg_missing:"missing ids:", sg_clusters:"Clusters", sg_start:"Newcomer start map", sg_was:"was", sg_steam:"Steam game update", sg_backups:"World backups",
   sg_concl:"Findings", sg_late:"Systems created or changed after generation", sg_what:"What", sg_when:"When", sg_cluster:"Cluster", sg_objs:"Objects (plan./sat./aster.)", sg_planets:"Planets",
@@ -4409,8 +4514,119 @@ function tabEconomy(v){
     el("div",{class:"card"},[el("h3",{},[t("ec_title")]), el("p",{class:"muted small"},[t("ec_intro")]),
       el("div",{class:"row",style:"gap:8px;flex-wrap:wrap;align-items:center"},[q, el("span",{class:"small"},[t("ec_sort")]), sortSel,
         el("button",{class:"small",onclick:function(){ load(true); }},[t("refresh")]), msg])]),
-    detail, out]));
+    adminPriceCard(), detail, out]));
   load(false);
+}
+// история цен рынка (снимки панели игроков раз в час) + резкие изменения
+function adminPriceCard(){
+  var body=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  api("/api/price-history").then(function(d){
+    body.innerHTML="";
+    body.appendChild(el("p",{class:"muted small"},[t("ph_intro")+" "+t("ph_snaps")+": "+d.snapshots+(d.since? " · "+new Date(d.since*1000).toLocaleDateString() : "")]));
+    if(d.alerts&&d.alerts.length){
+      body.appendChild(el("h3",{},["⚠ "+t("ph_alerts")+" · "+d.alerts.length]));
+      body.appendChild(scT(ltable([t("ph_item"),t("ph_period"),t("ph_was"),t("ph_now"),"%",t("ph_lots")],d.alerts,function(a){
+        return [a.name+" ("+a.pay+")", a.period, fmtN(a.was), fmtN(a.now),
+          el("b",{style:"color:"+(a.change<0?"var(--err)":"var(--ok)")},[(a.change>0?"+":"")+a.change+"%"]), String(a.lots)]; })));
+    } else body.appendChild(el("div",{class:"muted small"},[t("ph_noalerts")]));
+    if(!d.items.length) return;
+    var sel=el("select",{style:"margin-top:10px;max-width:100%"},[el("option",{value:""},["— "+t("ph_pick")+" —"])].concat(
+      d.items.map(function(x){ return el("option",{value:x.id},[x.name+" · "+fmtN(x.median)+" × "+x.pay+" ("+x.lots+")"]); })));
+    var ch=el("div",{},[]);
+    sel.onchange=function(){
+      ch.innerHTML=""; if(!sel.value) return;
+      api("/api/price-history?id="+encodeURIComponent(sel.value)).then(function(h){
+        var sr=h.series||[];
+        ch.appendChild(el("div",{class:"row",style:"gap:16px;flex-wrap:wrap;align-items:flex-start;margin-top:8px"},[
+          lineChart(sr.map(function(p){ return {t:p.t,v:p.median}; }),t("ph_median")+", "+h.pay),
+          lineChart(sr.map(function(p){ return {t:p.t,v:p.min}; }),t("ph_min")+", "+h.pay),
+          lineChart(sr.map(function(p){ return {t:p.t,v:p.lots}; }),t("ph_lots"))]));
+        if(h.other_pays&&h.other_pays.length) ch.appendChild(el("div",{class:"muted small"},[t("ph_other")+": "+h.other_pays.join(", ")]));
+      }).catch(function(e){ ch.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+    };
+    body.appendChild(sel); body.appendChild(ch);
+  }).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("ph_title")]), body]);
+}
+// весь сезонный рейтинг (очки, разрывы, награды)
+function seasonRatingCard(){
+  var body=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  api("/api/season-rating").then(function(d){
+    body.innerHTML="";
+    if(!d.ok){ body.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    body.appendChild(el("p",{class:"muted small"},[t("sr_intro").replace("{n}",d.with_points).replace("{all}",d.total_users)
+      +(d.payouts.length? " "+t("sr_last")+": "+d.payouts[0].ts+" ("+d.payouts[0].n+")" : "")]));
+    var q=el("input",{placeholder:t("sr_find"),style:"margin-bottom:6px;min-width:220px"}), tb=el("div",{style:"max-height:460px;overflow:auto"});
+    function draw(){
+      var f=q.value.trim().toLowerCase(); tb.innerHTML="";
+      tb.appendChild(ltable(["#",t("cl_player"),t("sr_clan"),t("pd_level"),t("sr_points"),t("sr_gap"),t("sr_reward"),t("sr_got")],
+        d.rows.filter(function(r){ return !f || r.name.toLowerCase().indexOf(f)>=0 || (r.clan||"").toLowerCase().indexOf(f)>=0; }), function(r){
+          return [String(r.place), plLink(r.id,r.name), r.clan||"—", r.level==null?"—":String(r.level), el("b",{},[fmtN(r.points)]),
+            r.gap_prev==null?"—":fmtN(r.gap_prev), r.reward? "+"+r.reward : "—", r.rewards_n? r.rewards_n+" · Σ"+r.rewards_sum : "—"]; }));
+    }
+    q.addEventListener("input",draw); body.appendChild(q); body.appendChild(tb); draw();
+  }).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  return el("div",{class:"card",style:"margin-bottom:12px"},[el("h3",{},[t("sr_title")]), body]);
+}
+// инструменты из панели игрока в карточке игрока
+var PT_ICO={tech:"🔬",research:"🧪",booster:"⚡",level:"⭐",clan:"🛡",death:"💀",reward:"🏆",role:"🎖",land:"🏚",session:"🎮",panel:"🖥"};
+function pdToolsCard(d){
+  var out=el("div",{style:"margin-top:10px"},[]);
+  function show(title, url, draw){
+    out.innerHTML=""; out.appendChild(el("h3",{},[title]));
+    var body=el("div",{},[el("p",{class:"muted small"},["…"])]); out.appendChild(body);
+    api(url).then(function(j){ body.innerHTML="";
+      if(!j.ok){ body.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; } draw(body,j);
+    }).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  function chips(list){ return el("div",{class:"row",style:"gap:4px;flex-wrap:wrap"},list.map(function(x){ return el("span",{class:"chip"},[x.name+" ×"+fmtN(x.count)]); })); }
+  function where(){ show(t("pt_where"),"/api/players/"+d.id+"/where",function(body,j){
+    var q=el("input",{placeholder:t("pt_where_ph"),style:"width:100%;margin-bottom:8px"}), res=el("div");
+    function draw(){
+      var f=q.value.trim().toLowerCase(); res.innerHTML="";
+      var places=j.places.map(function(p){ return {where:p.where, items:p.items.filter(function(x){
+        return !f || x.name.toLowerCase().indexOf(f)>=0 || (x.id||"").toLowerCase().indexOf(f)>=0; })}; }).filter(function(p){ return p.items.length; });
+      var tot={}; places.forEach(function(p){ p.items.forEach(function(x){ var k=x.id||x.name; tot[k]=tot[k]||{name:x.name,count:0}; tot[k].count+=x.count; }); });
+      var all=Object.keys(tot).map(function(k){ return tot[k]; }).sort(function(a,b){ return b.count-a.count; });
+      res.appendChild(el("div",{class:"small muted",style:"margin:4px 0"},[t("pt_total")+" · "+all.length])); res.appendChild(chips(all));
+      res.appendChild(el("div",{style:"max-height:380px;overflow:auto;margin-top:8px"},[ltable([t("pt_place"),t("pt_items")],places,function(p){ return [p.where, chips(p.items)]; })]));
+      if(j.market_pending) res.appendChild(el("div",{class:"muted small"},[t("pt_market_pending")]));
+    }
+    q.addEventListener("input",draw); body.appendChild(q); body.appendChild(res); draw(); }); }
+  function journal(){ show(t("pt_journal"),"/api/players/"+d.id+"/journal",function(body,j){
+    var off={session:true}, bar=el("div",{class:"row",style:"gap:4px;flex-wrap:wrap;margin-bottom:8px"}), list=el("div");
+    function draw(){
+      bar.innerHTML=""; list.innerHTML="";
+      Object.keys(j.kinds).forEach(function(k){ bar.appendChild(el("button",{class:"small"+(off[k]?"":" pri"),onclick:function(){ off[k]=!off[k]; draw(); }},
+        [(PT_ICO[k]||"")+" "+(T[S.lang]["pt_k_"+k]||k)+" · "+j.kinds[k]])); });
+      var rows=j.events.filter(function(e){ return !off[e.kind]; }).slice(0,1000);
+      list.appendChild(el("div",{style:"max-height:440px;overflow:auto"},[ltable([t("pt_when"),t("pt_event"),""],rows,function(e){
+        return [el("span",{class:"mono small",style:"white-space:nowrap"},[e.t? new Date(e.t*1000).toLocaleString() : "—"]),
+          (PT_ICO[e.kind]||"")+" "+e.label, el("span",{class:"small",style:"word-break:break-word"},[e.kind==="session"&&e.detail? e.detail+" "+t("pd_min") : e.detail])]; })]));
+    }
+    body.appendChild(el("p",{class:"muted small"},[t(isGM()? "pt_journal_gm" : "pt_journal_hint")])); body.appendChild(bar); body.appendChild(list); draw(); }); }
+  function hist(){ show(t("pt_hist"),"/api/players/"+d.id+"/history",function(body,j){
+    function ser(k){ return j.points.map(function(p){ return {t:p.t,v:p[k]}; }); }
+    if(!j.points.length && (j.techs||[]).length<2){ body.appendChild(el("div",{class:"muted small"},[t("pt_hist_none")])); return; }
+    body.appendChild(el("div",{class:"row",style:"gap:16px;flex-wrap:wrap;align-items:flex-start"},[
+      lineChart(ser("level"),t("pd_level")), lineChart(ser("rating"),t("pd_rating")), lineChart(j.techs||[],t("pt_techs")),
+      lineChart(ser("play_h"),t("pd_playtime")), lineChart(ser("research_h"),t("st_resh"))]));
+    if(j.since) body.appendChild(el("div",{class:"muted small"},[t("pt_hist_since")+" "+new Date(j.since*1000).toLocaleString()])); }); }
+  function viewAs(){
+    gatedApi("/api/players/"+d.id+"/view-as",{},function(r){
+      var u=location.protocol+"//"+location.hostname+(r.port&&r.port!==80? ":"+r.port : "")+r.path;
+      out.innerHTML=""; out.appendChild(el("h3",{},["👁 "+t("pt_viewas")]));
+      out.appendChild(el("p",{class:"small"},[t("pt_viewas_hint")]));
+      out.appendChild(el("a",{href:u,target:"_blank",rel:"noopener",class:"pl-link",style:"font-weight:600"},[t("pt_viewas_open")+" "+d.name+" ↗"]));
+    },function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  var canMod=S.role!=="viewer";
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},[t("pt_title")]),
+    el("div",{class:"row",style:"gap:6px;flex-wrap:wrap"},[
+      canMod? el("button",{class:"small",onclick:where},["📦 "+t("pt_where")]) : null,
+      canMod? el("button",{class:"small",onclick:journal},["📜 "+t("pt_journal")]) : null,
+      el("button",{class:"small",onclick:hist},["📈 "+t("pt_hist")]),
+      isGM()? el("button",{class:"small danger",onclick:viewAs},["👁 "+t("pt_viewas")]) : null]), out]);
 }
 
 // ---- нарушения (под паролем панели) ----
@@ -4476,7 +4692,9 @@ function fleetCard(){
       [].concat.apply([], d.owners.map(function(o){ return o.ships.map(function(sh,i){ return {o:o, sh:sh, first:i===0}; }); })),
       function(r){ var sh=r.sh;
         return [r.first? (r.o.id? plLink(r.o.id,r.o.name) : "—") : "", r.first? (r.o.clan||"—") : "",
-          sh.model+(sh.moving? " · "+t("su_moving") : ""), "★"+sh.star+" · "+Math.round(sh.x)+", "+Math.round(sh.y),
+          sh.model+(sh.moving? " · "+t("su_moving") : ""),
+          el("span",{},["★"+sh.star+" · "+Math.round(sh.x)+", "+Math.round(sh.y),
+            el("div",{class:"muted small"},[sh.near? t("fl_near")+" "+sh.near+" · "+fmtN(sh.near_dist) : t("fl_transit")])]),
           String(sh.health), sh.cargo.length? el("span",{class:"small"},[sh.cargo.map(function(c){ return c.name+" ×"+fmtN(c.count); }).join(", ")]) : "—"]; }));
     if(d.stations.length){
       box.appendChild(el("div",{class:"small muted",style:"margin-top:10px"},[t("fl_stations_t")]));
@@ -4525,6 +4743,7 @@ function tabActivity(v){
 // ---- рейтинги ----
 function tabLeaders(v){
   var out=el("div",{},[el("p",{class:"muted"},["…"])]);
+  v.appendChild(seasonRatingCard());
   v.appendChild(out);
   function board(title, rows, fmt){
     return el("div",{class:"card"},[el("h3",{},[title]), rows.length? ltable(["#",t("cl_player"),""], rows, function(r){
@@ -5160,6 +5379,8 @@ function renderPlayerModal(d){
   b.appendChild(techSchemeCard(t("pd_tech_scheme"), function(nodes){
     var dn=setOf(r.tech_list);
     return schemeWithPlanner(nodes,{filter:function(n){ return !n.clan; }, done:dn, current:r.current}, playerPlanInfo(dn)); }));
+
+  b.appendChild(pdToolsCard(d));
 
   // sensitive blocks (each behind admin password)
   function gate(box, url, render){

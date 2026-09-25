@@ -166,6 +166,9 @@ class PlayerWeb:
         self.cfg = cfg
         self.state = state
         self.web = web               # админ-панель (WebUI) — для входа стаффа и /admin/ на этом порту
+        if web is not None:
+            web.pweb = self          # админка берёт отсюда «имущество», журнал, историю, цены игрока
+        self._view_links = {}        # одноразовые ссылки «глазами игрока» (GM): token -> {uid, nick, admin, exp}
         base = cfg.get("base_dir") or os.path.dirname(os.path.abspath(__file__))
         self._base = base
         self._ct_events = ct_events or os.path.join(base, "logs", "clan_events.jsonl")
@@ -418,6 +421,12 @@ class PlayerWeb:
 
     def _session(self, h):
         c = http.cookies.SimpleCookie(h.headers.get("Cookie", ""))
+        if "pview" in c:        # «глазами игрока» (GM) — поверх своей сессии, пока не выйти из просмотра
+            with self._slock:
+                s = self._sessions.get(c["pview"].value)
+                if s and s.get("imp") and s["exp"] > time.time():
+                    h._who, h._uid, h._sid = "%s [GM %s]" % (s["nick"], s["imp"]), s["uid"], self._thash(c["pview"].value)[:10]
+                    return c["pview"].value, s
         tok = c["psid"].value if "psid" in c else ""
         if not tok:
             return "", None
@@ -548,6 +557,8 @@ class PlayerWeb:
                     return self._send(h, 302, "text/plain", "", {"Location": "/admin/"})
                 h.path = h.path[len("/admin"):]
                 return self.web.dispatch(h, method, prefix="/admin")
+            if path == "/view-as" and method == "GET":
+                return self._view_as(h, q)
             if path == "/favicon.ico":
                 p = os.path.join(self._base, "favicon.img")
                 if os.path.exists(p):
@@ -565,7 +576,14 @@ class PlayerWeb:
             if route == "session" and method == "GET":
                 tok, s = self._session(h)
                 return self._json(h, {"authed": bool(s), "nick": s["nick"] if s else "", "title": self._title(),
-                                      "staff": self._staff(s["uid"]) if s else None})
+                                      "staff": self._staff(s["uid"]) if s and not s.get("imp") else None,
+                                      "view_as": s.get("imp") if s else None})
+            if route == "view-exit" and method == "POST":
+                c = http.cookies.SimpleCookie(h.headers.get("Cookie", ""))
+                if "pview" in c:
+                    with self._slock:
+                        self._sessions.pop(c["pview"].value, None)
+                return self._json(h, {"ok": True}, set_cookie="pview=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
             if route == "login" and method == "POST":
                 return self._api_login(h)
             if route == "public" and method == "GET":
@@ -576,6 +594,8 @@ class PlayerWeb:
                 tok, s = self._session(h)
                 if not s:
                     return self._json(h, {"error": "auth"}, 401)
+                if s.get("imp"):
+                    return self._json(h, {"error": "forbidden"}, 403)
                 return self._api_admin_enter(h, s)
             tok, s = self._session(h)
             if not s:
@@ -891,7 +911,7 @@ class PlayerWeb:
             rows = sorted(last.values(), key=lambda r: r["name"].lower())
             for r in rows:
                 r["points"] = cnt[r["id"]]
-            return {"ok": True, "items": rows, "snapshots": len(snaps),
+            return {"ok": True, "items": rows, "snapshots": len(snaps), "alerts": self._price_alerts(snaps),
                     "since": snaps[0]["t"] if snaps else None, "every_min": PRICE_SNAPSHOT_SEC // 60}
         pays = collections.Counter()
         for sn in snaps:
@@ -904,6 +924,63 @@ class PlayerWeb:
                   for sn in snaps for v in [((sn.get("p") or {}).get(want) or {}).get(pay)] if v]
         return {"ok": True, "id": want, "name": lab(want), "pay_id": pay, "pay": lab(pay), "series": series,
                 "other_pays": [lab(w) for w in pays if w != pay]}
+
+    @staticmethod
+    def _price_alerts(snaps, min_change=0.5):
+        """Резкие изменения медианной цены (в той же валюте): сейчас против ~суток и ~недели
+        назад. |изменение| ≥ 50% — повод посмотреть (демпинг, перекачка ценностей через рынок)."""
+        if len(snaps) < 2:
+            return []
+        now = snaps[-1]
+
+        def at(age):
+            best = None
+            for sn in snaps:
+                if sn.get("t", 0) <= now["t"] - age + 1800:
+                    best = sn
+            return best
+        out = []
+        for age, lab in ((86400, "сутки"), (7 * 86400, "неделю")):
+            old = at(age)
+            if not old or old is now:
+                continue
+            for g, ws in (now.get("p") or {}).items():
+                for w, v in ws.items():
+                    ov = ((old.get("p") or {}).get(g) or {}).get(w)
+                    if not ov or not ov[1]:
+                        continue
+                    ch = (v[1] - ov[1]) / ov[1]
+                    if abs(ch) >= min_change:
+                        out.append({"id": g, "name": players.item_label(g) or g, "pay": players.item_label(w) or w,
+                                    "was": ov[1], "now": v[1], "change": round(ch * 100), "period": lab,
+                                    "lots": v[2], "since": old["t"]})
+        out.sort(key=lambda a: -abs(a["change"]))
+        return out[:50]
+
+    # ------------------------------------------------------------ «глазами игрока» (GM)
+    VIEW_TTL = 1800
+
+    def make_view_link(self, uid, nick, admin):
+        """Одноразовая ссылка (60 с) на панель игрока от имени игрока — только чтение."""
+        t = secrets.token_urlsafe(24)
+        now = time.time()
+        self._view_links = {k: v for k, v in self._view_links.items() if v["exp"] > now}
+        self._view_links[t] = {"uid": int(uid), "nick": nick, "admin": admin, "exp": now + 60}
+        return t
+
+    def _view_as(self, h, q):
+        link = self._view_links.pop((q.get("t") or [""])[0], None)
+        if not link or link["exp"] < time.time():
+            return self._send(h, 403, "text/plain; charset=utf-8", "403: ссылка недействительна или устарела")
+        tok = secrets.token_urlsafe(32)
+        with self._slock:
+            self._sessions[tok] = {"uid": link["uid"], "nick": link["nick"], "exp": time.time() + self.VIEW_TTL,
+                                   "imp": link["admin"]}
+        self._event(h, "view_as", link["nick"], uid=link["uid"], d="GM %s открыл панель глазами игрока" % link["admin"])
+        if self.web:
+            self.web.audit(_cip(h), link["admin"], "ГЛАЗАМИ ИГРОКА #%s (%s) — вход в панель игрока" % (link["uid"], link["nick"]))
+        return self._send(h, 302, "text/plain", "", {
+            "Location": "/", "Set-Cookie": "pview=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (tok, self.VIEW_TTL)})
 
     # ------------------------------------------------------------ «где лежит?»
     def _api_where(self, uid, q):
@@ -972,27 +1049,11 @@ class PlayerWeb:
     def _my_ships(self, uid):
         fl = self._cached("fleet", 60, lambda: players.space_fleet(self.cfg))
         me = next((o for o in fl.get("owners") or [] if o.get("id") == uid), None)
-        out = []
-        for sh in (me or {}).get("ships") or []:
-            near, dist = None, None
-            try:
-                objs = self._cached(("star", sh.get("star")), 3600,
-                                    lambda: players.space_objects(self.cfg, sh.get("star") or 1)).get("objects") or []
-            except Exception:  # noqa: BLE001
-                objs = []
-            for o in objs:
-                d = math.hypot(o["x"] - sh["x"], o["y"] - sh["y"])
-                if dist is None or d < dist:
-                    near, dist = o, d
-            out.append({"id": sh["id"], "model": sh["model"], "star": sh.get("star"), "x": round(sh["x"]), "y": round(sh["y"]),
-                        "moving": sh.get("moving"), "speed": sh.get("speed"), "health": sh.get("health"),
-                        "crew": len(sh["aboard"]) if isinstance(sh.get("aboard"), list) else sh.get("aboard"),
-                        "cargo": sh.get("cargo") or [],
-                        # ближайший объект системы; дальше 50 тыс. ед. — корабль в пути между системами
-                        "near": ("%s %s" % (self._KIND_RU.get(near.get("kind"), ""), near["name"])).strip()
-                        if near and dist <= 50_000 else None,
-                        "near_dist": round(dist) if dist is not None else None})
-        return out
+        return [{"id": sh["id"], "model": sh["model"], "star": sh.get("star"), "x": round(sh["x"]), "y": round(sh["y"]),
+                 "moving": sh.get("moving"), "speed": sh.get("speed"), "health": sh.get("health"),
+                 "crew": sh.get("aboard"), "cargo": sh.get("cargo") or [],
+                 "near": sh.get("near"), "near_dist": sh.get("near_dist")}
+                for sh in (me or {}).get("ships") or []]
 
     def _api_my_ships(self, uid, q):
         fl = self._cached("fleet", 60, lambda: players.space_fleet(self.cfg))
@@ -1707,6 +1768,7 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Просмотр глазами игрока ":"Viewing as player ","только чтение":"read-only","Выйти из просмотра":"Exit view",
   "Журнал":"Journal",
   "Где лежит?":"Where is it?",
   "Корабли":"Ships",
@@ -2218,6 +2280,11 @@ function render(){
   if(!S.nick){ nav.style.display="none"; return renderLanding(); }
   nav.style.display="";
   who.appendChild(el("span",{class:"nk"},[S.nick+"  "]));
+  if(S.viewAs){
+    m.appendChild(el("div",{class:"msg",style:"border-color:var(--warn);color:var(--warn);margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"},[
+      "👁 "+L("Просмотр глазами игрока ")+S.nick+" · GM "+S.viewAs+" · "+L("только чтение"),
+      el("button",{class:"pri",onclick:function(){ api("/api/view-exit",{}).finally(function(){ location.href="/"; }); }},[L("Выйти из просмотра")])]));
+  } else
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
@@ -2880,7 +2947,7 @@ function tabServer(m, path){
   });
 }
 
-api("/api/session").then(function(d){ S.nick=d.authed? d.nick:""; S.staff=d.staff||null; if(d.title) document.title=d.title; render(); })
+api("/api/session").then(function(d){ S.nick=d.authed? d.nick:""; S.staff=d.staff||null; S.viewAs=d.view_as||null; if(d.title) document.title=d.title; render(); })
   .catch(function(){ render(); });
 </script>
 </body>

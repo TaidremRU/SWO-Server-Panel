@@ -2826,6 +2826,58 @@ def _merge_cargo(cargo, items):
             for t, n in tot.items()]
 
 
+_SPACE_KIND_RU = {"planet": "планета", "satellite": "спутник", "asteroid": "астероид"}
+
+
+def nearest_space_object(cfg, star_id, x, y, max_dist=50_000):
+    """Ближайший именованный объект звёздной системы -> («планета Имя», расстояние) или
+    (None, расстояние), если дальше ``max_dist`` (корабль в пути между системами)."""
+    try:
+        objs = space_objects(cfg, star_id).get("objects") or []
+    except Exception:  # noqa: BLE001
+        objs = []
+    best, dist = None, None
+    for o in objs:
+        d = math.hypot(o["x"] - x, o["y"] - y)
+        if dist is None or d < dist:
+            best, dist = o, d
+    if best is None:
+        return None, None
+    label = ("%s %s" % (_SPACE_KIND_RU.get(best.get("kind"), ""), best["name"])).strip()
+    return (label if dist <= max_dist else None), round(dist)
+
+
+def season_rating(cfg):
+    """Весь сезонный рейтинг (Data/users/rating.json, orderRating > 0) с местами, разрывами,
+    наградой по месту и полученными наградами (Logs/reward_order.txt) — для админки."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    raw = _read_json(os.path.join(world_dir, "Data", "users", "rating.json"), default={}) or {}
+    names = load_user_list(world_dir)
+    clan_of = {u.get("userId"): c.get("name") for c in _clans_raw(world_dir) for u in c.get("users") or []}
+    got, payouts = collections.defaultdict(list), collections.OrderedDict()
+    for ln in _read_text(os.path.join(world_dir, "Logs", "reward_order.txt")).splitlines():
+        m = _REWARD_RX.match(ln)
+        if m:
+            got[int(m.group(2))].append(int(m.group(3)))
+            payouts[m.group(1)] = payouts.get(m.group(1), 0) + 1
+    users = raw.get("users") or []
+    rows = sorted((u for u in users if (u.get("orderRating") or 0) > 0), key=lambda u: -(u.get("orderRating") or 0))
+    out, prev = [], None
+    for i, u in enumerate(rows):
+        uid, pts = u.get("userId"), u.get("orderRating") or 0
+        g = got.get(uid) or []
+        out.append({"place": i + 1, "id": uid, "name": names.get(uid) or ("id %s" % uid), "clan": clan_of.get(uid) or "",
+                    "level": u.get("level"), "points": pts, "rating": u.get("rating"),
+                    "gap_prev": (prev - pts) if prev is not None else None,
+                    "reward": REWARD_TIERS[i] if i < len(REWARD_TIERS) else 0,
+                    "rewards_n": len(g), "rewards_sum": sum(g)})
+        prev = pts
+    return {"ok": True, "rows": out, "total_users": len(users), "with_points": len(rows),
+            "tiers": list(REWARD_TIERS), "payouts": [{"ts": k, "n": v} for k, v in list(payouts.items())[-10:]][::-1]}
+
+
 def space_fleet(cfg):
     """Корабли в космосе по владельцам (из space\\units.dt) + станции игроков
     (Data\\stations\\station*.json)."""
@@ -2841,8 +2893,10 @@ def space_fleet(cfg):
         uid = sh.get("user_id") or 0
         o = owners.setdefault(uid, {"id": uid, "name": sh.get("name") or "—", "clan": clan_of.get(uid) or "",
                                     "ships": []})
+        near, dist = nearest_space_object(cfg, sh.get("star_id") or 1, sh["x"], sh["y"])
         o["ships"].append({"id": sh["id"], "model": sh["box_name"], "star": sh.get("star_id"),
                            "x": sh["x"], "y": sh["y"], "moving": sh["moving"], "speed": sh.get("speed"),
+                           "near": near, "near_dist": dist,
                            "health": sh.get("health"), "aboard": sh.get("aboard"),
                            "cargo": _merge_cargo(sh.get("cargo") or [], items)})
     stations = []
