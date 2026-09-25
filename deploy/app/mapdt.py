@@ -464,18 +464,22 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                             ctx["hits"].append({"x": _x, "y": _y, "where": "block.res",
                                                 "type": rr["type"], "count": rr["count"],
                                                 "durability": 0})
-                    if c["block"].get("transport"):
-                        tr = c["block"]["transport"]
-                        vehicles += 1
-                        vehicle_units += len(tr.get("units") or [])
-                        cargo = Counter()
-                        for it in (tr.get("inventory") or {}).get("items") or []:
-                            if it.get("count"):
-                                cargo[it["type"]] += it["count"]
-                        vehicles_list.append({"x": _x, "y": _y, "type": c["block"]["type"], "user_id": tr.get("user_id"),
-                                              "energy": round(tr.get("energy") or 0, 1), "health": round(tr.get("health") or 0, 1),
-                                              "units": len(tr.get("units") or []),
-                                              "cargo": [{"type": t, "count": n} for t, n in cargo.items()]})
+
+                # стоящий транспорт (ракеты, машины, лодки) игра кладёт в MapCell.Box; на всякий случай и в block
+                for vb in (c["box"], c["block"]):
+                    tr = (vb or {}).get("transport")
+                    if not tr:
+                        continue
+                    vehicles += 1
+                    vehicle_units += len(tr.get("units") or [])
+                    cargo = Counter()
+                    for it in (tr.get("inventory") or {}).get("items") or []:
+                        if it.get("count"):
+                            cargo[it["type"]] += it["count"]
+                    vehicles_list.append({"x": _x, "y": _y, "type": vb["type"], "user_id": tr.get("user_id"),
+                                          "energy": round(tr.get("energy") or 0, 1), "health": round(tr.get("health") or 0, 1),
+                                          "units": len(tr.get("units") or []),
+                                          "cargo": [{"type": t, "count": n} for t, n in cargo.items()]})
                 if c["grass"]:
                     grass[c["grass"]["type"]] += 1
                     if c["grass"]["type"] == 147:

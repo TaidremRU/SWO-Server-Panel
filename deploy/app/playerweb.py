@@ -1880,6 +1880,7 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "На планетах":"On planets","В космосе":"In space","На планетах у вас нет ракет, машин и другого транспорта.":"You have no rockets, cars or other vehicles on planets.",
   "на земле: ":"landed: ",
   "Координаты":"Coordinates",
   "приблизить":"zoom in",
@@ -3068,7 +3069,13 @@ function tabTransport(m){
     function cargo(list){ return list&&list.length? el("div",{class:"ibtns"},list.map(function(x){ return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))
       : el("span",{class:"muted"},[L("пусто")]); }
     var ST={flight:L("в полёте"), landed:L("на земле: "), parked:L("стоит рядом: "), open:L("в открытом космосе")};
-    var sc=card(L("Ракеты и корабли")+" · "+d.ships.length,[]);
+    var gc=card(L("На планетах")+" · "+d.ground.length,[]);
+    if(d.ground_pending) gc.appendChild(el("div",{class:"muted"},[L("Список появится через пару минут — идёт сбор данных по картам.")]));
+    else if(!d.ground.length) gc.appendChild(el("div",{class:"muted"},[L("На планетах у вас нет ракет, машин и другого транспорта.")]));
+    else gc.appendChild(el("div",{class:"scroll"},[table([L("Транспорт"),L("Где"),L("Энергия"),L("Прочность"),L("Трюм")],d.ground,function(v){
+      return [withIco(v.slug,v.name,24), v.map_name+" · "+v.x+", "+v.y, num(v.energy), num(v.health), cargo(v.cargo)]; })]));
+    box.appendChild(gc);
+    var sc=card(L("В космосе")+" · "+d.ships.length,[]);
     if(!d.ships.length) sc.appendChild(el("div",{class:"muted"},[L("У вас нет ракет в космосе.")]));
     else{
       sc.appendChild(el("div",{class:"scroll"},[table([L("Транспорт"),L("Состояние"),L("Где"),L("Прочность"),L("На борту"),L("Трюм")],d.ships,function(s){
@@ -3079,12 +3086,6 @@ function tabTransport(m){
       sc.appendChild(el("div",{style:"margin-top:8px"},[el("button",{onclick:function(){ S.tab="space"; try{ localStorage.setItem("swp_tab","space"); }catch(e){} render(); window.scrollTo(0,0); }},["🪐 "+L("Показать на карте космоса")])]));
     }
     box.appendChild(sc);
-    var gc=card(L("Наземный и водный транспорт")+" · "+d.ground.length,[]);
-    if(d.ground_pending) gc.appendChild(el("div",{class:"muted"},[L("Список появится через пару минут — идёт сбор данных по картам.")]));
-    else if(!d.ground.length) gc.appendChild(el("div",{class:"muted"},[L("Нет машин, лодок, танков и амфибий на картах.")]));
-    else gc.appendChild(el("div",{class:"scroll"},[table([L("Транспорт"),L("Где"),L("Энергия"),L("Прочность"),L("Трюм")],d.ground,function(v){
-      return [withIco(v.slug,v.name,24), v.map_name+" · "+v.x+", "+v.y, num(v.energy), num(v.health), cargo(v.cargo)]; })]));
-    box.appendChild(gc);
     api("/api/my-ships").then(function(sd){ if(!sd.ok || !sd.stations.length) return;
       box.appendChild(card(L("Мои станции"),[table([L("Название"),L("Система"),L("Координаты"),L("Размер"),L("Клан")],sd.stations,function(s){
         return [s.name||("#"+s.id), s.star!=null? "#"+s.star : "", s.x+", "+s.y, s.size||"", s.clan||"—"]; })])); }).catch(function(){});

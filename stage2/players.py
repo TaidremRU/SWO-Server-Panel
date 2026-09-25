@@ -2344,13 +2344,13 @@ def _maps_scan_full(world_dir):
         except OSError:
             continue
         hit = _MAPSCAN_CACHE.get(fp)
-        if not hit or hit[0] != mt or "vehicles" not in hit[1]:
+        if not hit or hit[0] != mt or hit[1].get("vver") != 2:     # vver: транспорт из MapCell.Box (с 25.09)
             d = mapdt.parse(fp, world_dir=world_dir, list_shops=True)
             mid = int(m.group(1))
             val = {"shops": [dict(s, map=mid) for s in (d.get("shops") or [])],
                    "items": d.get("chest_items_all") or {},
-                   "vehicles": [dict(v, map=mid) for v in (d.get("vehicles_list") or [])]} if d.get("ok") \
-                else {"shops": [], "items": {}, "vehicles": []}
+                   "vehicles": [dict(v, map=mid) for v in (d.get("vehicles_list") or [])], "vver": 2} if d.get("ok") \
+                else {"shops": [], "items": {}, "vehicles": [], "vver": 2}
             hit = (mt, val)
             _MAPSCAN_CACHE[fp] = hit
         shops.extend(hit[1]["shops"])
