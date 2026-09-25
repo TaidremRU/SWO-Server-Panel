@@ -246,8 +246,7 @@ def _read_unit(r, version, bot_version, item_ext, ctx):
     r.f64(); r.f64()                          # timePostpartumRecovery, timeCreateChilds
     u["is_grown"] = r.boolean()
     r.f32()                                   # timePrepareAttack
-    if r.boolean():                           # box
-        _read_block(r, version, item_ext, ctx)
+    u["box"] = _read_block(r, version, item_ext, ctx) if r.boolean() else None   # транспорт/коробка
     r.i32(); r.i32(); r.i32()                 # viewInfo: view(Pair int,int), color
     if r.boolean():                           # respawnPoint
         r.u32(); r.vec2w()
@@ -440,6 +439,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
         container_count = 0
         vehicles = 0
         vehicle_units = 0
+        vehicles_list = []             # транспорт на карте: блок + владелец + трюм
         grid = [] if keep_grid else None
         px = bytearray(w * h * 3) if paint else None
 
@@ -465,8 +465,17 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
                                                 "type": rr["type"], "count": rr["count"],
                                                 "durability": 0})
                     if c["block"].get("transport"):
+                        tr = c["block"]["transport"]
                         vehicles += 1
-                        vehicle_units += len(c["block"]["transport"].get("units") or [])
+                        vehicle_units += len(tr.get("units") or [])
+                        cargo = Counter()
+                        for it in (tr.get("inventory") or {}).get("items") or []:
+                            if it.get("count"):
+                                cargo[it["type"]] += it["count"]
+                        vehicles_list.append({"x": _x, "y": _y, "type": c["block"]["type"], "user_id": tr.get("user_id"),
+                                              "energy": round(tr.get("energy") or 0, 1), "health": round(tr.get("health") or 0, 1),
+                                              "units": len(tr.get("units") or []),
+                                              "cargo": [{"type": t, "count": n} for t, n in cargo.items()]})
                 if c["grass"]:
                     grass[c["grass"]["type"]] += 1
                     if c["grass"]["type"] == 147:
@@ -607,6 +616,7 @@ def parse(path, world_dir=None, keep_grid=False, want=None, cap=20000,
             "containers_list": ctx["containers_list"],
             "containers_list_capped": bool(list_containers) and len(ctx["containers_list"]) >= container_cap,
             "shops": ctx["shops"],
+            "vehicles_list": vehicles_list,
             "pixels": px,
             "owner_grid": um_flat if (owners or paint) else None,
             "um_w": um_w, "um_h": um_h,
@@ -744,6 +754,44 @@ def list_containers(path, world_dir=None, item_names=None, cap=2000, min_items=1
 
 
 # ------------------------------------------------ Data\game\terminals.dt2 (терминалы)
+def parse_units(path, world_dir=None):
+    """``Data\\units\\bots<N>\\units.dat`` — юниты карты: int32 версия ботов, int32 N, N × Unit.
+    Здесь же стоящий транспорт: юнит, у которого ``box`` — блок с ``transport``.
+    -> {ok, count, vehicles:[{id, species, map, x, y, box_type, owner, energy, health, cargo, units}]}"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return {"ok": False, "error": "не открыть файл: %s" % e}
+    item_ext = _load_item_ext(world_dir)
+    ctx = {"want": None, "hits": [], "x": 0, "y": 0, "where": "", "cap": 0,
+           "containers_list": None, "container_cap": 0, "shops": None}
+    r = _R(data)
+    out = []
+    try:
+        bot_version = r.i32()
+        n = r.i32()
+        if not (0 <= n <= 1_000_000):
+            return {"ok": False, "error": "неправдоподобное число юнитов %d" % n}
+        for _ in range(n):
+            u = _read_unit(r, MAP_VERSION, bot_version, item_ext, ctx)
+            box = u.get("box") or {}
+            tr = box.get("transport")
+            if tr:
+                cargo = Counter()
+                for it in (tr.get("inventory") or {}).get("items") or []:
+                    if it.get("count"):
+                        cargo[it["type"]] += it["count"]
+                out.append({"id": u["id"], "species": u["species"], "map": u["map"], "x": u["pos"][0], "y": u["pos"][1],
+                            "box_type": box.get("type"), "owner": tr.get("user_id"), "driver": u.get("user_id"),
+                            "energy": round(tr.get("energy") or 0, 1), "health": round(tr.get("health") or 0, 1),
+                            "units": len(tr.get("units") or []),
+                            "cargo": [{"type": t, "count": c} for t, c in cargo.items()]})
+        return {"ok": True, "count": n, "bot_version": bot_version, "vehicles": out, "trailing": r.n - r.p}
+    except (EOFError, struct.error) as e:
+        return {"ok": False, "error": "разбор оборвался: %s" % e, "at_byte": r.p, "vehicles": out}
+
+
 def parse_terminals(path, world_dir=None):
     """Торговые терминалы игроков (``ZServer.Game.TerminalManager.Save``):
     int32 N, затем N × ``ZData.TradingTerminal.Save`` — userId(u32), countUse,

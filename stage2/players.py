@@ -2285,12 +2285,55 @@ def _maps_scan(world_dir):
     """Один проход по всем map*.dt (кэш по mtime каждой карты): магазины и
     полный счёт предметов в сундуках/контейнерах. Общий для «Торговли» и
     «Экономики» — первый раз десятки секунд, дальше только изменённые карты."""
+    shops, items, _veh = _maps_scan_full(world_dir)
+    return shops, items
+
+
+def vehicles_all(world_dir):
+    """Весь транспорт на картах (ракеты/машины/лодки, стоящие на планетах) из того же
+    прохода по картам, что и торговля: [{map, x, y, type, user_id, energy, health, units, cargo}]."""
+    return _maps_scan_full(world_dir)[2]
+
+
+def ground_vehicles(world_dir):
+    """Транспорт на картах (машины, лодки, танки, амфибии, припаркованные ракеты): блоки с
+    ``transport`` в map*.dt (из общего прохода по картам) + юниты-коробки в
+    Data\\units\\bots*\\units.dat. -> [{map, x, y, box_type, owner, energy, health, units, cargo}]"""
+    out = [{"map": v["map"], "x": v["x"], "y": v["y"], "box_type": v["type"], "owner": v.get("user_id"),
+            "energy": v.get("energy"), "health": v.get("health"), "units": v.get("units"), "cargo": v.get("cargo") or []}
+           for v in vehicles_all(world_dir)]
+    ud = os.path.join(world_dir, "Data", "units")
+    try:
+        dirs = os.listdir(ud)
+    except OSError:
+        dirs = []
+    for d in dirs:
+        p = os.path.join(ud, d, "units.dat")
+        if not d.startswith("bots") or not os.path.exists(p):
+            continue
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        hit = _UNITSCAN_CACHE.get(p)
+        if not hit or hit[0] != mt:
+            r = mapdt.parse_units(p, world_dir=world_dir)
+            hit = (mt, r.get("vehicles") or [])
+            _UNITSCAN_CACHE[p] = hit
+        out.extend(hit[1])
+    return out
+
+
+_UNITSCAN_CACHE = {}
+
+
+def _maps_scan_full(world_dir):
     md = os.path.join(world_dir, "Data", "maps")
-    shops, items = [], {}
+    shops, items, vehicles = [], {}, []
     try:
         files = sorted(os.listdir(md))
     except OSError:
-        return shops, items
+        return shops, items, vehicles
     for f in files:
         m = re.match(r"map(\d+)\.dt$", f)
         if not m:
@@ -2301,16 +2344,20 @@ def _maps_scan(world_dir):
         except OSError:
             continue
         hit = _MAPSCAN_CACHE.get(fp)
-        if not hit or hit[0] != mt:
+        if not hit or hit[0] != mt or "vehicles" not in hit[1]:
             d = mapdt.parse(fp, world_dir=world_dir, list_shops=True)
-            val = {"shops": [dict(s, map=int(m.group(1))) for s in (d.get("shops") or [])],
-                   "items": d.get("chest_items_all") or {}} if d.get("ok") else {"shops": [], "items": {}}
+            mid = int(m.group(1))
+            val = {"shops": [dict(s, map=mid) for s in (d.get("shops") or [])],
+                   "items": d.get("chest_items_all") or {},
+                   "vehicles": [dict(v, map=mid) for v in (d.get("vehicles_list") or [])]} if d.get("ok") \
+                else {"shops": [], "items": {}, "vehicles": []}
             hit = (mt, val)
             _MAPSCAN_CACHE[fp] = hit
         shops.extend(hit[1]["shops"])
+        vehicles.extend(hit[1]["vehicles"])
         for t, n in hit[1]["items"].items():
             items[t] = items.get(t, 0) + n
-    return shops, items
+    return shops, items, vehicles
 
 
 def _shops_all(world_dir):
