@@ -481,8 +481,9 @@ class PlayerWeb:
         try:
             return self._dispatch(h, method)
         finally:
-            if self.web is not None and not getattr(h, "_via", None):     # /admin/… считает сама админка
-                self.web.metrics.http("player", (time.time() - t0) * 1000)
+            mt = getattr(self.web, "metrics", None)
+            if mt is not None and not getattr(h, "_via", None):     # /admin/… считает сама админка
+                mt.http("player", (time.time() - t0) * 1000)
             try:
                 self._log_request(h, method, t0)
             except Exception:  # noqa: BLE001
@@ -792,6 +793,55 @@ class PlayerWeb:
                      else o["name"] for o in so.get("objects") or [] if o.get("name")}
             return {"ok": bool(so.get("ok")), "names": names}
         return self._cached("map_names", 600, build).get("names") or {}
+
+    def _space_index(self):
+        """Где в космосе лежит карта с данным id. id карты = сквозной номер объекта космоса:
+        система 1 — объекты 1..N по порядку в star1.json; последняя добавленная система
+        (space_game.curStarId, например новая стартовая) — сразу перед счётчиком
+        curObjectId. Остальные системы без полного пересчёта всех звёзд (минуты CPU) не
+        определить. -> {star: {first, n}}"""
+        def build():
+            s1 = players.space_objects(self.cfg, 1).get("objects") or []
+            stars = {1: {"first": 1, "n": len(s1)}} if s1 else {}
+            wd = players.find_world_dir(self.cfg)
+            sg = players._read_json(os.path.join(wd, "Data", "world", "space_game.json")) if wd else {}
+            cs, co = (sg or {}).get("curStarId"), (sg or {}).get("curObjectId")
+            if cs and cs != 1 and co:
+                ol = players.space_objects(self.cfg, cs).get("objects") or []
+                if ol and co - len(ol) > len(s1):
+                    stars[int(cs)] = {"first": int(co) - len(ol), "n": len(ol)}
+            return {"ok": bool(stars), "stars": stars}
+        return self._cached("space_index", 600, build).get("stars") or {}
+
+    def _api_my_space(self, uid, q):
+        """Мои планеты в космосе: объекты, на которых у меня участки, по звёздным системам +
+        мои корабли рядом. Чужие и прочие объекты не отдаются (исследование — часть игры)."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        raw = players._read_json(players._user_file(wd, uid)) or {}
+        claims = collections.Counter(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId"))
+        idx = self._space_index()
+        systems, unknown = {}, []
+        for mp, n in sorted(claims.items()):
+            loc = next(((st, mp - v["first"] + 1) for st, v in idx.items() if v["first"] <= mp < v["first"] + v["n"]), None)
+            objs = players.space_objects(self.cfg, loc[0]).get("objects") or [] if loc else []
+            o = objs[loc[1] - 1] if loc and 0 < loc[1] <= len(objs) else None
+            if not o:
+                unknown.append({"map": mp, "claims": n})
+                continue
+            systems.setdefault(loc[0], {"star": loc[0], "objects": [], "ships": [], "far_ships": 0})["objects"].append(
+                {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
+                 "x": o["x"], "y": o["y"], "claims": n, "dist": round(math.hypot(o["x"], o["y"]))})
+        for sh in self._my_ships(uid):
+            sy = systems.get(sh.get("star") or 1)
+            if not sy:
+                continue
+            if math.hypot(sh["x"], sh["y"]) > 60_000:
+                sy["far_ships"] += 1          # в пути далеко от звезды — на схеме системы не поместится
+            else:
+                sy["ships"].append({"model": sh["model"], "x": sh["x"], "y": sh["y"], "near": sh.get("near")})
+        return {"ok": True, "systems": list(systems.values()), "unknown": unknown}
 
     def _with_map_names(self, pos):
         names = self._map_names()
@@ -1701,9 +1751,9 @@ PAGE = r"""<!doctype html>
 <link rel="icon" href="/favicon.ico">
 <style>
 :root{--bg:#0f1216;--panel:#171c22;--panel2:#1e252d;--line:#2b333d;--fg:#e7ecf1;--mut:#93a1b0;
-  --acc:#4c8dff;--ok:#3fb950;--warn:#d29922;--err:#f85149}
+  --acc:#4c8dff;--ok:#3fb950;--warn:#d29922;--err:#f85149;--s1:#3987e5;--s2:#d95926}
 @media (prefers-color-scheme: light){:root{--bg:#f4f6f8;--panel:#fff;--panel2:#eef1f4;--line:#d7dde3;
-  --fg:#1b2229;--mut:#5b6670;--acc:#1f6feb;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e}}
+  --fg:#1b2229;--mut:#5b6670;--acc:#1f6feb;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e;--s1:#2a78d6;--s2:#eb6834}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
@@ -1770,6 +1820,25 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Космос":"Space","У вас пока нет участков на планетах.":"You have no plots on planets yet.",
+  "Планеты и спутники, на которых у вас есть участки, и ваши корабли рядом. Звезда — в центре, пунктир — орбита.":"Planets and moons where you have plots, and your ships nearby. The star is in the centre, dashed lines are orbits.",
+  "Звезда":"Star",
+  "звезда":"star",
+  "мои планеты (число — участков)":"my planets (number = plots)",
+  "мои корабли":"my ships",
+  "Объект":"Object",
+  "Тип":"Type",
+  "Участков":"Plots",
+  "От звезды":"From star",
+  "Звёздная система #":"Star system #",
+  "Ещё кораблей в пути вдали от звезды: ":"More ships travelling far from the star: ",
+  "Участки в других системах (без схемы): ":"Plots in other systems (no chart): ",
+  "карта ":"map ",
+  "Мои планеты в космосе":"My planets in space",
+  "планета":"planet",
+  "спутник":"moon",
+  "астероид":"asteroid",
+  "участков: ":"plots: ",
   "Просмотр глазами игрока ":"Viewing as player ","только чтение":"read-only","Выйти из просмотра":"Exit view",
   "Журнал":"Journal",
   "Где лежит?":"Where is it?",
@@ -2232,7 +2301,7 @@ function renderLanding(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me",L("Профиль")],["journal",L("Журнал")],["hist",L("История")],["where",L("Где лежит?")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["chests",L("Сундуки")],["ships",L("Корабли")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
+var TABS=[["me",L("Профиль")],["journal",L("Журнал")],["hist",L("История")],["where",L("Где лежит?")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["space",L("Космос")],["chests",L("Сундуки")],["ships",L("Корабли")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
 // иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
 var ICONS=null;
 function ico(key,size){
@@ -2292,7 +2361,8 @@ function render(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
   ({me:function(m){ var r=el("div"); m.appendChild(r); tabMe(m); ratingCard(r); },
     journal:tabJournal,hist:tabHist,where:tabWhere,tech:tabTech,craft:tabCraft,book:tabBook,
-    market:function(m){ tabMarket(m); m.appendChild(priceCard()); },map:tabMap,chests:tabChests,ships:tabShips,clan:tabClan,chat:tabChat,
+    market:function(m){ tabMarket(m); m.appendChild(priceCard()); },
+    map:tabMap,space:tabSpace,chests:tabChests,ships:tabShips,clan:tabClan,chat:tabChat,
     server:tabServer}[S.tab]||tabMe)(m);
   trkTab();
 }
@@ -2795,6 +2865,51 @@ function tabShips(m){
       return [s.name||("#"+s.id), s.star!=null? "#"+s.star : "", s.x+", "+s.y, s.size||"", s.clan||"—"]; })]));
     box.appendChild(el("div",{class:"muted small"},[L("Позиции — на момент последнего сохранения мира сервером.")]));
   });
+}
+
+// ---------------------------------------------------------------- мои планеты в космосе
+function tabSpace(m){
+  var box=el("div"); m.appendChild(box);
+  box.appendChild(el("p",{class:"muted"},[L("Загрузка…")]));
+  spaceCard(box);
+}
+function spaceCard(box){
+  api("/api/my-space").then(function(d){
+    box.innerHTML="";
+    if(!d.ok){ box.appendChild(errBox(d)); return; }
+    if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Мои планеты в космосе"),[el("div",{class:"muted"},[L("У вас пока нет участков на планетах.")])])); return; }
+    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты и спутники, на которых у вас есть участки, и ваши корабли рядом. Звезда — в центре, пунктир — орбита.")])];
+    d.systems.forEach(function(sy){
+      var R=1; sy.objects.forEach(function(o){ R=Math.max(R,o.dist); }); sy.ships.forEach(function(s){ R=Math.max(R,Math.hypot(s.x,s.y)); });
+      R*=1.18; var W=520, C=W/2, k=(C-30)/R;
+      function X(x){ return C+x*k; } function Y(y){ return C-y*k; }
+      var g=[svgEl("rect",{x:0,y:0,width:W,height:W,rx:10,fill:"var(--panel2)"})];
+      g.push(svgEl("circle",{cx:C,cy:C,r:14,fill:"#f2c14e",opacity:"0.25"}));
+      g.push(svgEl("circle",{cx:C,cy:C,r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")])]));
+      sy.objects.forEach(function(o){ g.push(svgEl("circle",{cx:C,cy:C,r:o.dist*k,fill:"none",stroke:"var(--line)","stroke-dasharray":"4 5"})); });
+      sy.ships.forEach(function(s){ var x=X(s.x), y=Y(s.y);
+        g.push(svgEl("path",{d:"M"+x+" "+(y-7)+" L"+(x+6)+" "+(y+5)+" L"+(x-6)+" "+(y+5)+" Z",fill:"var(--s2)",stroke:"var(--panel)","stroke-width":"2"},
+          [svgEl("title",{},[s.model+(s.near? " · "+L("рядом: ")+s.near : "")])])); });
+      sy.objects.forEach(function(o){ var x=X(o.x), y=Y(o.y), r=o.kind==="planet"?8:o.kind==="satellite"?6:5;
+        g.push(svgEl("circle",{cx:x,cy:y,r:r,fill:"var(--s1)",stroke:"var(--panel)","stroke-width":"2"},
+          [svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+L("участков: ")+o.claims])]));
+        var right=x<W-120;
+        g.push(svgEl("text",{x:right? x+r+5 : x-r-5, y:y+4, "text-anchor":right?"start":"end","font-size":"13",fill:"var(--fg)"},[o.name+" · "+o.claims])); });
+      var svg=svgEl("svg",{viewBox:"0 0 "+W+" "+W,style:"width:100%;max-width:520px;height:auto;display:block"},g);
+      var dot=function(css){ return el("span",{style:"display:inline-block;margin-right:6px;"+css}); };
+      var legend=el("div",{class:"row small",style:"gap:14px;margin:8px 0"},[
+        el("span",{},[dot("width:10px;height:10px;border-radius:50%;background:#f2c14e"),L("звезда")]),
+        el("span",{},[dot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои планеты (число — участков)")]),
+        sy.ships.length? el("span",{},[dot("width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid var(--s2)"),L("мои корабли")]) : null]);
+      var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("От звезды")],sy.objects,function(o){ return [o.name, L(o.kind_ru), String(o.claims), num(o.dist)+L(" ед.")]; });
+      kids.push(el("div",{style:"margin-bottom:12px"},[
+        el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система #")+sy.star])]),
+        el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[el("div",{style:"flex:1;min-width:260px;max-width:520px"},[svg,legend]),
+          el("div",{style:"flex:1;min-width:240px"},[tbl, sy.far_ships? el("div",{class:"muted small",style:"margin-top:6px"},[L("Ещё кораблей в пути вдали от звезды: ")+sy.far_ships]) : null])])]));
+    });
+    if(d.unknown.length) kids.push(el("div",{class:"muted small"},[L("Участки в других системах (без схемы): ")+d.unknown.map(function(u){ return L("карта ")+u.map+" · "+u.claims; }).join(", ")]));
+    box.appendChild(card(L("Мои планеты в космосе"),kids));
+  }).catch(function(e){ box.innerHTML=""; box.appendChild(errBox(e)); });
 }
 
 // ---------------------------------------------------------------- мой журнал
