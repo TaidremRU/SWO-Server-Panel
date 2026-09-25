@@ -5062,9 +5062,38 @@ def _is_star_obj_name(s):
     return all(32 <= ord(c) < 127 for c in s2) and any(c.isalpha() for c in s2)
 
 
+_STAR_REC_RX = re.compile(rb"\x12(?=.{12})", re.S)   # с перекрытием: 0x12 бывает и внутри чисел
+
+
+def _parse_star_records(b):
+    """Точный разбор по структуре записи SpaceObject: 0x12, uint32 id, int32 −(len+1),
+    int32 len, имя (ASCII), int32 type, …, double x (+11 от конца имени), double y (+19)."""
+    out, n = [], len(b)
+    for m in _STAR_REC_RX.finditer(b):
+        i = m.start()
+        rid = struct.unpack_from("<I", b, i + 1)[0]
+        neg, ln = struct.unpack_from("<i", b, i + 5)[0], struct.unpack_from("<i", b, i + 9)[0]
+        if not (1 <= ln <= 40 and neg == -(ln + 1) and i + 13 + ln + 27 <= n):
+            continue
+        chunk = b[i + 13:i + 13 + ln]
+        if not _is_star_obj_name(chunk):
+            continue
+        end = i + 13 + ln
+        typ = struct.unpack_from("<i", b, end)[0]
+        x, y = struct.unpack_from("<d", b, end + 11)[0], struct.unpack_from("<d", b, end + 19)[0]
+        if typ not in (0, 1, 2) or not (math.isfinite(x) and math.isfinite(y) and abs(x) < 10_000_000 and abs(y) < 10_000_000):
+            continue
+        out.append({"name": chunk.decode("utf-8"), "type": typ, "kind": {0: "planet", 1: "satellite", 2: "asteroid"}[typ],
+                    "x": round(x, 1), "y": round(y, 1), "id": rid})
+    return out
+
+
 def _parse_star_file(path):
     with open(path, "rb") as f:
         b = f.read()
+    exact = _parse_star_records(b)
+    if exact:
+        return exact
     n = len(b)
     found = []
     i = 0
@@ -5093,15 +5122,20 @@ def _parse_star_file(path):
         # (разбросаны по системе, астероидный пояс); type0 — 10-38 тыс. ед. от
         # звезды (сами планеты). 0=планета, 1=спутник, 2=астероид.
         kind = {0: "planet", 1: "satellite", 2: "asteroid"}.get(typ, "planet")
+        # настоящий id объекта (SpaceObject.id, сквозной по всем системам = id карты мира):
+        # запись «… 0x12, uint32 id, int32 −(len+1), int32 len, имя» — сверено на star1
+        # (Pojy Bavb=26, Erevai=29) и star3129 (Teqad=751750 = startMapId)
+        rid = None
+        if namepos >= 9 and b[namepos - 9] == 0x12 and struct.unpack_from("<i", b, namepos - 4)[0] == -(ln + 1):
+            rid = struct.unpack_from("<I", b, namepos - 8)[0]
         out.append({"name": chunk.decode("utf-8"), "type": typ, "kind": kind,
-                    "x": round(x, 1), "y": round(y, 1)})
-    # id = порядковый номер в файле (1-based) — ПОДТВЕРЖДЕНО пользователем:
-    # запрошенное имя нашлось под тем же номером, что игра показывает как ID
-    # (Ryk Xive = 5-я запись в star1.json = ID5 в игре). Хрупко: если фильтр
-    # где-то ошибочно пропустит/добавит запись ДО этой точки — номера после
-    # неё съедут; пока подтверждений достаточно только для первых записей.
+                    "x": round(x, 1), "y": round(y, 1), "rid": rid})
+    # Запасной разбор (если точный _parse_star_records ничего не нашёл): id — из записи,
+    # если распознан, иначе порядковый номер. Порядковый номер НЕНАДЁЖЕН: 25.09 на .106
+    # эвристика «соседняя строка через 300–340 байт» теряла объекты 25/33, и номера после них
+    # съезжали (спутники Pojy Bavb/Erevai показывались как Nayz/Emavod).
     for idx, o in enumerate(out, 1):
-        o["id"] = idx
+        o["id"] = o.pop("rid") or idx     # без распознанного id — старый способ, по порядку
     return out
 
 

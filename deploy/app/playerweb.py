@@ -795,23 +795,22 @@ class PlayerWeb:
         return self._cached("map_names", 600, build).get("names") or {}
 
     def _space_index(self):
-        """Где в космосе лежит карта с данным id. id карты = сквозной номер объекта космоса:
-        система 1 — объекты 1..N по порядку в star1.json; последняя добавленная система
-        (space_game.curStarId, например новая стартовая) — сразу перед счётчиком
-        curObjectId. Остальные системы без полного пересчёта всех звёзд (минуты CPU) не
-        определить. -> {star: {first, n}}"""
+        """{id объекта космоса: (звезда, объект)}. id карты мира = сквозной id объекта
+        (SpaceObject.id, читается прямо из записи). Разбираем систему 1 и последнюю
+        добавленную (space_game.curStarId, например новую стартовую) — полный разбор всех
+        звёзд стоит минуты CPU."""
         def build():
-            s1 = players.space_objects(self.cfg, 1).get("objects") or []
-            stars = {1: {"first": 1, "n": len(s1)}} if s1 else {}
             wd = players.find_world_dir(self.cfg)
             sg = players._read_json(os.path.join(wd, "Data", "world", "space_game.json")) if wd else {}
-            cs, co = (sg or {}).get("curStarId"), (sg or {}).get("curObjectId")
-            if cs and cs != 1 and co:
-                ol = players.space_objects(self.cfg, cs).get("objects") or []
-                if ol and co - len(ol) > len(s1):
-                    stars[int(cs)] = {"first": int(co) - len(ol), "n": len(ol)}
-            return {"ok": bool(stars), "stars": stars}
-        return self._cached("space_index", 600, build).get("stars") or {}
+            stars = {1}
+            if (sg or {}).get("curStarId"):
+                stars.add(int(sg["curStarId"]))
+            ids = {}
+            for st in sorted(stars):
+                for o in players.space_objects(self.cfg, st).get("objects") or []:
+                    ids.setdefault(o["id"], (st, o))
+            return {"ok": bool(ids), "ids": ids}
+        return self._cached("space_index", 600, build).get("ids") or {}
 
     def _api_my_space(self, uid, q):
         """Мои планеты в космосе: объекты, на которых у меня участки, по звёздным системам +
@@ -824,12 +823,12 @@ class PlayerWeb:
         idx = self._space_index()
         systems, unknown = {}, []
         for mp, n in sorted(claims.items()):
-            loc = next(((st, mp - v["first"] + 1) for st, v in idx.items() if v["first"] <= mp < v["first"] + v["n"]), None)
-            objs = players.space_objects(self.cfg, loc[0]).get("objects") or [] if loc else []
-            o = objs[loc[1] - 1] if loc and 0 < loc[1] <= len(objs) else None
-            if not o:
+            hit = idx.get(mp)
+            if not hit:
                 unknown.append({"map": mp, "claims": n})
                 continue
+            loc, o = (hit[0],), hit[1]
+            objs = players.space_objects(self.cfg, loc[0]).get("objects") or []
             row = {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
                    "x": o["x"], "y": o["y"], "claims": n, "dist": round(math.hypot(o["x"], o["y"]))}
             if o["kind"] == "satellite":
