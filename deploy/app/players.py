@@ -2822,7 +2822,8 @@ def _merge_cargo(cargo, items):
     tot = collections.OrderedDict()
     for c in cargo:
         tot[c["type"]] = tot.get(c["type"], 0) + c["count"]
-    return [{"name": item_label(items.get(t)) if items.get(t) else "#%s" % t, "count": n} for t, n in tot.items()]
+    return [{"name": item_label(items.get(t)) if items.get(t) else "#%s" % t, "id": items.get(t) or "", "count": n}
+            for t, n in tot.items()]
 
 
 def space_fleet(cfg):

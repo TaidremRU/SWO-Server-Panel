@@ -739,7 +739,7 @@ class WebUI:
             h.end_headers()
             if h.command != "HEAD":
                 h.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:  # разрыв, сброс, обрыв (WinError 10053) — клиент ушёл
             pass
 
     def _json(self, h, obj, status=200, set_cookie=None):

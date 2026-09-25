@@ -15,6 +15,7 @@ import html
 import http.cookies
 import re
 import collections
+import math
 import json
 import logging
 import os
@@ -41,7 +42,8 @@ FOG_RGB = (22, 25, 31)
 SAMPLE_SEC = 120           # фоновый цикл: где бывали онлайн-игроки (открытые места карты), прогрев карт
 HISTORY_SEC = 3600         # почасовой снимок уровня/рейтинга/техов всех игроков для «Моей истории»
 MARKET_CACHE_SEC = 300
-SERVER_SUMMARY_SEC = 600    # главная и «Сервер» — одна сводка на всех, пересчёт в фоне      # полный проход по картам — десятки секунд, считаем в фоне
+SERVER_SUMMARY_SEC = 600
+PRICE_SNAPSHOT_SEC = 3600   # снимок цен рынка для «Истории цен» — раз в час    # главная и «Сервер» — одна сводка на всех, пересчёт в фоне      # полный проход по картам — десятки секунд, считаем в фоне
 
 
 def _epoch(ts):
@@ -187,6 +189,8 @@ class PlayerWeb:
         self._explored = players._read_json(self._explored_path) or {}   # "uid" -> {"map": [[bx, by], ...]}
         self._elock = threading.Lock()
         self._hist_path = os.path.join(base, "logs", "player_points.jsonl")
+        self._price_path = os.path.join(base, "logs", "market_prices.jsonl")
+        self._price_last = None      # время последнего снимка цен (читается из файла при первом снимке)
         self._srv_sum = None         # {"t", "ru", "en"} — сводка сервера для главной и вкладки «Сервер»
         self._srv_lock = threading.Lock()
         self._stop = threading.Event()
@@ -368,7 +372,7 @@ class PlayerWeb:
             h.end_headers()
             if h.command != "HEAD":
                 h.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:  # разрыв, сброс, обрыв (WinError 10053) — клиент ушёл
             pass
 
     def _json(self, h, obj, status=200, set_cookie=None):
@@ -813,7 +817,10 @@ class PlayerWeb:
                                    "where": where, "unit": o.get("unit"),
                                    "give": [{"name": x["name"], "count": x["count"]} for x in o.get("give") or []],
                                    "want": [{"name": x["name"], "count": x["count"]} for x in o.get("want") or []]})
-                it = lambda xs: [{"name": x["name"], "count": x["count"]} for x in xs or []]
+                wd = players.find_world_dir(self.cfg)
+                slugs = players.load_items(wd) if wd else {}
+                it = lambda xs: [{"name": x["name"], "id": slugs.get(x.get("id")) or "", "count": x["count"]} for x in xs or []]
+                self._price_snapshot(d, slugs)
                 names = self._map_names()
                 self._trade_own = {
                     "terminals": [{"owner_id": t["owner"]["id"], "sales": t["sales"], "lots": t["lots"],
@@ -830,6 +837,303 @@ class PlayerWeb:
             logging.exception("playerweb: рынок")
         finally:
             self._market["running"] = False
+
+    def _price_snapshot(self, d, slugs):
+        """Раз в час: цена 1 предмета по предложениям рынка -> logs/market_prices.jsonl
+        {t, p: {предмет: {валюта: [мин, медиана, лотов]}}}. Только то, что видно у терминалов."""
+        now = time.time()
+        if self._price_last is None:
+            self._price_last = 0
+            for ln in players._read_text(self._price_path, tail_bytes=400_000).splitlines()[-1:]:
+                try:
+                    self._price_last = json.loads(ln).get("t", 0)
+                except ValueError:
+                    pass
+        if now - self._price_last < PRICE_SNAPSHOT_SEC - 60:
+            return
+        rates = {}
+        for o in d.get("offers") or []:
+            if not o.get("unit") or not o.get("give") or not o.get("want"):
+                continue
+            g, w = slugs.get(o["give"][0]["id"]), slugs.get(o["want"][0]["id"])
+            if g and w:
+                rates.setdefault(g, {}).setdefault(w, []).append(float(o["unit"]))
+        snap = {g: {w: [round(min(v), 4), round(players._median(v), 4), len(v)] for w, v in ws.items()}
+                for g, ws in rates.items()}
+        try:
+            os.makedirs(os.path.dirname(self._price_path), exist_ok=True)
+            with open(self._price_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": int(now), "p": snap}, ensure_ascii=False, separators=(",", ":")) + "\n")
+            players._rotate(self._price_path, 20_000_000)
+            self._price_last = now
+        except OSError:
+            logging.exception("playerweb: снимок цен")
+
+    def _api_price_history(self, uid, q):
+        """Без id — предметы, по которым были предложения (последняя цена); с id — ряд
+        цен предмета в самой частой валюте."""
+        want = (q.get("id") or [""])[0]
+        snaps = []
+        for ln in players._read_text(self._price_path, tail_bytes=20_000_000).splitlines():
+            try:
+                snaps.append(json.loads(ln))
+            except ValueError:
+                continue
+        lab = lambda slug: players.item_label(slug) or slug
+        if not want:
+            last, cnt = {}, collections.Counter()
+            for sn in snaps:
+                for g, ws in (sn.get("p") or {}).items():
+                    cnt[g] += 1
+                    w, v = max(ws.items(), key=lambda kv: kv[1][2])
+                    last[g] = {"id": g, "name": lab(g), "pay_id": w, "pay": lab(w), "min": v[0], "median": v[1],
+                               "lots": v[2], "t": sn.get("t")}
+            rows = sorted(last.values(), key=lambda r: r["name"].lower())
+            for r in rows:
+                r["points"] = cnt[r["id"]]
+            return {"ok": True, "items": rows, "snapshots": len(snaps),
+                    "since": snaps[0]["t"] if snaps else None, "every_min": PRICE_SNAPSHOT_SEC // 60}
+        pays = collections.Counter()
+        for sn in snaps:
+            for w, v in ((sn.get("p") or {}).get(want) or {}).items():
+                pays[w] += v[2]
+        if not pays:
+            return {"ok": True, "id": want, "name": lab(want), "series": []}
+        pay = pays.most_common(1)[0][0]
+        series = [{"t": sn["t"], "min": v[0], "median": v[1], "lots": v[2]}
+                  for sn in snaps for v in [((sn.get("p") or {}).get(want) or {}).get(pay)] if v]
+        return {"ok": True, "id": want, "name": lab(want), "pay_id": pay, "pay": lab(pay), "series": series,
+                "other_pays": [lab(w) for w in pays if w != pay]}
+
+    # ------------------------------------------------------------ «где лежит?»
+    def _api_where(self, uid, q):
+        """Всё моё имущество одним списком: с собой, склад, сундуки на моих участках,
+        склад терминала и магазинов, выставленное на продажу, трюмы моих кораблей.
+        ?q= — фильтр по названию. Только своё."""
+        full = self._cached(("where", uid), 60, lambda: self._where_all(uid))
+        if not full.get("ok"):
+            return full
+        places = [dict(p, items=list(p["items"])) for p in full["places"]]
+        t = ((q.get("q") or [""])[0]).strip().lower()
+        if t:
+            for p in places:
+                p["items"] = [x for x in p["items"] if t in x["name"].lower() or t in (x["id"] or "").lower()]
+            places = [p for p in places if p["items"]]
+        tot = collections.OrderedDict()
+        for p in places:
+            for x in p["items"]:
+                k = x["id"] or x["name"]
+                e = tot.setdefault(k, {"id": x["id"], "name": x["name"], "count": 0, "places": 0})
+                e["count"] += x["count"]
+                e["places"] += 1
+        return {"ok": True, "places": places, "total": sorted(tot.values(), key=lambda x: -x["count"]),
+                "market_pending": full["market_pending"]}
+
+    def _where_all(self, uid):
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        places = []
+
+        def add(kind, where, rows):
+            merged = collections.OrderedDict()
+            for slug, name, n in rows:
+                k = slug or name
+                if k in merged:
+                    merged[k]["count"] += n or 0
+                else:
+                    merged[k] = {"id": slug or "", "name": name or players.item_label(slug) or slug or "?", "count": n or 0}
+            its = [x for x in merged.values() if x["count"]]
+            if its:
+                places.append({"kind": kind, "where": where, "items": its})
+
+        det = players.player_detail(self.cfg, uid)
+        a = (det.get("avatar") or {}) if det.get("ok") else {}
+        for key, kind, title in (("carry", "carry", "С собой"), ("stash", "stash", "Склад персонажа")):
+            add(kind, title, [(r.get("name"), players.item_label(r.get("name")), r.get("count")) for r in a.get(key) or []])
+        ch = self._api_my_chests(uid, {})
+        for mp in ch.get("maps") or []:
+            for c in mp.get("containers") or []:
+                add("ground" if c.get("ground") else "chest", "%s · %s · %d, %d" % (mp["name"], c["what"], c["x"], c["y"]),
+                    [(x.get("id"), x.get("name"), x.get("count")) for x in c.get("items") or []])
+        if self._market["data"]:
+            for t in self._trade_own["terminals"]:
+                if t["owner_id"] == uid:
+                    add("terminal", "Склад торгового терминала", [(x.get("id"), x["name"], x["count"]) for x in t["storage"]])
+            for sh in self._trade_own["shops"]:
+                if sh["owner_id"] == uid:
+                    add("shop", "Магазин · " + sh["where"], [(x.get("id"), x["name"], x["count"]) for x in sh["storage"]])
+        for sh in self._my_ships(uid):
+            add("ship", "Корабль «%s» · %s" % (sh["model"], sh["near"] or "космос"),
+                [(x.get("id"), x["name"], x["count"]) for x in sh["cargo"]])
+        return {"ok": True, "places": places, "market_pending": not self._market["data"]}
+
+    # ------------------------------------------------------------ мои корабли
+    def _my_ships(self, uid):
+        fl = self._cached("fleet", 60, lambda: players.space_fleet(self.cfg))
+        me = next((o for o in fl.get("owners") or [] if o.get("id") == uid), None)
+        out = []
+        for sh in (me or {}).get("ships") or []:
+            near, dist = None, None
+            try:
+                objs = self._cached(("star", sh.get("star")), 3600,
+                                    lambda: players.space_objects(self.cfg, sh.get("star") or 1)).get("objects") or []
+            except Exception:  # noqa: BLE001
+                objs = []
+            for o in objs:
+                d = math.hypot(o["x"] - sh["x"], o["y"] - sh["y"])
+                if dist is None or d < dist:
+                    near, dist = o, d
+            out.append({"id": sh["id"], "model": sh["model"], "star": sh.get("star"), "x": round(sh["x"]), "y": round(sh["y"]),
+                        "moving": sh.get("moving"), "speed": sh.get("speed"), "health": sh.get("health"),
+                        "crew": len(sh["aboard"]) if isinstance(sh.get("aboard"), list) else sh.get("aboard"),
+                        "cargo": sh.get("cargo") or [],
+                        # ближайший объект системы; дальше 50 тыс. ед. — корабль в пути между системами
+                        "near": ("%s %s" % (self._KIND_RU.get(near.get("kind"), ""), near["name"])).strip()
+                        if near and dist <= 50_000 else None,
+                        "near_dist": round(dist) if dist is not None else None})
+        return out
+
+    def _api_my_ships(self, uid, q):
+        fl = self._cached("fleet", 60, lambda: players.space_fleet(self.cfg))
+        if not fl.get("ok"):
+            return {"ok": False, "error": fl.get("error") or "нет данных о космосе"}
+        stations = [{k: v for k, v in st.items() if k != "owner"} for st in fl.get("stations") or []
+                    if (st.get("owner") or {}).get("id") == uid]
+        return {"ok": True, "ships": self._my_ships(uid), "stations": stations,
+                "note": "позиции — на момент последнего сохранения мира сервером"}
+
+    # ------------------------------------------------------------ сезонный рейтинг
+    def _api_my_rating(self, uid, q):
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        raw = players._read_json(os.path.join(wd, "Data", "users", "rating.json"), default={}) or {}
+        # в рейтинге — только те, у кого есть очки в этом сезоне (с нулём место не присваивается)
+        rows = sorted((u for u in raw.get("users") or [] if (u.get("orderRating") or 0) > 0),
+                      key=lambda u: -(u.get("orderRating") or 0))
+        tiers = players.REWARD_TIERS
+        paid = sum(1 for r in tiers if r > 0)
+        i = next((k for k, u in enumerate(rows) if u.get("userId") == uid), None)
+        rewards = []
+        for ln in players._read_text(os.path.join(wd, "Logs", "reward_order.txt")).splitlines():
+            m = players._REWARD_RX.match(ln)
+            if m and int(m.group(2)) == uid:
+                rewards.append({"ts": m.group(1), "reward": int(m.group(3))})
+        last_payout = None
+        for ln in players._read_text(os.path.join(wd, "Logs", "reward_order.txt"), tail_bytes=4000).splitlines()[-1:]:
+            m = players._REWARD_RX.match(ln)
+            last_payout = m.group(1) if m else None
+        out = {"ok": True, "of": len(rows), "prize_places": paid, "tiers": list(tiers[:paid]),
+               "rewards": rewards[::-1][:20], "last_payout": last_payout}
+        if i is None:
+            out.update(place=None, points=0,
+                       to_prize=(rows[min(paid, len(rows)) - 1].get("orderRating") or 0) + 1 if rows else None)
+            return out
+        mine = rows[i].get("orderRating") or 0
+        out.update(place=i + 1, points=mine, reward=tiers[i] if i < len(tiers) else 0,
+                   to_next=(rows[i - 1].get("orderRating") or 0) - mine + 1 if i > 0 else None,
+                   to_prize=(rows[paid - 1].get("orderRating") or 0) - mine + 1 if i >= paid else None,
+                   ahead_by=mine - (rows[i + 1].get("orderRating") or 0) if i + 1 < len(rows) else None)
+        return out
+
+    # ------------------------------------------------------------ мой журнал
+    def _api_journal(self, uid, q):
+        return self._cached(("journal", uid), 60, lambda: self._journal(uid))
+
+    def _journal(self, uid):
+        """Лента своих событий из журналов сервера и панели: изученные техи, ускорители,
+        смена исследования, уровни, клан, смерти, награды сезона, роли, снос участков,
+        игровые сессии. Новые сверху."""
+        wd = players.find_world_dir(self.cfg)
+        if not wd:
+            return {"ok": False, "error": "каталог мира не найден"}
+        ev = []
+
+        def add(ts, kind, label, detail="", epoch=None):
+            # label — фиксированная фраза (переводится в браузере), detail — данные
+            ev.append({"t": int(epoch if epoch is not None else _epoch(ts)), "kind": kind, "label": label,
+                       "detail": "" if detail is None else str(detail)})
+        tl = lambda tid: players.tech_label(wd, tid)
+        for ln in players._read_text(self._tt_log, tail_bytes=20_000_000).splitlines():
+            if '"uid": %d,' % uid not in ln:
+                continue
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if e.get("uid") != uid:
+                continue
+            k = e.get("kind")
+            if k == "tech_gained":
+                add(e["ts"], "tech", "Изучено", ", ".join(tl(x) for x in e.get("techs") or []) +
+                    (" (Σ %s)" % e.get("total") if e.get("total") is not None else ""))
+            elif k == "booster_spent":
+                add(e["ts"], "booster", "Потрачено ускорителей", "%s → %s" % (e.get("delta"), e.get("left")))
+            elif k == "booster_gained":
+                add(e["ts"], "booster", "Получено ускорителей", "+%s = %s" % (e.get("delta"), e.get("total")))
+            elif k == "research_changed":
+                add(e["ts"], "research", "Исследование", "%s → %s" % (tl(e.get("from")) if e.get("from") else "—",
+                                                                       tl(e.get("to")) if e.get("to") else "—"))
+        raw = players._read_json(players._user_file(wd, uid)) or {}
+        my_clan = raw.get("clanId") or 0
+        for ln in players._read_text(self._ct_events, tail_bytes=10_000_000).splitlines():
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            k = e.get("kind")
+            if e.get("uid") == uid and k in ("joined", "left", "role"):
+                lab = {"joined": "Вступил в клан", "left": "Покинул клан", "role": "Новая роль в клане"}[k]
+                det = e.get("clan_name", "") + (": %s → %s" % (e.get("was"), e.get("role")) if k == "role" else "")
+                add(e["ts"], "clan", lab, det)
+            elif my_clan and e.get("clan") == my_clan and k == "tech":
+                add(e["ts"], "clan", "Клан изучил", e.get("label") or e.get("tech"))
+        last_lvl = None
+        for ln in players._read_text(self._hist_path, tail_bytes=30_000_000).splitlines():
+            try:
+                p = json.loads(ln)
+            except ValueError:
+                continue
+            v = (p.get("u") or {}).get(str(uid))
+            if v:
+                if last_lvl is not None and v[0] > last_lvl:
+                    add(None, "level", "Новый уровень", v[0], epoch=p["t"])
+                last_lvl = v[0]
+        det = players.player_detail(self.cfg, uid)
+        act = (det.get("activity") or {}) if det.get("ok") else {}
+        DEAD = {"kill": "Гибель", "reset_position": "Сброс позиции", "satiety": "Смерть от голода",
+                "oxygen": "Смерть от удушья", "gas": "Смерть от газа", "moss": "Смерть от мха"}
+        for d in act.get("deaths") or []:
+            add(d["ts"], "death", DEAD.get(d.get("event"), "Смерть"), "" if d.get("event") in DEAD else d.get("event"))
+        for r in act.get("rewards") or []:
+            add(r["ts"], "reward", "Награда сезонного рейтинга", "+%s" % r["reward"])
+        for r in act.get("role_grants") or []:
+            if r.get("as_target"):
+                add(None, "role", "Выдана роль в игре", r.get("role"), epoch=0)
+        for l in act.get("land_deletions") or []:
+            add(l["ts"], "land", "Снесён участок", "%s · %s, %s" % (self._map_names().get(l["map"]) or l["map"], l["x"], l["y"]))
+        try:
+            _, evs = players.parse_analytics(os.path.join(wd, "analytics.txt"))
+        except Exception:  # noqa: BLE001
+            evs = []
+        start = None
+        for e in evs:
+            if e.get("id") != uid or not e.get("epoch"):
+                continue
+            if e["kind"] == "register":
+                add(None, "session", "Регистрация на сервере", epoch=e["epoch"])
+            elif e["kind"] == "enter":
+                start = e["epoch"]
+            elif e["kind"] == "exit" and start:
+                add(None, "session", "Игровая сессия", max(1, round((e["epoch"] - start) / 60)), epoch=start)
+                start = None
+        if start:
+            add(None, "session", "Сейчас в игре", epoch=start)
+        ev = [x for x in ev if x["t"] > 0] + [x for x in ev if x["t"] <= 0]
+        ev.sort(key=lambda x: -x["t"])
+        kinds = collections.Counter(x["kind"] for x in ev)
+        return {"ok": True, "events": ev[:1500], "total": len(ev), "kinds": kinds}
 
     def _api_market(self, uid, q):
         m = self._market
@@ -1403,6 +1707,102 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Журнал":"Journal",
+  "Где лежит?":"Where is it?",
+  "Корабли":"Ships",
+  "Что ищем? Например: уголь":"What are you looking for? E.g.: coal",
+  "Всё ваше одним поиском: с собой, склад персонажа, сундуки на ваших участках, склад торгового терминала и магазинов, трюмы кораблей. Пусто — показать всё.":"Everything you own in one search: carried, character storage, chests on your plots, trade terminal and shop storage, ship holds. Empty = show everything.",
+  "С собой":"Carried",
+  "Склад персонажа":"Character storage",
+  "Склад торгового терминала":"Trade terminal storage",
+  "Не нашлось ни в одном вашем хранилище.":"Not found in any of your storages.",
+  "Пока ничего нет.":"Nothing yet.",
+  "Итого":"Total",
+  "Где именно":"Where exactly",
+  "Где":"Where",
+  "Что":"What",
+  "Склад терминала появится через пару минут — идёт сбор данных рынка.":"Terminal storage will appear in a couple of minutes — market data is being collected.",
+  "Мои корабли":"My ships",
+  "У вас нет кораблей в космосе.":"You have no ships in space.",
+  "рядом: ":"near: ",
+  " ед.":" u.",
+  "в пути, вдали от объектов системы":"travelling, far from system objects",
+  "Координаты":"Coordinates",
+  "система #":"system #",
+  "Движется":"Moving",
+  "да":"yes",
+  "нет":"no",
+  "скорость ":"speed ",
+  "Прочность":"Hull",
+  "На борту":"Aboard",
+  "Трюм":"Hold",
+  "пусто":"empty",
+  "Мои станции":"My stations",
+  "Название":"Name",
+  "Система":"System",
+  "Размер":"Size",
+  "Позиции — на момент последнего сохранения мира сервером.":"Positions are as of the server's last world save.",
+  "Техи":"Techs",
+  "Исследование":"Research",
+  "Ускорители":"Boosters",
+  "Уровни":"Levels",
+  "Смерти":"Deaths",
+  "Награды":"Rewards",
+  "Роли":"Roles",
+  "Участки":"Plots",
+  "Сессии":"Sessions",
+  "Нет событий":"No events",
+  "Когда":"When",
+  "Событие":"Event",
+  " мин":" min",
+  "Мой журнал":"My journal",
+  "Ваши события из журналов сервера: изученные техи, ускорители, уровни, клан, смерти, награды, игровые сессии. Нажмите на категорию, чтобы скрыть или показать её.":"Your events from the server logs: techs learned, boosters, levels, clan, deaths, rewards, play sessions. Click a category to hide or show it.",
+  "Изучено":"Learned",
+  "Потрачено ускорителей":"Boosters spent",
+  "Получено ускорителей":"Boosters received",
+  "Вступил в клан":"Joined clan",
+  "Покинул клан":"Left clan",
+  "Новая роль в клане":"New clan role",
+  "Клан изучил":"Clan researched",
+  "Новый уровень":"New level",
+  "Гибель":"Killed",
+  "Сброс позиции":"Position reset",
+  "Смерть от голода":"Died of hunger",
+  "Смерть от удушья":"Suffocated",
+  "Смерть от газа":"Killed by gas",
+  "Смерть от мха":"Killed by moss",
+  "Смерть":"Death",
+  "Награда сезонного рейтинга":"Season rating reward",
+  "Выдана роль в игре":"In-game role granted",
+  "Снесён участок":"Plot removed",
+  "Регистрация на сервере":"Registered on the server",
+  "Игровая сессия":"Play session",
+  "Сейчас в игре":"In game now",
+  "Место":"Place",
+  "в этом сезоне у вас пока нет очков":"no points this season yet",
+  " из ":" of ",
+  "Очки сезона":"Season points",
+  "Награда за это место":"Reward for this place",
+  " ускор.":" boosters",
+  "нет · награды получают места 1–":"none · rewards go to places 1–",
+  "До места ":"To place ",
+  " очков":" points",
+  "До призового места ":"To prize place ",
+  "Отрыв от места ":"Lead over place ",
+  "Последняя раздача наград":"Last reward payout",
+  "Мои награды":"My rewards",
+  "Сезонный рейтинг — моё место":"Season rating — my place",
+  "Цены записываются раз в час — история появится, когда накопятся снимки рынка.":"Prices are recorded hourly — history appears once market snapshots accumulate.",
+  "— выберите предмет —":"— pick an item —",
+  "Цена за 1 шт. по предложениям на рынке, снимок раз в час. Снимков: ":"Price per 1 item from market offers, hourly snapshot. Snapshots: ",
+  " · с ":" · since ",
+  "Средняя (медианная) цена, ":"Median price, ",
+  "Самая низкая цена, ":"Lowest price, ",
+  "время":"time",
+  "Лотов на рынке":"Lots on the market",
+  "лотов":"lots",
+  "Также продают за: ":"Also sold for: ",
+  "История цен":"Price history",
   "Ник и пароль — те же, что при входе на сервер. После входа — профиль, исследования, карта, сундуки, рынок, чат и клан.":"Same nickname and password you use to join the server. After logging in: profile, research, map, chests, market, chat and clan.",
   "Английский":"English",
   "сообщений: ":"messages: ",
@@ -1768,7 +2168,7 @@ function renderLanding(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me",L("Профиль")],["hist",L("История")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["chests",L("Сундуки")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
+var TABS=[["me",L("Профиль")],["journal",L("Журнал")],["hist",L("История")],["where",L("Где лежит?")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["chests",L("Сундуки")],["ships",L("Корабли")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
 // иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
 var ICONS=null;
 function ico(key,size){
@@ -1821,7 +2221,10 @@ function render(){
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
-  ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,chests:tabChests,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
+  ({me:function(m){ var r=el("div"); m.appendChild(r); tabMe(m); ratingCard(r); },
+    journal:tabJournal,hist:tabHist,where:tabWhere,tech:tabTech,craft:tabCraft,book:tabBook,
+    market:function(m){ tabMarket(m); m.appendChild(priceCard()); },map:tabMap,chests:tabChests,ships:tabShips,clan:tabClan,chat:tabChat,
+    server:function(m){ tabServer(m); var r=el("div"); m.appendChild(r); ratingCard(r); }}[S.tab]||tabMe)(m);
   trkTab();
 }
 
@@ -2279,6 +2682,128 @@ function tabChests(m){
     box.appendChild(card(L("Мои сундуки"),[q, el("div",{class:"muted small",style:"margin-top:6px"},[L("Сундуки и прочие хранилища на ваших участках, а также брошенное на землю. Данные обновляются раз в 5 минут.")])]));
     box.appendChild(list); draw();
   });
+}
+
+// ---------------------------------------------------------------- где лежит?
+function tabWhere(m){
+  var q=el("input",{placeholder:L("Что ищем? Например: уголь"),style:"width:100%"}), list=el("div");
+  try{ q.value=localStorage.getItem("swp_wq")||""; }catch(e){}
+  m.appendChild(card(L("Где лежит?"),[q, el("div",{class:"muted small",style:"margin-top:6px"},
+    [L("Всё ваше одним поиском: с собой, склад персонажа, сундуки на ваших участках, склад торгового терминала и магазинов, трюмы кораблей. Пусто — показать всё.")])]));
+  m.appendChild(list);
+  var KIND={carry:L("С собой"),stash:L("Склад персонажа"),terminal:L("Склад торгового терминала")};
+  function run(){
+    try{ localStorage.setItem("swp_wq",q.value); }catch(e){}
+    load(list,"/api/where?q="+encodeURIComponent(q.value.trim()),function(d){
+      if(!d.places.length){ list.appendChild(card("",[el("div",{class:"muted"},[q.value.trim()? L("Не нашлось ни в одном вашем хранилище.") : L("Пока ничего нет.")])])); return; }
+      list.appendChild(card(L("Итого")+" · "+d.total.length,[el("div",{class:"ibtns"},d.total.map(function(x){
+        return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))]));
+      list.appendChild(card(L("Где именно"),[el("div",{class:"scroll",style:"max-height:70vh"},[table([L("Где"),L("Что")],d.places,function(p){
+        return [KIND[p.kind]||p.where, el("div",{class:"ibtns"},p.items.map(function(x){ return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))]; })])]));
+      if(d.market_pending) list.appendChild(el("div",{class:"muted small"},[L("Склад терминала появится через пару минут — идёт сбор данных рынка.")]));
+    });
+  }
+  var tm; q.addEventListener("input",function(){ clearTimeout(tm); tm=setTimeout(run,500); });
+  run();
+}
+
+// ---------------------------------------------------------------- мои корабли
+function tabShips(m){
+  var box=el("div"); m.appendChild(box);
+  load(box,"/api/my-ships",function(d){
+    if(!d.ships.length && !d.stations.length){
+      box.appendChild(card(L("Мои корабли"),[el("div",{class:"muted"},[L("У вас нет кораблей в космосе.")])])); return; }
+    d.ships.forEach(function(s){ box.appendChild(card(s.model+" #"+s.id,[kv([
+      [L("Где"), s.near? L("рядом: ")+s.near+" · "+num(s.near_dist)+L(" ед.") : L("в пути, вдали от объектов системы")],
+      [L("Координаты"), s.x+", "+s.y+(s.star!=null? " · "+L("система #")+s.star : "")],
+      [L("Движется"), s.moving? L("да")+(s.speed? " · "+L("скорость ")+num(s.speed) : "") : L("нет")],
+      [L("Прочность"), s.health!=null? num(s.health) : ""],
+      [L("На борту"), s.crew!=null? String(s.crew) : ""]]),
+      el("h3",{style:"margin-top:12px"},[L("Трюм")]),
+      s.cargo.length? el("div",{class:"ibtns"},s.cargo.map(function(x){ return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))
+        : el("div",{class:"muted"},[L("пусто")])])); });
+    if(d.stations.length) box.appendChild(card(L("Мои станции"),[table([L("Название"),L("Система"),L("Координаты"),L("Размер"),L("Клан")],d.stations,function(s){
+      return [s.name||("#"+s.id), s.star!=null? "#"+s.star : "", s.x+", "+s.y, s.size||"", s.clan||"—"]; })]));
+    box.appendChild(el("div",{class:"muted small"},[L("Позиции — на момент последнего сохранения мира сервером.")]));
+  });
+}
+
+// ---------------------------------------------------------------- мой журнал
+var JK={tech:L("Техи"),research:L("Исследование"),booster:L("Ускорители"),level:L("Уровни"),clan:L("Клан"),death:L("Смерти"),
+  reward:L("Награды"),role:L("Роли"),land:L("Участки"),session:L("Сессии")};
+var JK_ICO={tech:"🔬",research:"🧪",booster:"⚡",level:"⭐",clan:"🛡",death:"💀",reward:"🏆",role:"🎖",land:"🏚",session:"🎮"};
+function tabJournal(m){
+  var box=el("div"); m.appendChild(box);
+  load(box,"/api/journal",function(d){
+    var off={}; try{ off=JSON.parse(localStorage.getItem("swp_joff")||"{}")||{}; }catch(e){}
+    if(off.session===undefined) off.session=true;      // сессий много — по умолчанию скрыты
+    var chips=el("div",{class:"row",style:"margin-bottom:10px"}), list=el("div");
+    function draw(){
+      chips.innerHTML=""; list.innerHTML="";
+      Object.keys(JK).forEach(function(k){ if(!d.kinds[k]) return;
+        chips.appendChild(el("button",{class:off[k]?"":"pri",style:"padding:3px 10px",onclick:function(){
+          off[k]=!off[k]; try{ localStorage.setItem("swp_joff",JSON.stringify(off)); }catch(e){} draw(); }},[JK_ICO[k]+" "+JK[k]+" · "+d.kinds[k]])); });
+      var rows=d.events.filter(function(e){ return !off[e.kind]; });
+      if(!rows.length){ list.appendChild(el("div",{class:"muted"},[L("Нет событий")])); return; }
+      list.appendChild(el("div",{class:"scroll",style:"max-height:70vh"},[table([L("Когда"),L("Событие"),""],rows.slice(0,800),function(e){
+        return [e.t? new Date(e.t*1000).toLocaleString(LOC,{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—",
+          (JK_ICO[e.kind]||"")+" "+L(e.label), e.kind==="session"&&e.detail? e.detail+L(" мин") : e.detail]; })]));
+    }
+    box.appendChild(card(L("Мой журнал"),[el("div",{class:"muted small",style:"margin-bottom:8px"},
+      [L("Ваши события из журналов сервера: изученные техи, ускорители, уровни, клан, смерти, награды, игровые сессии. Нажмите на категорию, чтобы скрыть или показать её.")]),chips,list]));
+    draw();
+  });
+}
+
+// ---------------------------------------------------------------- сезонный рейтинг — моё место
+function ratingCard(box){
+  api("/api/my-rating").then(function(d){
+    if(!d.ok) return;
+    var rows=[];
+    if(d.place==null){ rows.push([L("Место"),L("в этом сезоне у вас пока нет очков")]);
+      if(d.to_prize!=null) rows.push([L("До призового места ")+d.prize_places, num(d.to_prize)+L(" очков")]); }
+    else{
+      rows.push([L("Место"), el("b",{},[d.place+L(" из ")+d.of])]);
+      rows.push([L("Очки сезона"), num(d.points)]);
+      rows.push([L("Награда за это место"), d.reward? "+"+d.reward+L(" ускор.") : L("нет · награды получают места 1–")+d.prize_places]);
+      if(d.to_next!=null) rows.push([L("До места ")+(d.place-1), num(d.to_next)+L(" очков")]);
+      if(d.to_prize!=null) rows.push([L("До призового места ")+d.prize_places, num(d.to_prize)+L(" очков")]);
+      if(d.ahead_by!=null) rows.push([L("Отрыв от места ")+(d.place+1), num(d.ahead_by)+L(" очков")]);
+    }
+    if(d.last_payout) rows.push([L("Последняя раздача наград"), d.last_payout]);
+    if(d.rewards.length) rows.push([L("Мои награды"), d.rewards.slice(0,5).map(function(r){ return r.ts.split(" ")[0]+": +"+r.reward; }).join(", ")]);
+    box.appendChild(card(L("Сезонный рейтинг — моё место"),[kv(rows)]));
+  }).catch(function(){});
+}
+
+// ---------------------------------------------------------------- история цен рынка
+function priceCard(){
+  var body=el("div"), sel=el("select",{style:"min-width:260px;max-width:100%"}), ch=el("div");
+  api("/api/price-history").then(function(d){
+    if(!d.items.length){ body.appendChild(el("div",{class:"muted"},[L("Цены записываются раз в час — история появится, когда накопятся снимки рынка.")])); return; }
+    sel.appendChild(el("option",{value:""},[L("— выберите предмет —")]));
+    d.items.forEach(function(x){ sel.appendChild(el("option",{value:x.id},[x.name+" · "+num(x.median)+" × "+x.pay])); });
+    body.appendChild(el("div",{class:"row"},[sel]));
+    body.appendChild(el("div",{class:"muted small",style:"margin:6px 0"},[L("Цена за 1 шт. по предложениям на рынке, снимок раз в час. Снимков: ")+d.snapshots
+      +(d.since? L(" · с ")+new Date(d.since*1000).toLocaleDateString(LOC) : "")]));
+    body.appendChild(ch);
+    function show(){
+      ch.innerHTML=""; var id=sel.value; try{ localStorage.setItem("swp_ph",id); }catch(e){}
+      if(!id) return;
+      api("/api/price-history?id="+encodeURIComponent(id)).then(function(h){
+        var s=h.series||[];
+        ch.appendChild(el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[
+          chart(s.map(function(p){ return {t:p.t,v:p.median}; }),{title:L("Средняя (медианная) цена, ")+h.pay,y:h.pay,x:L("время")}),
+          chart(s.map(function(p){ return {t:p.t,v:p.min}; }),{title:L("Самая низкая цена, ")+h.pay,y:h.pay,x:L("время")}),
+          chart(s.map(function(p){ return {t:p.t,v:p.lots}; }),{title:L("Лотов на рынке"),y:L("лотов"),x:L("время"),zero:true})]));
+        if(h.other_pays&&h.other_pays.length) ch.appendChild(el("div",{class:"muted small"},[L("Также продают за: ")+h.other_pays.join(", ")]));
+      }).catch(function(e){ ch.appendChild(errBox(e)); });
+    }
+    sel.onchange=show;
+    var last=""; try{ last=localStorage.getItem("swp_ph")||""; }catch(e){}
+    if(last && d.items.some(function(x){ return x.id===last; })){ sel.value=last; show(); }
+  }).catch(function(e){ body.appendChild(errBox(e)); });
+  return card(L("История цен"),[body]);
 }
 
 // ---------------------------------------------------------------- клан
