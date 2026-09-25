@@ -40,7 +40,8 @@ FOG_RADIUS = 20            # клеток: видно вокруг персон�
 FOG_RGB = (22, 25, 31)
 SAMPLE_SEC = 120           # фоновый цикл: где бывали онлайн-игроки (открытые места карты), прогрев карт
 HISTORY_SEC = 3600         # почасовой снимок уровня/рейтинга/техов всех игроков для «Моей истории»
-MARKET_CACHE_SEC = 300      # полный проход по картам — десятки секунд, считаем в фоне
+MARKET_CACHE_SEC = 300
+SERVER_SUMMARY_SEC = 600    # главная и «Сервер» — одна сводка на всех, пересчёт в фоне      # полный проход по картам — десятки секунд, считаем в фоне
 
 
 def _epoch(ts):
@@ -186,6 +187,8 @@ class PlayerWeb:
         self._explored = players._read_json(self._explored_path) or {}   # "uid" -> {"map": [[bx, by], ...]}
         self._elock = threading.Lock()
         self._hist_path = os.path.join(base, "logs", "player_points.jsonl")
+        self._srv_sum = None         # {"t", "ru", "en"} — сводка сервера для главной и вкладки «Сервер»
+        self._srv_lock = threading.Lock()
         self._stop = threading.Event()
         self._srv = None
 
@@ -242,6 +245,11 @@ class PlayerWeb:
                         last_hist = time.time()
             except Exception:  # noqa: BLE001
                 logging.exception("playerweb: фоновый цикл")
+            if time.time() - (self._srv_sum or {}).get("t", 0) >= SERVER_SUMMARY_SEC - 60:
+                try:
+                    self._server_refresh()
+                except Exception:  # noqa: BLE001
+                    logging.exception("playerweb: сводка сервера")
             now = time.time()
             warm |= {m for m, ts in self._map_seen.items() if now - ts < 3600}
             for mp in sorted(warm):
@@ -557,11 +565,8 @@ class PlayerWeb:
             if route == "login" and method == "POST":
                 return self._api_login(h)
             if route == "public" and method == "GET":
-                # главная до входа: то же, что вкладка «Сервер»; кэш на всех, чтобы
-                # анонимные заходы не гоняли рейтинги/онлайн на каждый запрос
-                d = self._cached("public", 60, lambda: self._api_server(None, q))
-                if (q.get("lang") or [""])[0] == "en":
-                    d = _tr(d)
+                # главная до входа: то же, что вкладка «Сервер» — готовая сводка из фона
+                d = self._server_summary((q.get("lang") or [""])[0])
                 return self._json(h, d, 200 if d.get("ok") else 503)
             if route == "admin-enter" and method == "POST":
                 tok, s = self._session(h)
@@ -583,6 +588,9 @@ class PlayerWeb:
                 return self._json(h, {"ok": True}, set_cookie="psid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
             if method != "GET":
                 return self._json(h, {"error": "unknown"}, 404)
+            if route == "server":
+                d = self._server_summary((q.get("lang") or [""])[0])
+                return self._json(h, d, 200 if d.get("ok") else 404)
             fn = getattr(self, "_api_" + route.replace("-", "_"), None)
             if not fn:
                 return self._json(h, {"error": "unknown"}, 404)
@@ -1264,7 +1272,24 @@ class PlayerWeb:
             d["history"] = players.clan_history(self.cfg, cid, self._ct_events, self._ct_points, 30)
         return d
 
-    def _api_server(self, uid, q):
+    def _server_refresh(self):
+        """Пересобрать сводку (фон, раз в SERVER_SUMMARY_SEC). Неудача — остаётся прежняя."""
+        d = self._server_build()
+        if d.get("ok"):
+            d["updated"] = int(time.time())
+            self._srv_sum = {"t": time.time(), "ru": d, "en": _tr(d)}
+        return self._srv_sum or {"ru": d, "en": d}
+
+    def _server_summary(self, lang):
+        """Сводка для главной и «Сервера»: одна на всех игроков, запросы её не пересчитывают
+        (только самый первый после запуска панели, пока фон её ещё не собрал)."""
+        s = self._srv_sum
+        if not s:
+            with self._srv_lock:
+                s = self._srv_sum or self._server_refresh()
+        return s["en" if lang == "en" else "ru"]
+
+    def _server_build(self):
         snap = self.state.data.get("last_snapshot") or {}
         wd = players.find_world_dir(self.cfg)
         online = []
@@ -1649,7 +1674,7 @@ var EN_DICT={
   "работает":"running",
   "не запущен":"not running",
   "Сейчас онлайн":"Online now",
-  "Пик за сутки":"Peak in 24 h",
+  "Пик за сутки":"Peak in 24 h", "Обновлено":"Updated", " (раз в 10 мин)":" (every 10 min)",
   "Онлайн за 24 часа":"Online over 24 hours",
   "игроков":"players",
   "пока нет данных":"no data yet",
@@ -2314,7 +2339,8 @@ function tabServer(m, path){
   var box=el("div"); m.appendChild(box);
   load(box,path||"/api/server",function(d){
     box.appendChild(card(L("Сервер"),[kv([[L("Статус"),el("span",{class:"pill "+(d.game_up?"ok":"err")},[d.game_up?L("работает"):L("не запущен")])],
-      [L("Сейчас онлайн"),d.online.length],[L("Пик за сутки"),d.online_peak]]),
+      [L("Сейчас онлайн"),d.online.length],[L("Пик за сутки"),d.online_peak]].concat(d.updated?
+      [[L("Обновлено"),new Date(d.updated*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})+L(" (раз в 10 мин)")]] : [])),
       el("div",{style:"margin-top:10px"},[chart(d.online_series,{title:L("Онлайн за 24 часа"),y:L("игроков"),x:L("время"),zero:true,wide:true})])]));
     function top(title,rows,col){ return card(title,[rows.length? table(["#",L("Игрок"),col],rows,function(r){ return [rows.indexOf(r)+1, r.name, r.v]; })
       : el("div",{class:"muted"},[L("пока нет данных")])]); }
