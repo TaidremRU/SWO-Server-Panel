@@ -5139,6 +5139,85 @@ def _parse_star_records(b):
 _STAR_NAME_CACHE = {}   # путь -> (mtime, имя)
 
 
+def star_header(b):
+    """Заголовок star<N>.json: int32 размер, 0x07, int32 −(len+1), int32 len, имя, int32 кластер,
+    байт, double x, double y (позиция системы на карте галактики), double радиус, int32 тип, байт,
+    int32 число объектов. -> dict | None"""
+    try:
+        if len(b) < 13 or b[4] != 0x07:
+            return None
+        neg, ln = struct.unpack_from("<i", b, 5)[0], struct.unpack_from("<i", b, 9)[0]
+        if ln < 0 or ln > 40 or neg != -(ln + 1):
+            return None
+        p = 13 + ln
+        name = b[13:p].decode("utf-8", "replace").strip() or None
+        x, y, rad = struct.unpack_from("<d", b, p + 5)[0], struct.unpack_from("<d", b, p + 13)[0], struct.unpack_from("<d", b, p + 21)[0]
+        if not all(math.isfinite(v) and abs(v) < 1e9 for v in (x, y, rad)):
+            return None
+        return {"name": name, "cluster": struct.unpack_from("<i", b, p)[0], "x": round(x, 1), "y": round(y, 1), "radius": round(rad)}
+    except struct.error:
+        return None
+
+
+def build_space_index(cfg, path, pause=0.02, stop=None):
+    """Индекс всех звёздных систем на диске (``path``, JSON): {star: {mt, size, name, cluster, x, y,
+    radius, n, min, max}} — диапазон сквозных id объектов системы (= id карт мира). Инкрементально:
+    разбираются только новые/изменённые star*.json, пропавшие — удаляются. ``pause`` — сон между
+    файлами (не мешать игре: полный первый проход — минуты). -> {ok, stars, parsed, removed}"""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    W = os.path.join(wd, "Data", "world")
+    idx = _read_json(path) or {}
+    if idx.get("world") != os.path.basename(wd):
+        idx = {}
+    stars = idx.get("stars") or {}
+    try:
+        files = {int(m.group(1)): f for f in os.listdir(W) for m in [re.match(r"star(\d+)\.json$", f)] if m}
+    except OSError:
+        return {"ok": False, "error": "нет Data\\world"}
+    parsed, removed = 0, [k for k in list(stars) if int(k) not in files]
+    for k in removed:
+        stars.pop(k, None)
+    for n, (sid, f) in enumerate(sorted(files.items())):
+        if stop is not None and stop.is_set():
+            break
+        fp = os.path.join(W, f)
+        try:
+            st = os.stat(fp)
+        except OSError:
+            continue
+        old = stars.get(str(sid))
+        if old and old.get("mt") == st.st_mtime and old.get("size") == st.st_size:
+            continue
+        try:
+            with open(fp, "rb") as fh:
+                b = fh.read()
+        except OSError:
+            continue
+        objs = _parse_star_records(b)
+        ids = [o["id"] for o in objs]
+        rec = {"mt": st.st_mtime, "size": st.st_size, "n": len(ids),
+               "min": min(ids) if ids else None, "max": max(ids) if ids else None}
+        rec.update(star_header(b[:128]) or {})
+        stars[str(sid)] = rec
+        parsed += 1
+        if parsed % 200 == 0:
+            _save_json(path, {"world": os.path.basename(wd), "updated": time.time(), "stars": stars})
+        if pause:
+            time.sleep(pause)
+    if parsed or removed or not os.path.exists(path):
+        _save_json(path, {"world": os.path.basename(wd), "updated": time.time(), "stars": stars})
+    return {"ok": True, "stars": len(stars), "parsed": parsed, "removed": len(removed)}
+
+
+def _save_json(path, d):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+
+
 def star_name(cfg, star_id):
     """Имя звёздной системы из заголовка star<N>.json: int32 размер, 0x07, int32 −(len+1),
     int32 len, имя. У системы, добавленной обновлением игры (3129 на .106), имя пустое -> None."""
