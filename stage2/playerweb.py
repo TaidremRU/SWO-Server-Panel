@@ -1131,13 +1131,20 @@ class PlayerWeb:
         lab = lambda t: players._block_label(blocks.get(t)) or ("#%s" % t)
         ships = []
         for sh in self._my_ships(uid):
+            # приземлившаяся ракета остаётся объектом космоса со скоростью 0 на координатах планеты
+            # (на карты планет игра её не переносит — проверено на .106: блоков транспорта на картах нет)
+            nd = sh.get("near_dist")
             if sh.get("moving"):
                 st = "flight"
-            elif sh.get("near") and (sh.get("near_dist") or 0) <= 2000:
-                st = "parked"          # стоит у планеты/спутника — так игра хранит «припаркованную» ракету
+            elif sh.get("near") and nd is not None and nd <= 300:
+                st = "landed"
+            elif sh.get("near") and nd is not None and nd <= 2000:
+                st = "parked"
             else:
                 st = "open"
             ships.append(dict(sh, status=st))
+        order = {"landed": 0, "parked": 1, "open": 2, "flight": 3}
+        ships.sort(key=lambda x: order.get(x["status"], 9))
         ground = []
         for v in (self._vehicles or []):
             if v.get("owner") != uid:
@@ -1873,6 +1880,7 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "на земле: ":"landed: ",
   "Координаты":"Coordinates",
   "приблизить":"zoom in",
   "отдалить":"zoom out",
@@ -3059,12 +3067,13 @@ function tabTransport(m){
     if(d.inside) box.appendChild(el("div",{class:"msg",style:"margin-bottom:12px"},["🚀 "+L("Вы сейчас в транспорте: ")+d.inside.name+" · "+L(d.inside.where)]));
     function cargo(list){ return list&&list.length? el("div",{class:"ibtns"},list.map(function(x){ return itemBtn(x.id,x.name,x.count,goBook,L("Открыть в справочнике")); }))
       : el("span",{class:"muted"},[L("пусто")]); }
-    var ST={flight:L("в полёте"), parked:L("стоит рядом: "), open:L("в открытом космосе")};
+    var ST={flight:L("в полёте"), landed:L("на земле: "), parked:L("стоит рядом: "), open:L("в открытом космосе")};
     var sc=card(L("Ракеты и корабли")+" · "+d.ships.length,[]);
     if(!d.ships.length) sc.appendChild(el("div",{class:"muted"},[L("У вас нет ракет в космосе.")]));
     else{
       sc.appendChild(el("div",{class:"scroll"},[table([L("Транспорт"),L("Состояние"),L("Где"),L("Прочность"),L("На борту"),L("Трюм")],d.ships,function(s){
-        var st=s.status==="parked"? ST.parked+s.near : ST[s.status];
+        var st=(s.status==="parked"||s.status==="landed")? ST[s.status]+s.near : ST[s.status];
+        if(s.status==="landed") st=el("b",{},["🛬 "+st]);
         return [s.model+" #"+s.id, st, L("космос")+", "+(s.star_name||("#"+s.star))+" · "+s.x+", "+s.y, s.health!=null? num(s.health):"—",
           s.crew!=null? String(s.crew):"—", cargo(s.cargo)]; })]));
       sc.appendChild(el("div",{style:"margin-top:8px"},[el("button",{onclick:function(){ S.tab="space"; try{ localStorage.setItem("swp_tab","space"); }catch(e){} render(); window.scrollTo(0,0); }},["🪐 "+L("Показать на карте космоса")])]));
