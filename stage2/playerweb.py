@@ -481,6 +481,8 @@ class PlayerWeb:
         try:
             return self._dispatch(h, method)
         finally:
+            if self.web is not None and not getattr(h, "_via", None):     # /admin/… считает сама админка
+                self.web.metrics.http("player", (time.time() - t0) * 1000)
             try:
                 self._log_request(h, method, t0)
             except Exception:  # noqa: BLE001

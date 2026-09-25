@@ -35,6 +35,13 @@
     "trusted_proxies": []
   },
 
+  "_metrics_comment": "Вкладка «Нагрузка»: снимок CPU/RAM/диска (IOPS, МБ/с)/сети сервера и процессов игры, Steam и панели + запросы к панелям и онлайн раз в interval_seconds в logs/metrics.jsonl (max_mb на файл, один старый файл хранится).",
+  "metrics": {
+    "enabled": true,
+    "interval_seconds": 30,
+    "max_mb": 30
+  },
+
   "_activity_comment": "Журнал активности обеих панелей (logs/activity.jsonl, видит только GM): входы, неудачи, каждый запрос, действия в интерфейсе. Ротация: max_mb на файл, keep файлов. trusted_proxies (в webui/playerweb) — адреса своего обратного прокси: только от них берётся X-Forwarded-For.",
   "activity": {
     "max_mb": 20,

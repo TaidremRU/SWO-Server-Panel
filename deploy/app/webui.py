@@ -43,6 +43,7 @@ import authguard
 import common
 import gamectl
 import i18n
+import metrics
 import players
 import screenshot
 import serverlist
@@ -571,6 +572,8 @@ class WebUI:
         self.guard = authguard.Guard(os.path.join(base, "auth_guard.json"),
                                      alert=getattr(bot, "push_super", None) if bot else None,
                                      on_event=lambda r: self.act.write(dict(r, src="guard")))
+        mc = cfg.get("metrics") or {}
+        self.metrics = metrics.Metrics(cfg, base, interval=mc.get("interval_seconds", 30), max_mb=mc.get("max_mb", 30))
         self._audit_path = os.path.join(base, "webui_audit.log")
         self._audit_lock = threading.Lock()
         self._tt_state = os.path.join(base, "tech_track_state.json")
@@ -611,11 +614,14 @@ class WebUI:
         tt = (self.cfg.get("players", {}) or {}).get("tech_track", {}) or {}
         if tt.get("enabled", True):
             threading.Thread(target=self._tech_track_loop, name="techtrack", daemon=True).start()
+        if (self.cfg.get("metrics") or {}).get("enabled", True):
+            self.metrics.start()
         logging.info("webui: слушаю http://%s:%d/ — вход %s%s", host, port, self.auth.username,
                      "  (СМЕНИТЕ ПАРОЛЬ)" if self.auth.must_change else "")
 
     def stop(self):
         self._stop.set()
+        self.metrics.stop()
         try:
             if self._srv:
                 self._srv.shutdown()
@@ -915,6 +921,7 @@ class WebUI:
         try:
             return self._dispatch(h, method, prefix)
         finally:
+            self.metrics.http("admin", (time.time() - t0) * 1000)
             try:
                 self._log_request(h, method, t0)
             except Exception:  # noqa: BLE001
@@ -1481,6 +1488,16 @@ class WebUI:
 
     def _api_price_history(self, h, method, q, sess):
         return self._json(h, self._pw()._api_price_history(None, q))
+
+    _METRIC_RANGES = {"1h": 3600, "6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+
+    def _api_metrics(self, h, method, q, sess):
+        """Нагрузка сервера и панели: ?range=1h|6h|24h|7d|30d -> корзины [t, среднее, макс]."""
+        rng = self._METRIC_RANGES.get((q.get("range") or ["6h"])[0], 6 * 3600)
+        d = self.metrics.series(rng)
+        d.update(ok=True, now=self.metrics.last or self.metrics.last_saved(), cores=self.metrics.cores, interval=self.metrics.interval,
+                 range=rng, enabled=metrics.psutil is not None)
+        return self._json(h, d)
 
     def _api_season_rating(self, h, method, q, sess):
         return self._json(h, self._cached("season-rating", lambda: players.season_rating(self.cfg), ttl=60))
@@ -2741,12 +2758,25 @@ PAGE = r"""<!doctype html>
   --bg:#0f1216; --panel:#171c22; --panel2:#1e252d; --line:#2b333d; --fg:#e7ecf1;
   --mut:#93a1b0; --acc:#4c8dff; --ok:#3fb950; --warn:#d29922; --err:#f85149;
   --radius:10px;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;   /* серии графиков (проверено на CVD, тёмная тема) */
 }
 :root[data-theme="light"]{
   --bg:#f4f6f8; --panel:#ffffff; --panel2:#eef1f4; --line:#d7dde3; --fg:#1b2229;
   --mut:#5b6670; --acc:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --err:#cf222e;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
 }
 *{box-sizing:border-box}
+.mc{position:relative;padding:12px 14px}
+.mc-h{margin-bottom:4px} .mc-leg{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-bottom:4px}
+.mc-leg span{display:inline-flex;align-items:center;gap:6px} .mc-leg i{display:inline-block;width:14px;height:2px;border-radius:1px}
+.mc-tip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;
+  white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.25);display:none;z-index:3}
+.mc-tip i{display:inline-block;width:10px;height:2px;margin-right:6px;vertical-align:middle}
+.ld-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.ld-tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px}
+.ld-tile .v{font-size:22px;font-weight:600;margin-top:2px} .ld-tile .s{font-size:12px;color:var(--mut)}
+.ld-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:12px}
+@media (max-width:560px){ .ld-grid{grid-template-columns:1fr} }
 html{scrollbar-color:var(--line) var(--panel);scrollbar-width:thin}
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-track{background:var(--panel)}
@@ -2849,7 +2879,14 @@ var S = { authed:false, csrf:"", user:"", must_change:false, lang:localStorage.g
           tab:localStorage.getItem("sw_tab")||"dash", conn:null };
 var T = {
  ru:{ title:"SigmaSteamBot", logout:"Выход", login:"Войти", user:"Пользователь", pass:"Пароль",
-  dash:"Дашборд", act:"Действия", srv:"Серверы", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", activity:"Активность", leaders:"Рейтинги", admin:"Админ", fleet:"Флот", roles:"Настройки", logs:"Логи",
+  dash:"Дашборд", act:"Действия", srv:"Серверы", load:"Нагрузка",
+  ld_intro:"Нагрузка сервера, игры и панели — снимок раз в {n} с, хранится ~6 недель. На графике — среднее за интервал, в подсказке — ещё и максимум. CPU процессов — в процентах от всей машины ({c} ядер).",
+  ld_nodata:"данных пока нет — первые точки появятся через минуту", ld_cpu:"CPU", ld_cpu_core:"CPU: самое загруженное ядро", ld_ram:"Память", ld_diskio:"Диск: операций в секунду (IOPS)", ld_diskmb:"Диск: скорость",
+  ld_gameio:"Игра: операций с диском в секунду", ld_net:"Сеть", ld_req:"Панели: запросов в минуту", ld_lat:"Панели: среднее время ответа", ld_online:"Игроков онлайн",
+  ld_server:"Сервер", ld_game:"Игра", ld_panel:"Панель", ld_steam:"Steam", ld_read:"Чтение", ld_write:"Запись", ld_in:"Приём", ld_out:"Отдача", ld_admin:"Админка", ld_player:"Панель игроков",
+  ld_proc:"Процессы сейчас", ld_col_proc:"Процесс", ld_col_cpu:"CPU", ld_col_ram:"RAM", ld_col_iops:"IOPS чт./зап.", ld_col_mbs:"МБ/с чт./зап.", ld_col_thr:"Потоки", ld_col_h:"Дескрипторы",
+  ld_t_cpu:"CPU сервера", ld_t_ram:"Память", ld_t_iops:"Диск IOPS", ld_t_disk:"Диск", ld_t_net:"Сеть", ld_t_free:"Свободно на диске мира", ld_t_online:"Онлайн", ld_t_core:"Макс. ядро",
+  ld_notrun:"не запущен", ld_mbs:"МБ/с", ld_ops:"оп/с", ld_gb:"ГБ", ld_ms:"мс", ld_rpm:"в мин", ld_players:"игроков", ld_avg:"сред.", ld_max:"макс.", ld_auto:"обновлять каждые 30 с", chat:"Чат", stats:"Статы", map:"Карта", players:"Игроки", twinks:"Твинки", entry:"Вход", buffs:"Микстуры", food:"Кулинария", clans:"Кланы", craft:"Крафт", trade:"Торговля", economy:"Экономика", suspicious:"Нарушения", activity:"Активность", leaders:"Рейтинги", admin:"Админ", fleet:"Флот", roles:"Настройки", logs:"Логи",
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
@@ -3102,7 +3139,14 @@ var T = {
   ago:"назад", never:"нет данных", n_a:"н/д",
   disk_used:"занято", disk_free:"свободно", disk_tip:"Диск с миром игры: занято {u} из {t} ГБ, свободно {f} ГБ" },
  en:{ title:"SigmaSteamBot", logout:"Log out", login:"Log in", user:"Username", pass:"Password",
-  dash:"Dashboard", act:"Actions", srv:"Servers", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", fleet:"Fleet", roles:"Settings", logs:"Logs",
+  dash:"Dashboard", act:"Actions", srv:"Servers", load:"Load",
+  ld_intro:"Server, game and panel load — sampled every {n} s, kept ~6 weeks. The chart shows the interval average; the tooltip adds the maximum. Process CPU is a share of the whole machine ({c} cores).",
+  ld_nodata:"no data yet — the first points appear in a minute", ld_cpu:"CPU", ld_cpu_core:"CPU: busiest core", ld_ram:"Memory", ld_diskio:"Disk: operations per second (IOPS)", ld_diskmb:"Disk: throughput",
+  ld_gameio:"Game: disk operations per second", ld_net:"Network", ld_req:"Panels: requests per minute", ld_lat:"Panels: average response time", ld_online:"Players online",
+  ld_server:"Server", ld_game:"Game", ld_panel:"Panel", ld_steam:"Steam", ld_read:"Read", ld_write:"Write", ld_in:"In", ld_out:"Out", ld_admin:"Admin panel", ld_player:"Player panel",
+  ld_proc:"Processes now", ld_col_proc:"Process", ld_col_cpu:"CPU", ld_col_ram:"RAM", ld_col_iops:"IOPS r/w", ld_col_mbs:"MB/s r/w", ld_col_thr:"Threads", ld_col_h:"Handles",
+  ld_t_cpu:"Server CPU", ld_t_ram:"Memory", ld_t_iops:"Disk IOPS", ld_t_disk:"Disk", ld_t_net:"Network", ld_t_free:"Free on world disk", ld_t_online:"Online", ld_t_core:"Busiest core",
+  ld_notrun:"not running", ld_mbs:"MB/s", ld_ops:"ops/s", ld_gb:"GB", ld_ms:"ms", ld_rpm:"per min", ld_players:"players", ld_avg:"avg", ld_max:"max", ld_auto:"refresh every 30 s", chat:"Chat", stats:"Stats", map:"Map", players:"Players", twinks:"Twinks", entry:"Login", buffs:"Mixtures", food:"Cooking", clans:"Clans", craft:"Craft", trade:"Trade", economy:"Economy", suspicious:"Violations", activity:"Activity", leaders:"Leaderboards", admin:"Admin", fleet:"Fleet", roles:"Settings", logs:"Logs",
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
@@ -3474,7 +3518,7 @@ function pill(ok,txt,warn){ return el("span",{class:"pill "+(ok?"ok":(warn?"warn
 
 // ---- shell ----
 function render(){
-  clearInterval(dashTimer); clearInterval(logTimer); clearInterval(plTimer); clearInterval(chTimer);
+  clearInterval(dashTimer); clearInterval(logTimer); clearInterval(plTimer); clearInterval(chTimer); clearInterval(ldTimer);
   var app=$("#app"); app.innerHTML="";
   if(!S.authed){ app.appendChild(viewLogin()); return; }
   if(S.must_change){ app.appendChild(viewChpass()); return; }
@@ -3510,12 +3554,12 @@ function header(){
 }
 // вкладки по ролям (сервер всё равно проверяет каждый запрос — это только чтобы не показывать лишнее)
 var ROLE_TABS={
-  viewer:["dash","srv","chat","stats","map","players","activity","leaders","clans","fleet","trade","economy","craft"],
-  moderator:["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","craft"]};
+  viewer:["dash","srv","load","chat","stats","map","players","activity","leaders","clans","fleet","trade","economy","craft"],
+  moderator:["dash","act","srv","load","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","craft"]};
 function isAdmin(){ var r=S.role||"admin"; return r==="admin"||r==="gm"; }
 function isGM(){ return S.role==="gm"; }
 function shell(){
-  var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
+  var tabs=["dash","act","srv","load","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
   if(!isAdmin()){ var allow=ROLE_TABS[S.role]||ROLE_TABS.viewer; tabs=tabs.filter(function(x){ return allow.indexOf(x)>=0; });
     if(tabs.indexOf(S.tab)<0) S.tab=tabs[0]; }
   var nav=el("nav",{}, tabs.map(function(id){
@@ -3524,7 +3568,7 @@ function shell(){
   return el("div",{},[ header(), nav, el("main",{id:"view"},[]) ]);
 }
 function routeTab(){ var v=$("#view"); v.innerHTML="";
-  ({dash:tabDash,act:tabAct,srv:tabSrv,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,activity:tabActivity,leaders:tabLeaders,admin:tabAdmin,fleet:tabFleet,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
+  ({dash:tabDash,act:tabAct,srv:tabSrv,load:tabLoad,chat:tabChat,stats:tabStats,map:tabMap,players:tabPlayers,twinks:tabTwinks,entry:tabEntry,buffs:tabBuffs,food:tabFood,clans:tabClans,craft:tabCraft,trade:tabTrade,economy:tabEconomy,suspicious:tabSuspicious,activity:tabActivity,leaders:tabLeaders,admin:tabAdmin,fleet:tabFleet,roles:tabSettings,logs:tabLogs}[S.tab]||tabDash)(v); }
 function toggleTheme(){ var r=document.documentElement; var cur=r.getAttribute("data-theme")==="light"?"dark":"light";
   r.setAttribute("data-theme",cur); localStorage.setItem("sw_theme",cur); }
 
@@ -5465,6 +5509,117 @@ function bigChart(title, kind, labels, series, subtitle){
   return el("div",{class:"card wide"},[ el("h3",{},[title]),
     subtitle? el("div",{class:"row",style:"margin-bottom:4px"},[].concat(subtitle)) : null,
     legend, chart ].filter(Boolean));
+}
+// ---- нагрузка сервера и панели ----
+var ldTimer=null, LD_RANGE=(function(){ try{ return localStorage.getItem("sw_ldrange")||"6h"; }catch(e){ return "6h"; } })();
+function ldNum(v,d){ if(v==null||isNaN(v)) return "—"; d=d==null?1:d; var a=Math.abs(v);
+  if(a>0 && a<1) return String(Number(v.toPrecision(2)));        // 0.066 МБ/с — не «0»
+  return a>=1000? Math.round(v).toLocaleString() : a>=100? String(Math.round(v)) : String(Math.round(v*Math.pow(10,d))/Math.pow(10,d)); }
+function ldNice(v){ if(v<=0) return 1; var p=Math.pow(10,Math.floor(Math.log10(v))), n=v/p; return (n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10)*p; }
+// Линейный график: одна ось, до 3 серий (цвета --s1..--s3), легенда с текущим значением, перекрестие + подсказка (среднее и максимум).
+function mchart(title, unit, ser, o){
+  o=o||{};
+  var W=560,H=180,ML=44,MR=10,MT=8,MB=22;
+  var box=el("div",{class:"card mc"},[el("div",{class:"mc-h"},[el("b",{},[title]), unit? el("span",{class:"muted small"},["  · "+unit]) : null])]);
+  ser=ser.filter(function(s){ return s.data && s.data.length; });
+  if(!ser.length){ box.appendChild(el("div",{class:"muted small",style:"padding:28px 0"},[t("ld_nodata")])); return box; }
+  var t0=Infinity,t1=-Infinity,hi=0;
+  ser.forEach(function(s){ s.data.forEach(function(p){ if(p[0]<t0)t0=p[0]; if(p[0]>t1)t1=p[0]; if(p[1]>hi)hi=p[1]; }); });
+  if(o.min!=null) hi=Math.max(hi,o.min);
+  hi=hi>0? ldNice(hi*1.08) : 1; if(t1===t0) t1=t0+1;
+  var step=o.step||60;
+  function X(tt){ return ML+(W-ML-MR)*(tt-t0)/(t1-t0); } function Y(v){ return MT+(H-MT-MB)*(1-v/hi); }
+  var leg=el("div",{class:"mc-leg"},[]);
+  ser.forEach(function(s,i){ var last=s.data[s.data.length-1];
+    leg.appendChild(el("span",{},[el("i",{style:"background:var(--s"+(i+1)+")"}), s.name+"  ", el("b",{},[ldNum(last[1])])])); });
+  if(ser.length>1 || o.legend) box.appendChild(leg);
+  else box.appendChild(el("div",{class:"mc-leg"},[el("span",{},[el("b",{},[ldNum(ser[0].data[ser[0].data.length-1][1])+" "+(unit||"")])])]));
+  var kids=[];
+  [0,hi/2,hi].forEach(function(v){ kids.push(svgEl("line",{x1:ML,x2:W-MR,y1:Y(v),y2:Y(v),stroke:"var(--line)","stroke-width":"1"}));
+    kids.push(svgEl("text",{x:ML-6,y:Y(v)+4,"text-anchor":"end","font-size":"11",fill:"var(--mut)"},[ldNum(v)])); });
+  var span=t1-t0, long=span>2*86400;
+  for(var k=0;k<=4;k++){ var tt=t0+span*k/4, d=new Date(tt*1000);
+    var lab=long? (("0"+d.getDate()).slice(-2)+"."+("0"+(d.getMonth()+1)).slice(-2)) : (("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2));
+    kids.push(svgEl("text",{x:X(tt),y:H-6,"text-anchor":k===0?"start":k===4?"end":"middle","font-size":"11",fill:"var(--mut)"},[lab])); }
+  ser.forEach(function(s,i){
+    var d="", prev=null;
+    s.data.forEach(function(p){ d+=((prev==null||p[0]-prev>step*3)?"M":"L")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)+" "; prev=p[0]; });
+    kids.push(svgEl("path",{d:d,fill:"none",stroke:"var(--s"+(i+1)+")","stroke-width":"2","stroke-linejoin":"round","stroke-linecap":"round"}));
+  });
+  var cross=svgEl("line",{x1:0,x2:0,y1:MT,y2:H-MB,stroke:"var(--mut)","stroke-width":"1","stroke-dasharray":"3 3",visibility:"hidden"});
+  var dots=ser.map(function(s,i){ return svgEl("circle",{r:"4",fill:"var(--s"+(i+1)+")",stroke:"var(--panel)","stroke-width":"2",visibility:"hidden"}); });
+  kids.push(cross); dots.forEach(function(c){ kids.push(c); });
+  var hit=svgEl("rect",{x:ML,y:MT,width:W-ML-MR,height:H-MT-MB,fill:"transparent"});
+  kids.push(hit);
+  var svg=svgEl("svg",{viewBox:"0 0 "+W+" "+H,style:"width:100%;height:auto;display:block"},kids);
+  var tip=el("div",{class:"mc-tip"},[]);
+  function near(s,tt){ var best=null; s.data.forEach(function(p){ if(!best||Math.abs(p[0]-tt)<Math.abs(best[0]-tt)) best=p; }); return best; }
+  hit.addEventListener("mousemove",function(e){
+    var r=svg.getBoundingClientRect(), x=(e.clientX-r.left)*W/r.width, tt=t0+(x-ML)/(W-ML-MR)*(t1-t0);
+    var ref=near(ser[0],tt); if(!ref) return;
+    cross.setAttribute("x1",X(ref[0])); cross.setAttribute("x2",X(ref[0])); cross.setAttribute("visibility","visible");
+    tip.innerHTML=""; var dt=new Date(ref[0]*1000);
+    tip.appendChild(el("div",{class:"muted"},[dt.toLocaleString([], {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})]));
+    ser.forEach(function(s,i){ var p=near(s,ref[0]); if(!p) return;
+      dots[i].setAttribute("cx",X(p[0])); dots[i].setAttribute("cy",Y(p[1])); dots[i].setAttribute("visibility","visible");
+      tip.appendChild(el("div",{},[el("i",{style:"background:var(--s"+(i+1)+")"}), s.name+": ", el("b",{},[ldNum(p[1])]),
+        el("span",{class:"muted"},["  ("+t("ld_max")+" "+ldNum(p[2])+")"])])); });
+    tip.style.display="block";
+    var bx=box.getBoundingClientRect(), left=e.clientX-bx.left+14;
+    if(left+tip.offsetWidth>bx.width-6) left=e.clientX-bx.left-tip.offsetWidth-14;
+    tip.style.left=Math.max(4,left)+"px"; tip.style.top=(e.clientY-bx.top+10)+"px";
+  });
+  hit.addEventListener("mouseleave",function(){ tip.style.display="none"; cross.setAttribute("visibility","hidden");
+    dots.forEach(function(c){ c.setAttribute("visibility","hidden"); }); });
+  box.appendChild(svg); box.appendChild(tip);
+  return box;
+}
+function tabLoad(v){
+  var head=el("div",{class:"card"},[]), tiles=el("div",{class:"ld-tiles"},[]), procs=el("div",{},[]), grid=el("div",{class:"ld-grid"},[]);
+  var auto=el("input",{type:"checkbox",checked:"checked"});
+  var bar=el("div",{class:"row",style:"gap:6px;flex-wrap:wrap;align-items:center"},[]);
+  function btns(){ bar.innerHTML="";
+    [["1h","1 ч"],["6h","6 ч"],["24h","24 ч"],["7d","7 д"],["30d","30 д"]].forEach(function(r){
+      bar.appendChild(el("button",{class:"small"+(LD_RANGE===r[0]?" pri":""),onclick:function(){ LD_RANGE=r[0]; try{ localStorage.setItem("sw_ldrange",r[0]); }catch(e){} btns(); load(); }},[r[1]])); });
+    bar.appendChild(el("label",{class:"small",style:"margin-left:8px"},[auto," "+t("ld_auto")])); }
+  var intro=el("p",{class:"muted small",style:"margin:0 0 8px"},[]);
+  head.appendChild(el("h3",{},[t("load")])); head.appendChild(intro); head.appendChild(bar);
+  v.appendChild(head); v.appendChild(tiles); v.appendChild(procs); v.appendChild(grid);
+  function tile(label, val, sub){ return el("div",{class:"ld-tile"},[el("div",{class:"s"},[label]), el("div",{class:"v"},[val]), sub? el("div",{class:"s"},[sub]) : null]); }
+  function S_(d,key,name,k){ k=k||1; return {name:name, data:(d.series[key]||[]).map(function(p){ return [p[0],p[1]*k,p[2]*k]; })}; }
+  function load(){
+    api("/api/metrics?range="+LD_RANGE).then(function(d){
+      intro.textContent=t("ld_intro").replace("{n}",d.interval).replace("{c}",d.cores||"?");
+      var n=d.now||{}; tiles.innerHTML="";
+      tiles.appendChild(tile(t("ld_t_cpu"), ldNum(n.cpu)+" %", t("ld_t_core")+" "+ldNum(n.cpu_max)+" %"));
+      tiles.appendChild(tile(t("ld_t_ram"), ldNum(n.ram_pct)+" %", n.ram_used!=null? ldNum(n.ram_used/1024)+" / "+ldNum(n.ram_total/1024)+" "+t("ld_gb") : ""));
+      tiles.appendChild(tile(t("ld_t_iops"), ldNum(n.d_r_iops,0)+" / "+ldNum(n.d_w_iops,0), t("ld_read")+" / "+t("ld_write")+", "+t("ld_ops")));
+      tiles.appendChild(tile(t("ld_t_disk"), ldNum(n.d_r_mbs,2)+" / "+ldNum(n.d_w_mbs,2), t("ld_read")+" / "+t("ld_write")+", "+t("ld_mbs")));
+      tiles.appendChild(tile(t("ld_t_net"), ldNum(n.n_in_mbs,2)+" / "+ldNum(n.n_out_mbs,2), t("ld_in")+" / "+t("ld_out")+", "+t("ld_mbs")));
+      tiles.appendChild(tile(t("ld_t_free"), n.disk_free_pct!=null? ldNum(n.disk_free_pct)+" %" : "—", n.disk_free_gb!=null? ldNum(n.disk_free_gb)+" "+t("ld_gb") : ""));
+      tiles.appendChild(tile(t("ld_t_online"), n.online!=null? String(n.online) : "—", t("ld_players")));
+      procs.innerHTML="";
+      var pr=[["g",t("ld_game")],["s",t("ld_steam")],["p",t("ld_panel")]];
+      procs.appendChild(el("div",{class:"card",style:"margin-bottom:12px"},[el("h3",{},[t("ld_proc")]),
+        scT(ltable([t("ld_col_proc"),t("ld_col_cpu"),t("ld_col_ram"),t("ld_col_iops"),t("ld_col_mbs"),t("ld_col_thr"),t("ld_col_h")], pr, function(x){
+          var k=x[0]; if(n[k+"_rss"]==null) return [x[1], el("span",{class:"muted"},[t("ld_notrun")]),"","","","",""];
+          return [x[1], ldNum(n[k+"_cpu"])+" %", ldNum(n[k+"_rss"]/1024,2)+" "+t("ld_gb"), ldNum(n[k+"_r_iops"],0)+" / "+ldNum(n[k+"_w_iops"],0),
+            ldNum(n[k+"_r_mbs"],2)+" / "+ldNum(n[k+"_w_mbs"],2), n[k+"_thr"]!=null? String(n[k+"_thr"]) : "—", n[k+"_h"]!=null? String(n[k+"_h"]) : "—"]; }))]));
+      grid.innerHTML=""; var o={step:d.step};
+      grid.appendChild(mchart(t("ld_cpu"),"%",[S_(d,"cpu",t("ld_server")),S_(d,"g_cpu",t("ld_game")),S_(d,"p_cpu",t("ld_panel"))],{step:d.step,min:10}));
+      grid.appendChild(mchart(t("ld_cpu_core"),"%",[S_(d,"cpu_max",t("ld_server"))],{step:d.step,min:10}));
+      grid.appendChild(mchart(t("ld_ram"),t("ld_gb"),[S_(d,"ram_used",t("ld_server"),1/1024),S_(d,"g_rss",t("ld_game"),1/1024),S_(d,"p_rss",t("ld_panel"),1/1024)],o));
+      grid.appendChild(mchart(t("ld_diskio"),t("ld_ops"),[S_(d,"d_r_iops",t("ld_read")),S_(d,"d_w_iops",t("ld_write"))],o));
+      grid.appendChild(mchart(t("ld_diskmb"),t("ld_mbs"),[S_(d,"d_r_mbs",t("ld_read")),S_(d,"d_w_mbs",t("ld_write"))],o));
+      grid.appendChild(mchart(t("ld_gameio"),t("ld_ops"),[S_(d,"g_r_iops",t("ld_read")),S_(d,"g_w_iops",t("ld_write"))],o));
+      grid.appendChild(mchart(t("ld_net"),t("ld_mbs"),[S_(d,"n_in_mbs",t("ld_in")),S_(d,"n_out_mbs",t("ld_out"))],o));
+      grid.appendChild(mchart(t("ld_online"),t("ld_players"),[S_(d,"online",t("ld_online"))],o));
+      grid.appendChild(mchart(t("ld_req"),t("ld_rpm"),[S_(d,"req_admin",t("ld_admin")),S_(d,"req_player",t("ld_player"))],o));
+      grid.appendChild(mchart(t("ld_lat"),t("ld_ms"),[S_(d,"lat_admin",t("ld_admin")),S_(d,"lat_player",t("ld_player"))],o));
+    }).catch(function(e){ grid.innerHTML=""; grid.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  btns(); load();
+  ldTimer=setInterval(function(){ if(!document.hidden && S.tab==="load" && auto.checked) load(); },30000);
 }
 function tabStats(v){
   var wrap=el("div",{},[el("div",{class:"row",style:"margin-bottom:10px"},[el("button",{class:"small",onclick:function(){loadStats(true);}},[t("refresh")])]), el("div",{id:"stbody"},[el("p",{class:"muted"},["…"])])]);
