@@ -5373,3 +5373,237 @@ def snapshot(cfg, recent_limit=40):
         "users": users,
         "recent": recent,
     }
+
+
+# ------------------------------------------------------ анализ генерации космоса
+_GEN_GAP = 1800          # разрыв между созданиями звёзд больше 30 мин = генерация мира закончилась
+_BACKUP_SG_CACHE = {}    # путь zip -> (mtime, состояние space_game + макс. номер звезды)
+
+
+def _dt(t):
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S") if t else None
+
+
+def _ctime(path):
+    try:
+        return os.stat(path).st_ctime
+    except OSError:
+        return None
+
+
+def _steam_update(cfg):
+    """Когда Steam последний раз обновлял игру (appmanifest) -> {time, build} | None."""
+    inst = cfg.get("game_install_dir") or ""
+    appid = cfg.get("game_appid") or 1690980
+    cand = [os.path.join(inst, "..", "..", "appmanifest_%s.acf" % appid)] if inst else []
+    cand.append(r"C:\Program Files (x86)\Steam\steamapps\appmanifest_%s.acf" % appid)
+    for p in cand:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                t = f.read()
+        except OSError:
+            continue
+        lu = re.search(r'"LastUpdated"\s+"(\d+)"', t)
+        bid = re.search(r'"buildid"\s+"(\d+)"', t)
+        return {"t": int(lu.group(1)) if lu else None, "time": _dt(int(lu.group(1))) if lu else None,
+                "build": bid.group(1) if bid else None}
+    return None
+
+
+def _backup_space_state(zpath):
+    """space_game.json и наибольший номер звезды внутри бэкапа мира (читается только
+    оглавление zip и один маленький файл)."""
+    mt = os.path.getmtime(zpath)
+    hit = _BACKUP_SG_CACHE.get(zpath)
+    if hit and hit[0] == mt:
+        return hit[1]
+    st = None
+    try:
+        with zipfile.ZipFile(zpath) as zf:
+            names = zf.namelist()
+            sg = sorted((n for n in names if n.replace("\\", "/").endswith("world/space_game.json")), key=len)
+            stars = [int(m.group(1)) for n in names for m in [re.search(r"world[/\\]star(\d+)\.json$", n)] if m]
+            clusters = sum(1 for n in names if re.search(r"world[/\\]cluster\d+\.json$", n))
+            d = json.loads(zf.read(sg[0]).decode("utf-8", "replace")) if sg else {}
+            st = {"curStarId": d.get("curStarId"), "startMapId": d.get("startMapId"),
+                  "curObjectId": d.get("curObjectId"), "countClusters": d.get("countClusters"),
+                  "startClusterId": d.get("startClusterId"), "updateMapId": d.get("updateMapId"),
+                  "stars": len(stars), "maxStar": max(stars) if stars else None, "clusterFiles": clusters}
+    except (OSError, zipfile.BadZipFile, ValueError, KeyError, IndexError):
+        st = None
+    _BACKUP_SG_CACHE[zpath] = (mt, st)
+    return st
+
+
+def space_generation(cfg):
+    """Что в космосе (Data\\world: звёзды, кластеры, space_game.json) создано или
+    изменено ПОСЛЕ первоначальной генерации мира, и когда. Окно генерации — от
+    первой звезды, пока следующая создана не позже чем через 30 мин после предыдущей.
+    История — по бэкапам мира (backup\\arhN.zip) и обновлениям игры в Steam."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    W = os.path.join(wd, "Data", "world")
+    stars = []
+    try:
+        listing = os.listdir(W)
+    except OSError:
+        return {"ok": False, "error": "нет каталога Data\\world"}
+    for f in listing:
+        m = re.match(r"star(\d+)\.json$", f)
+        if m:
+            try:
+                s = os.stat(os.path.join(W, f))
+            except OSError:
+                continue
+            stars.append({"id": int(m.group(1)), "ct": s.st_ctime, "mt": s.st_mtime, "size": s.st_size})
+    if not stars:
+        return {"ok": False, "error": "в Data\\world нет star*.json"}
+    by_ct = sorted(stars, key=lambda s: s["ct"])
+    gen_start = gen_end = by_ct[0]["ct"]
+    for s in by_ct[1:]:
+        if s["ct"] - gen_end > _GEN_GAP:
+            break
+        gen_end = s["ct"]
+    edge = gen_end + 600
+
+    def s_after(r):
+        """Секунд от конца генерации до изменения системы."""
+        return datetime.strptime(r["modified"], "%Y-%m-%d %H:%M:%S").timestamp() - gen_end
+
+    clusters, star_cluster, cl_lists = [], {}, {}
+    for f in listing:
+        m = re.match(r"cluster(\d+)\.json$", f)
+        if not m:
+            continue
+        p = os.path.join(W, f)
+        c = _read_json(p) or {}
+        try:
+            s = os.stat(p)
+        except OSError:
+            continue
+        cl_lists[int(m.group(1))] = list(c.get("starSystems") or [])
+        for sid in c.get("starSystems") or []:
+            star_cluster[sid] = int(m.group(1))
+        clusters.append({"id": int(m.group(1)), "ct": s.st_ctime, "mt": s.st_mtime,
+                         "stars": len(c.get("starSystems") or [])})
+    sg = _read_json(os.path.join(W, "space_game.json")) or {}
+    sg_bak = _read_json(os.path.join(W, "space_game.json.bak")) or {}
+    steam = _steam_update(cfg)
+
+    def star_info(s, why):
+        try:
+            objs = _parse_star_file(os.path.join(W, "star%d.json" % s["id"]))
+        except OSError:
+            objs = []
+        kinds = collections.Counter(o["kind"] for o in objs)
+        cl = star_cluster.get(s["id"])
+        r = {"id": s["id"], "why": why, "created": _dt(s["ct"]), "modified": _dt(s["mt"]), "size": s["size"],
+             "cluster": cl, "start_cluster": cl is not None and cl == sg.get("startClusterId"),
+             "objects": len(objs), "planets": kinds.get("planet", 0), "satellites": kinds.get("satellite", 0),
+             "asteroids": kinds.get("asteroid", 0),
+             "planet_names": [o["name"] for o in objs if o["kind"] == "planet"][:20]}
+        t = s["ct"] if why == "created" else s["mt"]
+        if steam and steam.get("t") and 0 <= t - steam["t"] <= 6 * 3600:
+            r["after_update"] = "через %d мин после обновления игры (сборка %s)" % ((t - steam["t"]) // 60, steam.get("build"))
+        return r
+
+    # Независимо от дат файлов (мир могли скопировать/восстановить): при генерации кластеры
+    # получают звёзды подряд — 1..21, 22..35, … Звезда вне этой последовательности
+    # (например, 3129 в конце списка кластера 1) добавлена позже.
+    out_of_order, nxt = [], 1
+    for cid in sorted(cl_lists):
+        for sid in cl_lists[cid]:
+            if sid == nxt:
+                nxt += 1
+            else:
+                out_of_order.append({"cluster": cid, "star": sid})
+    ooo_ids = {x["star"] for x in out_of_order}
+    late = [star_info(s, "created") for s in sorted(stars, key=lambda s: s["id"]) if s["ct"] > edge or s["id"] in ooo_ids]
+    for r in late:
+        r["out_of_order"] = r["id"] in ooo_ids
+    changed = [star_info(s, "modified") for s in sorted(stars, key=lambda s: s["id"])
+               if s["ct"] <= edge and s["mt"] > edge and s["id"] not in ooo_ids]
+    ids = {s["id"] for s in stars}
+    missing = sorted(set(range(1, max(ids) + 1)) - ids)
+    cl_late = [{"id": c["id"], "created": _dt(c["ct"]), "modified": _dt(c["mt"]), "stars": c["stars"],
+                "new": c["ct"] > edge} for c in sorted(clusters, key=lambda c: c["id"]) if c["mt"] > edge]
+
+    # стартовая карта новичков: когда впервые созданы её файлы
+    start = None
+    smid = sg.get("startMapId")
+    if smid is not None:
+        D = os.path.join(wd, "Data")
+        start = {"map": smid, "was": sg_bak.get("startMapId"),
+                 "files": [{"file": rel, "created": _dt(_ctime(os.path.join(D, rel)))}
+                           for rel in ("maps\\map%s.dt" % smid, "map_info\\map%s.json" % smid, "units\\bots%s" % smid)
+                           if _ctime(os.path.join(D, rel))]}
+
+    # история по бэкапам: только моменты, когда состояние космоса менялось
+    hist, prev = [], None
+    zips = sorted(glob.glob(os.path.join(wd, "backup", "*.zip")), key=os.path.getmtime)
+    keys = ("curStarId", "maxStar", "stars", "startMapId", "curObjectId", "countClusters", "startClusterId", "clusterFiles")
+    for z in zips:
+        st = _backup_space_state(z)
+        if not st:
+            continue
+        diff = {k: [prev.get(k), st.get(k)] for k in keys if prev and prev.get(k) != st.get(k)}
+        if prev is None or diff:
+            hist.append({"backup": os.path.basename(z), "time": _dt(os.path.getmtime(z)), "state": st, "diff": diff})
+        prev = st
+    now_state = {"curStarId": sg.get("curStarId"), "maxStar": max(ids), "stars": len(ids),
+                 "startMapId": sg.get("startMapId"), "curObjectId": sg.get("curObjectId"),
+                 "countClusters": sg.get("countClusters"), "startClusterId": sg.get("startClusterId"),
+                 "clusterFiles": len(clusters)}
+    diff = {k: [prev.get(k), now_state.get(k)] for k in keys if prev and prev.get(k) != now_state.get(k)}
+    if prev is None or diff:
+        hist.append({"backup": "сейчас", "time": _dt(time.time()), "state": now_state, "diff": diff})
+
+    # выводы простым текстом
+    concl = ["Генерация мира: %s — %s, звёздных систем %d, кластеров %d."
+             % (_dt(gen_start), _dt(gen_end), sum(1 for s in stars if s["ct"] <= edge and s["id"] not in ooo_ids),
+                len(clusters))]
+    if not late and not changed:
+        concl.append("После генерации ни одна звёздная система не создавалась и не менялась.")
+    for r in late:
+        concl.append("Создана система #%d%s: %d объектов (планет %d, спутников %d, астероидов %d) — %s%s."
+                     % (r["id"], " в стартовом кластере %s" % r["cluster"] if r["start_cluster"]
+                        else (" в кластере %s" % r["cluster"] if r["cluster"] else " (ни в одном кластере!)"),
+                        r["objects"], r["planets"], r["satellites"], r["asteroids"], r["created"],
+                        ", " + r["after_update"] if r.get("after_update") else ""))
+    for r in late:
+        if r.get("out_of_order"):
+            concl.append("Система #%d стоит в кластере %s вне порядка первоначальной генерации — добавлена позже "
+                         "(этот признак не зависит от дат файлов)." % (r["id"], r["cluster"]))
+    # изменения подряд (в пределах минуты) — одной строкой: игра переписывает сразу группу систем
+    grp = []
+    for r in sorted(changed, key=lambda r: (r["modified"], r["id"])):
+        if grp and r["modified"][:16] == grp[-1][-1]["modified"][:16]:
+            grp[-1].append(r)
+        else:
+            grp.append([r])
+    for g in grp:
+        ids_s = ("#%d" % g[0]["id"]) if len(g) == 1 else "#%d–#%d (%d шт.)" % (g[0]["id"], g[-1]["id"], len(g))
+        startcl = all(r["start_cluster"] for r in g)
+        concl.append("Изменены системы %s%s, созданные при генерации — %s%s%s." % (
+            ids_s, " стартового кластера" if startcl else "", g[0]["modified"],
+            ", " + g[0]["after_update"] if g[0].get("after_update") else "",
+            " (вскоре после генерации — похоже на первый запуск мира, игра обновляет стартовую зону)"
+            if s_after(g[0]) < 3600 else ""))
+    if missing:
+        concl.append("Нет файлов звёзд с номерами: %s%s." % (", ".join(map(str, missing[:20])), "…" if len(missing) > 20 else ""))
+    if start and start["was"] is not None and start["was"] != start["map"]:
+        concl.append("Стартовая карта новичков сменилась: %s → %s%s." % (
+            start["was"], start["map"], (" (впервые создана %s)" % start["files"][0]["created"]) if start["files"] else ""))
+    for h in hist[1:]:
+        if h["diff"]:
+            concl.append("%s (%s) по сравнению с предыдущим бэкапом: %s." % (
+                "Сейчас" if h["backup"] == "сейчас" else "Бэкап " + h["backup"], h["time"], "; ".join(
+                "%s %s → %s" % (k, v[0], v[1]) for k, v in h["diff"].items())))
+    if steam and steam.get("time"):
+        concl.append("Последнее обновление игры в Steam: %s (сборка %s)." % (steam["time"], steam.get("build")))
+    return {"ok": True, "world": os.path.basename(wd), "generation": {"start": _dt(gen_start), "end": _dt(gen_end)},
+            "stars_total": len(stars), "max_star": max(ids), "missing": missing[:200], "clusters_total": len(clusters),
+            "late_stars": late, "changed_stars": changed, "clusters_changed": cl_late, "out_of_order": out_of_order,
+            "space_game": sg, "space_game_bak": sg_bak, "start_map": start, "steam": steam,
+            "history": hist, "backups": len(zips), "conclusions": concl}

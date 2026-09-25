@@ -856,7 +856,7 @@ class WebUI:
     _MOD_OPS = {"restartgame", "login"}
     _MOD_MODERATE = {"ban", "unban"}
     _ADMIN_ROUTES = {"audit", "log", "settings", "roles", "login-flow", "nav-shots", "nav-shot", "admin-tools",
-                     "world-backup", "players-csv", "users",
+                     "world-backup", "players-csv", "users", "space-gen",
                      # рецепты микстур/кулинарии — знание только для админа
                      "buff-notepad", "buff-ingredients", "buff-optimize", "food-ingredients", "food-lib", "food-optimize"}
     _POST_VIEW = {"job", "track"}
@@ -1766,6 +1766,13 @@ class WebUI:
         if d.get("ok"):
             slot["cache"] = (now, d)
         return d
+
+    def _api_space_gen(self, h, method, q, sess):
+        """Анализ генерации космоса: что создано/изменено после генерации мира (звёзды,
+        кластеры, стартовая карта) + история по бэкапам. ?force=1 — без кэша."""
+        if (q.get("force") or [""])[0]:
+            self._heavy.pop("space-gen", None)
+        return self._json(h, self._cached("space-gen", lambda: players.space_generation(self.cfg), ttl=300))
 
     def _api_activity(self, h, method, q, sess):
         """Активность и удержание (analytics.txt)."""
@@ -2874,6 +2881,10 @@ var T = {
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
   entry_add_step:"+ шаг из выбранной точки", entry_use_pick:"взять выбранную точку", entry_saved:"Сохранено",
   log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)", log_act:"Журнал активности", log_blocks:"Блокировки входа",
+  sg_title:"Генерация космоса", sg_run:"Анализировать", sg_intro:"Что в космосе (звёздные системы, кластеры, стартовая карта новичков) создано или изменено после первоначальной генерации мира и когда. Три независимых признака: порядок номеров звёзд в кластерах (не зависит от дат), даты файлов (если мир копировали или восстанавливали — это даты копирования) и история по бэкапам мира; плюс дата обновления игры в Steam. Только чтение.",
+  sg_world:"Мир", sg_gen:"Генерация мира", sg_stars:"Звёздных систем", sg_missing:"нет номеров:", sg_clusters:"Кластеров", sg_start:"Стартовая карта новичков", sg_was:"было", sg_steam:"Обновление игры в Steam", sg_backups:"Бэкапов мира",
+  sg_concl:"Выводы", sg_late:"Системы, созданные или изменённые после генерации", sg_what:"Что", sg_when:"Когда", sg_cluster:"Кластер", sg_objs:"Объектов (план./спутн./астер.)", sg_planets:"Планеты",
+  sg_created:"создана", sg_modified:"изменена", sg_ooo:"вне порядка генерации", sg_startcl:"стартовый", sg_clch:"Кластеры, изменённые после генерации", sg_startfiles:"Файлы стартовой карты", sg_file:"Файл", sg_hist:"История по бэкапам (только изменения)", sg_backup:"Бэкап", sg_diff:"Что изменилось",
   role_gm:"GM", ac_src_all:"— где —", ac_src_admin:"Админка", ac_src_player:"Панель игроков", ac_src_guard:"Защита входа",
   ac_ev_all:"— все события —", ac_ev_logins:"Входы/выходы", ac_ev_bad:"Неудачи, отказы, зондирование", ac_ev_req:"Запросы (что смотрели/искали)",
   ac_ev_ui:"Действия в интерфейсе", ac_ev_audit:"Аудит (изменения)", ac_ev_guard:"Блокировки",
@@ -3115,6 +3126,10 @@ var T = {
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
   entry_add_step:"+ step from picked point", entry_use_pick:"use picked point", entry_saved:"Saved",
   log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)", log_act:"Activity log", log_blocks:"Login blocks",
+  sg_title:"Space generation", sg_run:"Analyze", sg_intro:"What in space (star systems, clusters, newcomer start map) was created or changed after the initial world generation, and when. Three independent signals: star id order within clusters (date-independent), file dates (after a copy/restore these are copy dates) and world backup history; plus the Steam game update date. Read-only.",
+  sg_world:"World", sg_gen:"World generation", sg_stars:"Star systems", sg_missing:"missing ids:", sg_clusters:"Clusters", sg_start:"Newcomer start map", sg_was:"was", sg_steam:"Steam game update", sg_backups:"World backups",
+  sg_concl:"Findings", sg_late:"Systems created or changed after generation", sg_what:"What", sg_when:"When", sg_cluster:"Cluster", sg_objs:"Objects (plan./sat./aster.)", sg_planets:"Planets",
+  sg_created:"created", sg_modified:"modified", sg_ooo:"out of generation order", sg_startcl:"start", sg_clch:"Clusters changed after generation", sg_startfiles:"Start map files", sg_file:"File", sg_hist:"Backup history (changes only)", sg_backup:"Backup", sg_diff:"What changed",
   role_gm:"GM", ac_src_all:"— where —", ac_src_admin:"Admin panel", ac_src_player:"Player panel", ac_src_guard:"Login guard",
   ac_ev_all:"— all events —", ac_ev_logins:"Logins/logouts", ac_ev_bad:"Failures, denials, probes", ac_ev_req:"Requests (viewed/searched)",
   ac_ev_ui:"UI actions", ac_ev_audit:"Audit (changes)", ac_ev_guard:"Blocks",
@@ -5803,6 +5818,55 @@ function tabMap(v){
     el("div",{id:"mapbody"},[el("p",{class:"muted"},["…"])])
   ]);
   v.appendChild(wrap); loadMap(false);
+  if(isAdmin()) v.appendChild(spaceGenCard());
+}
+// ---- анализ генерации космоса (что появилось после генерации мира) ----
+function spaceGenCard(){
+  var out=el("div",{},[el("p",{class:"muted small"},[t("sg_intro")])]);
+  function run(force){
+    out.innerHTML=""; out.appendChild(el("p",{class:"muted"},["…"]));
+    api("/api/space-gen"+(force?"?force=1":"")).then(function(d){ out.innerHTML="";
+      if(!d.ok){ out.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+      var kvRows=[[t("sg_world"),d.world],[t("sg_gen"),d.generation.start+" — "+d.generation.end],
+        [t("sg_stars"),d.stars_total+" (max #"+d.max_star+")"+(d.missing.length? " · "+t("sg_missing")+" "+d.missing.length : "")],
+        [t("sg_clusters"),String(d.clusters_total)],
+        [t("sg_start"),d.start_map? String(d.start_map.map)+(d.start_map.was!=null&&d.start_map.was!==d.start_map.map? " ("+t("sg_was")+" "+d.start_map.was+")" : "") : "—"],
+        [t("sg_steam"),d.steam&&d.steam.time? d.steam.time+" · build "+d.steam.build : "—"],[t("sg_backups"),String(d.backups)]];
+      out.appendChild(el("table",{style:"margin-bottom:10px;width:auto"},kvRows.map(function(r){
+        return el("tr",{},[el("td",{class:"muted",style:"padding-right:16px"},[r[0]]),el("td",{},[r[1]])]); })));
+      out.appendChild(el("h3",{},[t("sg_concl")]));
+      out.appendChild(el("ul",{},d.conclusions.map(function(c){ return el("li",{},[c]); })));
+      var rows=d.late_stars.concat(d.changed_stars);
+      if(rows.length){
+        out.appendChild(el("h3",{style:"margin-top:14px"},[t("sg_late")+" · "+rows.length]));
+        out.appendChild(scT(ltable(["#",t("sg_what"),t("sg_when"),t("sg_cluster"),t("sg_objs"),t("sg_planets")], rows, function(r){
+          return ["#"+r.id, (r.why==="created"? t("sg_created") : t("sg_modified"))+(r.out_of_order? " ⚠ "+t("sg_ooo") : ""),
+            (r.why==="created"? r.created : r.modified)+(r.after_update? " · "+r.after_update : ""),
+            r.cluster==null? "—" : String(r.cluster)+(r.start_cluster? " ★ "+t("sg_startcl") : ""),
+            r.objects+" ("+r.planets+" / "+r.satellites+" / "+r.asteroids+")", r.planet_names.join(", ")]; })));
+      }
+      if(d.clusters_changed.length){
+        out.appendChild(el("h3",{style:"margin-top:14px"},[t("sg_clch")]));
+        out.appendChild(scT(ltable(["#",t("sg_created"),t("sg_modified"),t("sg_stars")], d.clusters_changed, function(c){
+          return [String(c.id)+(c.new? " 🆕" : ""), c.created, c.modified, String(c.stars)]; })));
+      }
+      if(d.start_map && d.start_map.files.length){
+        out.appendChild(el("h3",{style:"margin-top:14px"},[t("sg_startfiles")+" "+d.start_map.map]));
+        out.appendChild(scT(ltable([t("sg_file"),t("sg_created")], d.start_map.files, function(f){ return [f.file, f.created]; })));
+      }
+      if(d.history.length){
+        out.appendChild(el("h3",{style:"margin-top:14px"},[t("sg_hist")]));
+        out.appendChild(scT(ltable([t("sg_backup"),t("sg_when"),"curStarId","stars","startMapId","curObjectId",t("sg_diff")], d.history, function(h){
+          var st=h.state||{};
+          return [h.backup, h.time, String(st.curStarId), String(st.stars), String(st.startMapId), String(st.curObjectId),
+            Object.keys(h.diff||{}).map(function(k){ return k+": "+h.diff[k][0]+" → "+h.diff[k][1]; }).join("; ")||"—"]; })));
+      }
+    }).catch(function(e){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+  }
+  return el("div",{class:"card",style:"margin-top:12px"},[
+    el("div",{class:"row",style:"align-items:center;gap:8px"},[el("h3",{style:"margin:0"},[t("sg_title")]),
+      el("button",{class:"small pri",onclick:function(){ run(false); }},[t("sg_run")]),
+      el("button",{class:"small",onclick:function(){ run(true); }},[t("refresh")])]), out]);
 }
 function loadMap(force){
   var b=$("#mapbody"); if(!b) return; b.innerHTML=""; b.appendChild(el("p",{class:"muted"},["…"]));
