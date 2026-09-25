@@ -49,7 +49,10 @@ $prin = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLeve
 $set  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
           -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
           -RestartInterval (New-TimeSpan -Minutes 2) -RestartCount 999 -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName 'SigmaSteamBot' -Action $act -Trigger $trig -Principal $prin -Settings $set -Force | Out-Null
+# страховка: раз в 5 минут «запустить, если не запущено» (MultipleInstances IgnoreNew) —
+# поднимет супервизор, если процесс упал; остановка бота выключает задачу целиком
+$rep  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName 'SigmaSteamBot' -Action $act -Trigger @($trig, $rep) -Principal $prin -Settings $set -Force | Out-Null
 Write-Output "[ok] задача SigmaSteamBot ($PyW)"
 
 # --- SigmaNav: прогон UI-последовательностей с реальным фокусом окна ---

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Точка входа: watchdog + Telegram-бот в одном процессе. Запускается планировщиком при входе в систему."""
+import faulthandler
 import logging
 import os
 import sys
+import time
 
 import psutil
 
@@ -36,6 +38,23 @@ def _release_lock():
         pass
 
 
+_FAULT_FILE = None
+
+
+def _enable_faulthandler():
+    """Падение самого интерпретатора (access violation и т.п.) не оставляет traceback в
+    логе — faulthandler допишет в logs\\crash_faults.log стек всех потоков в момент падения."""
+    global _FAULT_FILE
+    try:
+        path = os.path.join(common.BASE_DIR, "logs", "crash_faults.log")
+        _FAULT_FILE = open(path, "a", encoding="utf-8")
+        _FAULT_FILE.write("=== supervisor start %s pid %d\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid()))
+        _FAULT_FILE.flush()
+        faulthandler.enable(file=_FAULT_FILE, all_threads=True)
+    except Exception:  # noqa: BLE001
+        logging.exception("supervisor: faulthandler не включился")
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -43,6 +62,7 @@ def main():
         except Exception:  # noqa: BLE001
             pass
     common.setup_logging("supervisor")
+    _enable_faulthandler()
     if not _acquire_lock():
         sys.exit(0)
     web = None
