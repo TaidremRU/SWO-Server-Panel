@@ -236,6 +236,9 @@ def _coerce_setting(path, typ, raw):
 # gm — главный уровень: всё, что у админа, + журнал активности/аудит/блокировки входа
 ROLES = ("gm", "admin", "moderator", "viewer")
 ROLE_LEVEL = {"viewer": 1, "moderator": 2, "admin": 3, "gm": 4}
+# ВРЕМЕННО: в RBAC найдены дыры — пока не починим, в админку пускаем только GM
+# (вход, кнопка «Админка» в панели игроков, уже открытые сессии других ролей)
+GM_ONLY = True
 _NAME_RX = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
 
 
@@ -850,13 +853,14 @@ class WebUI:
         """Есть ли у запроса действующая сессия админки с ролью (для /admin/ на порту
         панели игроков: без неё — 403, даже формы входа не видно)."""
         tok, sess = self._session_of(h)
-        return bool(sess and self._effective_role(sess["user"]))
+        role = sess and self._effective_role(sess["user"])
+        return bool(role and (role == "gm" or not GM_ONLY))
 
     def enter_as_game_user(self, h, uid, nick, password, new_password, ip):
         """Вход в админку из панели игроков. Первый раз — задать отдельный админский
         пароль (не игровой), дальше — вход по нему. -> (status, dict, set_cookie|None)."""
         role = self.game_panel_role(uid)
-        if not role:
+        if not role or (GM_ONLY and role != "gm"):
             return 403, {"error": "forbidden"}, None
         user = self.auth.user_for_game(uid)
         if user is None:
@@ -1048,6 +1052,9 @@ class WebUI:
             if not role:        # игроку сняли роль в игре — админка больше недоступна
                 self.sessions.drop(tok)
                 return self._json(h, {"error": "auth"}, 401)
+            if GM_ONLY and role != "gm":
+                self.sessions.drop(tok)
+                return self._json(h, {"error": "gm_only"}, 403)
             need = self._need_level(route, method, q)
             if ROLE_LEVEL.get(role, 0) < need:
                 return self._json(h, {"error": "forbidden", "role": role}, 403)
@@ -1193,6 +1200,9 @@ class WebUI:
             return self._json(h, {"error": "throttled", "retry": wait}, 429)
         if user and pw and self.auth.verify(user, pw):
             self.guard.ok(ip, acct, user, "админка")
+            if GM_ONLY and self._effective_role(user) != "gm":
+                self._login_event(h, "login_fail", user, d="админка временно только для GM")
+                return self._json(h, {"error": "gm_only"}, 403)
             tok, csrf = self.sessions.new(user, ip)
             self._login_event(h, "login_ok", user, sid=hashlib.sha256(tok.encode()).hexdigest()[:10],
                               role=self._effective_role(user) or self.auth.role_of(user))
@@ -3132,7 +3142,7 @@ var T = {
   us_title:"Пользователи панели", us_intro:"Админ — всё; модератор — просмотр, скриншот, перезапуск игры и вход, бан/разбан, нарушения и твинки; наблюдатель — только просмотр (без паролей, приватов и IP игроков, без рецептов). Новый пользователь сменит пароль при первом входе.",
   us_name:"Логин", us_role:"Роль", us_pw:"Временный пароль (от 6 символов)", us_add:"Добавить", us_reset:"Сбросить пароль", us_del:"Удалить",
   us_me:"это вы", us_mc:"ждёт смены пароля", us_new_pw:"Новый временный пароль для ", us_confirm_del:"Удалить пользователя ",
-  err_bad_credentials:"Неверный логин или пароль", err_throttled:"Слишком много попыток, подождите",
+  err_bad_credentials:"Неверный логин или пароль", err_gm_only:"Админка временно доступна только GM", err_throttled:"Слишком много попыток, подождите",
   err_bad_old:"Текущий пароль неверный", err_too_short:"Минимум 6 символов", err_too_weak:"Слишком простой пароль",
   err_auth:"Сессия истекла — войдите заново", err_net:"Нет связи с сервером",
   pl_head:"Игроки локального сервера", pl_world:"Мир", pl_registered:"зарегистрировано",
@@ -3404,7 +3414,7 @@ var T = {
   us_title:"Panel users", us_intro:"Admin — everything; moderator — viewing, screenshot, game restart and login, ban/unban, violations and twinks; viewer — viewing only (no player passwords, private messages or IPs, no recipes). A new user changes the password on first login.",
   us_name:"Login", us_role:"Role", us_pw:"Temporary password (6+ chars)", us_add:"Add", us_reset:"Reset password", us_del:"Delete",
   us_me:"you", us_mc:"must change password", us_new_pw:"New temporary password for ", us_confirm_del:"Delete user ",
-  err_bad_credentials:"Wrong username or password", err_throttled:"Too many attempts, wait a bit",
+  err_bad_credentials:"Wrong username or password", err_gm_only:"The admin panel is temporarily GM-only", err_throttled:"Too many attempts, wait a bit",
   err_bad_old:"Current password is wrong", err_too_short:"At least 6 characters", err_too_weak:"Password too weak",
   err_auth:"Session expired — log in again", err_net:"No connection to server",
   pl_head:"Local server players", pl_world:"World", pl_registered:"registered",

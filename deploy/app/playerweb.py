@@ -35,7 +35,7 @@ import activity
 import authguard
 import game_i18n
 import players
-from webui import _Handler, _cip, _ip_allowed, _parse_nets
+from webui import GM_ONLY, _Handler, _cip, _ip_allowed, _parse_nets
 
 
 class _TLSHandler(_Handler):
@@ -914,7 +914,7 @@ class PlayerWeb:
         if not (self.web and self._pcfg().get("admin_proxy")):
             return None
         role = self.web.game_panel_role(uid)
-        if not role:
+        if not role or (GM_ONLY and role != "gm"):
             return None
         return {"role": role, "linked": self.web.auth.user_for_game(uid) is not None}
 
