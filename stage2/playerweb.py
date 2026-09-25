@@ -745,7 +745,8 @@ class PlayerWeb:
                 except OSError:
                     favv = 0
                 return self._send(h, 200, "text/html; charset=utf-8",
-                                  PAGE.replace("__TITLE__", html.escape(self._title())).replace("__FAVV__", str(favv)),
+                                  PAGE.replace("__TITLE__", html.escape(self._title())).replace("__FAVV__", str(favv))
+                                  .replace("__APPID__", str(int(self.cfg.get("game_appid") or 0))),
                                   {"Cache-Control": "no-store"})
             if path == "/admin" or path.startswith("/admin/"):
                 if not (self.web and self._pcfg().get("admin_proxy")):
@@ -2085,6 +2086,8 @@ header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var
 header h1{font-size:16px;margin:0;display:flex;align-items:center;gap:8px}
 #logo{width:28px;height:28px;border-radius:6px;object-fit:contain}
 header .sp{flex:1}
+a.play{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:6px;background:#1b2838;color:#fff;text-decoration:none;font-weight:600;border:1px solid #2a475e}
+a.play:hover{background:#2a475e}
 nav{display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--line)}
 nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
 main{padding:16px;max-width:1200px;margin:0 auto}
@@ -2135,7 +2138,7 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 </style>
 </head>
 <body>
-<header><h1 id="ttl"><img id="logo" src="/favicon.ico?v=__FAVV__" alt="" onerror="this.remove()">__TITLE__</h1><span class="sp"></span><span id="who" class="muted"></span><button id="admbtn" type="button" style="display:none"></button><button id="lang" type="button" title="Русский / English"></button></header>
+<header><h1 id="ttl"><img id="logo" src="/favicon.ico?v=__FAVV__" alt="" onerror="this.remove()">__TITLE__</h1><span class="sp"></span><a id="playbtn" class="play" href="https://store.steampowered.com/app/__APPID__/" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11.98 0C5.67 0 .5 4.87.02 11.05l6.44 2.66a3.4 3.4 0 0 1 1.92-.59l.19.01 2.86-4.15v-.06a4.53 4.53 0 1 1 4.53 4.53h-.1l-4.08 2.91.01.16a3.4 3.4 0 0 1-6.73.68L.44 15.3A12 12 0 1 0 11.98 0zM7.54 18.21l-1.47-.61a2.55 2.55 0 1 0 1.4-3.5l1.52.63a1.88 1.88 0 0 1-1.45 3.48zm11.42-9.3a3.02 3.02 0 1 0-6.04 0 3.02 3.02 0 0 0 6.04 0zm-5.28 0a2.27 2.27 0 1 1 4.54 0 2.27 2.27 0 0 1-4.54 0z"/></svg><span id="playtxt">Играть</span></a><span id="who" class="muted"></span><button id="admbtn" type="button" style="display:none"></button><button id="lang" type="button" title="Русский / English"></button></header>
 <nav id="nav" style="display:none"></nav>
 <main id="main"></main>
 <script>
@@ -2306,7 +2309,7 @@ var EN_DICT={
   "вы: ":"you: ",
   "Выберите собеседника слева.":"Pick a conversation on the left.",
   "Только чтение. Прокрутите вверх, чтобы загрузить более старые сообщения; новые подгружаются раз в 20 секунд.":"Read-only. Scroll up to load older messages; new ones arrive every 20 seconds.",
-  "Админка":"Admin",
+  "Админка":"Admin", "Играть":"Play",
   "Новый админский пароль (от 8 символов)":"New admin password (8+ chars)",
   "Админский пароль":"Admin password",
   "Повторите пароль":"Repeat password",
@@ -2706,6 +2709,7 @@ function openAdminEnter(){
 function setLang(v){ try{ localStorage.setItem("swp_lang",v); }catch(e){} location.reload(); }
 function render(){
   var ab=$("#admbtn"); if(ab){ ab.style.display=(S.nick&&S.staff)?"":"none"; ab.textContent=L("Админка"); ab.onclick=openAdminEnter; }
+  var pt=$("#playtxt"); if(pt) pt.textContent=L("Играть");
   var lb=$("#lang"); if(lb){ lb.textContent=LANG==="en"? "RU" : "EN"; lb.onclick=function(){ setLang(LANG==="en"? "ru" : "en"); }; }
   if(S.nick && ICONS===null){ ICONS={none:true};
     api("/api/item-icons").then(function(d){ ICONS=d; if(!d.none) render(); }).catch(function(){}); }
