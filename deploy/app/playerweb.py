@@ -3058,25 +3058,27 @@ function spaceCard(box){
 }
 // Карта с масштабом колёсиком к курсору, сдвигом мышью и сбросом двойным кликом. Координаты игры (y вверх),
 // значки и подписи — «маркеры» с обратным масштабом: на экране всегда одного размера.
-function panZoom(R, cx, cy){
-  cx=cx||0; cy=cy||0;
-  var vb0={x:cx-R,y:-cy-R,w:2*R}, vb={x:vb0.x,y:vb0.y,w:vb0.w}, markers=[];
-  var svg=svgEl("svg",{viewBox:vb.x+" "+vb.y+" "+vb.w+" "+vb.w,
-    style:"width:100%;height:auto;aspect-ratio:1/1;display:block;background:var(--panel2);border-radius:10px;cursor:grab;touch-action:none;user-select:none"});
+function panZoom(R, cx, cy, aspect){
+  cx=cx||0; cy=cy||0; aspect=aspect||1;          // aspect = ширина/высота области (галактика — широкая)
+  var vb0={x:cx-R*aspect,y:-cy-R,w:2*R*aspect}, vb={x:vb0.x,y:vb0.y,w:vb0.w}, markers=[];
+  function vh(){ return vb.w/aspect; }
+  var svg=svgEl("svg",{viewBox:vb.x+" "+vb.y+" "+vb.w+" "+vh(),
+    style:"width:100%;height:auto;aspect-ratio:"+aspect+"/1;display:block;background:var(--panel2);border-radius:10px;cursor:grab;touch-action:none;user-select:none"});
   var layer=svgEl("g",{}); svg.appendChild(layer);
   var zl=el("span",{class:"muted small"},[]);
   function mk(x,y,kids,upd){ var g=svgEl("g",{},kids.filter(Boolean)); layer.appendChild(g); markers.push({g:g,x:x,y:-y,upd:upd}); return g; }
   function label(txt,dx,dy,anchor,color,size){ return svgEl("text",{x:dx,y:dy,"text-anchor":anchor||"start","font-size":size||"12",fill:color||"var(--fg)",
     stroke:"var(--panel2)","stroke-width":"3","paint-order":"stroke"},[txt]); }
   function redraw(){
-    svg.setAttribute("viewBox",vb.x+" "+vb.y+" "+vb.w+" "+vb.w);
+    svg.setAttribute("viewBox",vb.x+" "+vb.y+" "+vb.w+" "+vh());
     var w=svg.getBoundingClientRect().width||520, sc=vb.w/w;
     markers.forEach(function(m){ m.g.setAttribute("transform","translate("+m.x+" "+m.y+") scale("+sc+")"); if(m.upd) m.upd(sc); });
-    var z=2*R/vb.w; zl.textContent="×"+(z<10? z.toFixed(1) : Math.round(z));
+    var z=vb0.w/vb.w; zl.textContent="×"+(z<10? z.toFixed(1) : Math.round(z));
   }
-  function zoomAt(mx,my,f){ var nw=Math.min(4*R,Math.max(R/5000,vb.w*f)); vb.x=mx-(mx-vb.x)*nw/vb.w; vb.y=my-(my-vb.y)*nw/vb.w; vb.w=nw; redraw(); }
+  function zoomAt(mx,my,f){ var nw=Math.min(4*vb0.w,Math.max(vb0.w/10000,vb.w*f)), k=nw/vb.w;
+    vb.x=mx-(mx-vb.x)*k; vb.y=my-(my-vb.y)*k; vb.w=nw; redraw(); }
   function reset(){ vb={x:vb0.x,y:vb0.y,w:vb0.w}; redraw(); }
-  function center(x,y,w){ vb={x:x-w/2,y:-y-w/2,w:w}; redraw(); }
+  function center(x,y,w){ vb={x:x-w/2,y:-y-w/(2*aspect),w:w}; redraw(); }
   var drag=null, moved=false;
   svg.addEventListener("pointerdown",function(e){ drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y}; moved=false; });
   svg.addEventListener("pointermove",function(e){ if(!drag) return; if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>3){ moved=true; svg.style.cursor="grabbing";
@@ -3085,9 +3087,9 @@ function panZoom(R, cx, cy){
   function up(){ drag=null; svg.style.cursor="grab"; }
   svg.addEventListener("pointerup",up); svg.addEventListener("pointercancel",up);
   svg.addEventListener("wheel",function(e){ e.preventDefault(); var r=svg.getBoundingClientRect();
-    zoomAt(vb.x+(e.clientX-r.left)/r.width*vb.w, vb.y+(e.clientY-r.top)/r.height*vb.w, e.deltaY<0? 1/1.25 : 1.25); },{passive:false});
+    zoomAt(vb.x+(e.clientX-r.left)/r.width*vb.w, vb.y+(e.clientY-r.top)/r.height*vh(), e.deltaY<0? 1/1.25 : 1.25); },{passive:false});
   svg.addEventListener("dblclick",reset);
-  function ctr(f){ return function(){ zoomAt(vb.x+vb.w/2, vb.y+vb.w/2, f); }; }
+  function ctr(f){ return function(){ zoomAt(vb.x+vb.w/2, vb.y+vh()/2, f); }; }
   var bar=el("div",{class:"row small",style:"gap:6px;margin:6px 0"},[
     el("button",{onclick:ctr(1/1.5),title:L("приблизить")},["+"]), el("button",{onclick:ctr(1.5),title:L("отдалить")},["−"]),
     el("button",{onclick:reset,title:L("сбросить")},["⟲"]), zl,
@@ -3142,7 +3144,8 @@ function galaxyCard(box){
     // только открытые (с участками) системы; вид — вокруг них, не меньше 2000 ед. (кластер)
     var cx=0, cy=0; d.mine.forEach(function(m){ cx+=m.x; cy+=m.y; }); cx/=d.mine.length; cy/=d.mine.length;
     var R=1000; d.mine.forEach(function(m){ R=Math.max(R,Math.abs(m.x-cx)*1.3,Math.abs(m.y-cy)*1.3); });
-    var pz=panZoom(R,cx,cy), mk=pz.mk, label=pz.label;
+    var GA=window.innerWidth<700? 1.3 : 2.2;       // на телефоне — почти квадрат
+    var pz=panZoom(R,cx,cy,GA), mk=pz.mk, label=pz.label;
     d.mine.forEach(function(m){
       var nm=(m.name||("#"+m.star)), what=(m.claims? L("участков: ")+m.claims : "")+(m.claims&&m.ships? " · " : "")+(m.ships? L("кораблей: ")+m.ships : "");
       var g=mk(m.x,m.y,[svgEl("circle",{r:10,fill:"var(--s1)",opacity:"0.25"}), svgEl("circle",{r:5,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},
@@ -3153,7 +3156,7 @@ function galaxyCard(box){
     var legend=el("div",{class:"row small",style:"gap:14px;margin:4px 0 8px"},[
       el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои системы (клик — к схеме)")])]);
     var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Карта открывается по мере того, как вы ставите участки: здесь только системы, где они у вас есть.")]),
-      el("div",{style:"max-width:620px"},[pz.svg,pz.bar,legend])]);
+      pz.svg,pz.bar,legend]);
     box.insertBefore(c, box.firstChild);
   }).catch(function(){});
 }
