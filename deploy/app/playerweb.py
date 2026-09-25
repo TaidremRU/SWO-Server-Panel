@@ -858,8 +858,9 @@ class PlayerWeb:
         return self._cached("space_index", 600, build).get("ids") or {}
 
     def _api_galaxy(self, uid, q):
-        """Карта галактики: все системы — только точками (без имён: исследование — часть игры),
-        свои системы (участки/корабли) — с именем. Позиции — из заголовков star*.json."""
+        """Карта галактики «открывается» по мере клаймов: отдаются ТОЛЬКО системы, где у игрока есть
+        участки (остальные на сервере отсекаются — исследование часть игры). Позиции — из заголовков
+        star*.json; корабли — числом у открытых систем."""
         ss = self._space_stars()
         if not ss:
             return {"ok": True, "pending": True}
@@ -872,9 +873,9 @@ class PlayerWeb:
             if st is not None:
                 mine.setdefault(st, {"claims": 0, "ships": 0})["claims"] += 1
         for sh in self._my_ships(uid):
-            mine.setdefault(sh.get("star") or 1, {"claims": 0, "ships": 0})["ships"] += 1
+            if (sh.get("star") or 1) in mine:
+                mine[sh.get("star") or 1]["ships"] += 1
         return {"ok": True,
-                "stars": [[k, v.get("x"), v.get("y")] for k, v in sorted(stars.items()) if v.get("x") is not None],
                 "mine": [{"star": k, "name": (stars.get(k) or {}).get("name"), "x": (stars.get(k) or {}).get("x"),
                           "y": (stars.get(k) or {}).get("y"), "claims": v["claims"], "ships": v["ships"]}
                          for k, v in sorted(mine.items()) if (stars.get(k) or {}).get("x") is not None]}
@@ -1950,7 +1951,7 @@ var EN_DICT={
   "звёздные системы":"star systems",
   "мои системы (клик — к схеме)":"my systems (click — to the chart)",
   "Галактика":"Galaxy",
-  "Все звёздные системы сервера — точками; ваши (где есть участки или корабли) подписаны.":"All star systems of the server as dots; yours (with plots or ships) are labelled.",
+  "Карта открывается по мере того, как вы ставите участки: здесь только системы, где они у вас есть.":"The map opens up as you claim plots: only systems where you have plots are shown.",
   "На планетах":"On planets","В космосе":"In space","На планетах у вас нет ракет, машин и другого транспорта.":"You have no rockets, cars or other vehicles on planets.",
   "на земле: ":"landed: ",
   "Координаты":"Coordinates",
@@ -3137,11 +3138,11 @@ function spaceMap(sy){
 // Карта галактики: все системы точками (без имён), мои — подсвечены и подписаны, клик — к схеме системы.
 function galaxyCard(box){
   api("/api/galaxy").then(function(d){
-    if(!d.ok || d.pending || !d.stars || !d.stars.length) return;
-    var R=1; d.stars.forEach(function(s){ R=Math.max(R,Math.abs(s[1]),Math.abs(s[2])); }); R*=1.05;
-    var pz=panZoom(R), mk=pz.mk, label=pz.label, mine={};
-    d.mine.forEach(function(m){ mine[m.star]=m; });
-    d.stars.forEach(function(s){ if(!mine[s[0]]) mk(s[1],s[2],[svgEl("circle",{r:1.6,fill:"var(--mut)",opacity:"0.55"})]); });
+    if(!d.ok || d.pending || !d.mine || !d.mine.length) return;
+    // только открытые (с участками) системы; вид — вокруг них, не меньше 2000 ед. (кластер)
+    var cx=0, cy=0; d.mine.forEach(function(m){ cx+=m.x; cy+=m.y; }); cx/=d.mine.length; cy/=d.mine.length;
+    var R=1000; d.mine.forEach(function(m){ R=Math.max(R,Math.abs(m.x-cx)*1.3,Math.abs(m.y-cy)*1.3); });
+    var pz=panZoom(R,cx,cy), mk=pz.mk, label=pz.label;
     d.mine.forEach(function(m){
       var nm=(m.name||("#"+m.star)), what=(m.claims? L("участков: ")+m.claims : "")+(m.claims&&m.ships? " · " : "")+(m.ships? L("кораблей: ")+m.ships : "");
       var g=mk(m.x,m.y,[svgEl("circle",{r:10,fill:"var(--s1)",opacity:"0.25"}), svgEl("circle",{r:5,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},
@@ -3150,12 +3151,10 @@ function galaxyCard(box){
       g.addEventListener("click",function(){ if(pz.wasDrag()) return; var t=document.getElementById("sys-"+m.star); if(t) t.scrollIntoView({behavior:"smooth",block:"start"}); });
     });
     var legend=el("div",{class:"row small",style:"gap:14px;margin:4px 0 8px"},[
-      el("span",{},[legendDot("width:8px;height:8px;border-radius:50%;background:var(--mut)"),L("звёздные системы")]),
       el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои системы (клик — к схеме)")])]);
-    var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Все звёздные системы сервера — точками; ваши (где есть участки или корабли) подписаны.")]),
+    var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Карта открывается по мере того, как вы ставите участки: здесь только системы, где они у вас есть.")]),
       el("div",{style:"max-width:620px"},[pz.svg,pz.bar,legend])]);
     box.insertBefore(c, box.firstChild);
-    if(d.mine.length===1) pz.center(d.mine[0].x, d.mine[0].y, Math.max(2*R/8, 2000));
   }).catch(function(){});
 }
 
