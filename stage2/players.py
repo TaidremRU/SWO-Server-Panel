@@ -2894,9 +2894,10 @@ def space_fleet(cfg):
         o = owners.setdefault(uid, {"id": uid, "name": sh.get("name") or "—", "clan": clan_of.get(uid) or "",
                                     "ships": []})
         near, dist = nearest_space_object(cfg, sh.get("star_id") or 1, sh["x"], sh["y"])
+        sname = star_name(cfg, sh.get("star_id") or 1)
         o["ships"].append({"id": sh["id"], "model": sh["box_name"], "star": sh.get("star_id"),
                            "x": sh["x"], "y": sh["y"], "moving": sh["moving"], "speed": sh.get("speed"),
-                           "near": near, "near_dist": dist,
+                           "near": near, "near_dist": dist, "star_name": sname,
                            "health": sh.get("health"), "aboard": sh.get("aboard"),
                            "cargo": _merge_cargo(sh.get("cargo") or [], items)})
     stations = []
@@ -5088,6 +5089,34 @@ def _parse_star_records(b):
     return out
 
 
+_STAR_NAME_CACHE = {}   # путь -> (mtime, имя)
+
+
+def star_name(cfg, star_id):
+    """Имя звёздной системы из заголовка star<N>.json: int32 размер, 0x07, int32 −(len+1),
+    int32 len, имя. У системы, добавленной обновлением игры (3129 на .106), имя пустое -> None."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return None
+    path = os.path.join(wd, "Data", "world", "star%d.json" % int(star_id))
+    try:
+        mt = os.path.getmtime(path)
+        hit = _STAR_NAME_CACHE.get(path)
+        if hit and hit[0] == mt:
+            return hit[1]
+        with open(path, "rb") as f:
+            b = f.read(64)
+    except (OSError, ValueError, TypeError):
+        return None
+    name = None
+    if len(b) >= 13 and b[4] == 0x07:
+        neg, ln = struct.unpack_from("<i", b, 5)[0], struct.unpack_from("<i", b, 9)[0]
+        if 0 < ln <= 40 and neg == -(ln + 1):
+            name = b[13:13 + ln].decode("utf-8", "replace").strip() or None
+    _STAR_NAME_CACHE[path] = (mt, name)
+    return name
+
+
 def _parse_star_file(path):
     with open(path, "rb") as f:
         b = f.read()
@@ -5163,7 +5192,7 @@ def space_objects(cfg, star_id=1):
         _STAROBJ_CACHE[path] = (mt, objs)
         if len(_STAROBJ_CACHE) > 8:
             _STAROBJ_CACHE.pop(next(iter(_STAROBJ_CACHE)))
-    return {"ok": True, "star_id": star_id, "count": len(objs), "objects": objs,
+    return {"ok": True, "star_id": star_id, "name": star_name(cfg, star_id), "count": len(objs), "objects": objs,
             "note": "разбор бинарного формата без исходника — координаты x,y проверены "
                     "(валидны на 100% образцов, совпадают с позицией кораблей на той же "
                     "точке); имена НЕ уникальны между звёздными системами"}
@@ -5587,7 +5616,7 @@ def space_generation(cfg):
             objs = []
         kinds = collections.Counter(o["kind"] for o in objs)
         cl = star_cluster.get(s["id"])
-        r = {"id": s["id"], "why": why, "created": _dt(s["ct"]), "modified": _dt(s["mt"]), "size": s["size"],
+        r = {"id": s["id"], "name": star_name(cfg, s["id"]), "why": why, "created": _dt(s["ct"]), "modified": _dt(s["mt"]), "size": s["size"],
              "cluster": cl, "start_cluster": cl is not None and cl == sg.get("startClusterId"),
              "objects": len(objs), "planets": kinds.get("planet", 0), "satellites": kinds.get("satellite", 0),
              "asteroids": kinds.get("asteroid", 0),

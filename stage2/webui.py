@@ -3018,7 +3018,7 @@ var T = {
   sg_title:"Генерация космоса", sg_run:"Анализировать", sg_intro:"Что в космосе (звёздные системы, кластеры, стартовая карта новичков) создано или изменено после первоначальной генерации мира и когда. Три независимых признака: порядок номеров звёзд в кластерах (не зависит от дат), даты файлов (если мир копировали или восстанавливали — это даты копирования) и история по бэкапам мира; плюс дата обновления игры в Steam. Только чтение.",
   sg_world:"Мир", sg_gen:"Генерация мира", sg_stars:"Звёздных систем", sg_missing:"нет номеров:", sg_clusters:"Кластеров", sg_start:"Стартовая карта новичков", sg_was:"было", sg_steam:"Обновление игры в Steam", sg_backups:"Бэкапов мира",
   sg_concl:"Выводы", sg_late:"Системы, созданные или изменённые после генерации", sg_what:"Что", sg_when:"Когда", sg_cluster:"Кластер", sg_objs:"Объектов (план./спутн./астер.)", sg_planets:"Планеты",
-  sg_created:"создана", sg_modified:"изменена", sg_ooo:"вне порядка генерации", sg_startcl:"стартовый", sg_clch:"Кластеры, изменённые после генерации", sg_startfiles:"Файлы стартовой карты", sg_file:"Файл", sg_hist:"История по бэкапам (только изменения)", sg_backup:"Бэкап", sg_diff:"Что изменилось",
+  sg_created:"создана", sg_modified:"изменена", sg_noname:"(без имени)", sg_ooo:"вне порядка генерации", sg_startcl:"стартовый", sg_clch:"Кластеры, изменённые после генерации", sg_startfiles:"Файлы стартовой карты", sg_file:"Файл", sg_hist:"История по бэкапам (только изменения)", sg_backup:"Бэкап", sg_diff:"Что изменилось",
   role_gm:"GM", ac_src_all:"— где —", ac_src_admin:"Админка", ac_src_player:"Панель игроков", ac_src_guard:"Защита входа",
   ac_ev_all:"— все события —", ac_ev_logins:"Входы/выходы", ac_ev_bad:"Неудачи, отказы, зондирование", ac_ev_req:"Запросы (что смотрели/искали)",
   ac_ev_ui:"Действия в интерфейсе", ac_ev_audit:"Аудит (изменения)", ac_ev_guard:"Блокировки",
@@ -3278,7 +3278,7 @@ var T = {
   sg_title:"Space generation", sg_run:"Analyze", sg_intro:"What in space (star systems, clusters, newcomer start map) was created or changed after the initial world generation, and when. Three independent signals: star id order within clusters (date-independent), file dates (after a copy/restore these are copy dates) and world backup history; plus the Steam game update date. Read-only.",
   sg_world:"World", sg_gen:"World generation", sg_stars:"Star systems", sg_missing:"missing ids:", sg_clusters:"Clusters", sg_start:"Newcomer start map", sg_was:"was", sg_steam:"Steam game update", sg_backups:"World backups",
   sg_concl:"Findings", sg_late:"Systems created or changed after generation", sg_what:"What", sg_when:"When", sg_cluster:"Cluster", sg_objs:"Objects (plan./sat./aster.)", sg_planets:"Planets",
-  sg_created:"created", sg_modified:"modified", sg_ooo:"out of generation order", sg_startcl:"start", sg_clch:"Clusters changed after generation", sg_startfiles:"Start map files", sg_file:"File", sg_hist:"Backup history (changes only)", sg_backup:"Backup", sg_diff:"What changed",
+  sg_created:"created", sg_modified:"modified", sg_noname:"(no name)", sg_ooo:"out of generation order", sg_startcl:"start", sg_clch:"Clusters changed after generation", sg_startfiles:"Start map files", sg_file:"File", sg_hist:"Backup history (changes only)", sg_backup:"Backup", sg_diff:"What changed",
   role_gm:"GM", ac_src_all:"— where —", ac_src_admin:"Admin panel", ac_src_player:"Player panel", ac_src_guard:"Login guard",
   ac_ev_all:"— all events —", ac_ev_logins:"Logins/logouts", ac_ev_bad:"Failures, denials, probes", ac_ev_req:"Requests (viewed/searched)",
   ac_ev_ui:"UI actions", ac_ev_audit:"Audit (changes)", ac_ev_guard:"Blocks",
@@ -4737,7 +4737,7 @@ function fleetCard(){
       function(r){ var sh=r.sh;
         return [r.first? (r.o.id? plLink(r.o.id,r.o.name) : "—") : "", r.first? (r.o.clan||"—") : "",
           sh.model+(sh.moving? " · "+t("su_moving") : ""),
-          el("span",{},["★"+sh.star+" · "+Math.round(sh.x)+", "+Math.round(sh.y),
+          el("span",{},["★"+(sh.star_name? sh.star_name+" (#"+sh.star+")" : sh.star)+" · "+Math.round(sh.x)+", "+Math.round(sh.y),
             el("div",{class:"muted small"},[sh.near? t("fl_near")+" "+sh.near+" · "+fmtN(sh.near_dist) : t("fl_transit")])]),
           String(sh.health), sh.cargo.length? el("span",{class:"small"},[sh.cargo.map(function(c){ return c.name+" ×"+fmtN(c.count); }).join(", ")]) : "—"]; }));
     if(d.stations.length){
@@ -6216,7 +6216,7 @@ function spaceGenCard(){
       if(rows.length){
         out.appendChild(el("h3",{style:"margin-top:14px"},[t("sg_late")+" · "+rows.length]));
         out.appendChild(scT(ltable(["#",t("sg_what"),t("sg_when"),t("sg_cluster"),t("sg_objs"),t("sg_planets")], rows, function(r){
-          return ["#"+r.id, (r.why==="created"? t("sg_created") : t("sg_modified"))+(r.out_of_order? " ⚠ "+t("sg_ooo") : ""),
+          return ["#"+r.id+(r.name? " "+r.name : " "+t("sg_noname")), (r.why==="created"? t("sg_created") : t("sg_modified"))+(r.out_of_order? " ⚠ "+t("sg_ooo") : ""),
             (r.why==="created"? r.created : r.modified)+(r.after_update? " · "+r.after_update : ""),
             r.cluster==null? "—" : String(r.cluster)+(r.start_cluster? " ★ "+t("sg_startcl") : ""),
             r.objects+" ("+r.planets+" / "+r.satellites+" / "+r.asteroids+")", r.planet_names.join(", ")]; })));

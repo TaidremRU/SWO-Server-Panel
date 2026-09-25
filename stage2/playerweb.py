@@ -838,10 +838,12 @@ class PlayerWeb:
                 if par and math.hypot(par["x"] - o["x"], par["y"] - o["y"]) < 1000:
                     row["parent"] = {"name": par["name"], "x": par["x"], "y": par["y"],
                                      "dist": round(math.hypot(par["x"], par["y"]))}
-            systems.setdefault(loc[0], {"star": loc[0], "objects": [], "ships": [], "far_ships": 0})["objects"].append(row)
+            systems.setdefault(loc[0], {"star": loc[0], "star_name": players.star_name(self.cfg, loc[0]),
+                                        "objects": [], "ships": [], "far_ships": 0})["objects"].append(row)
         for sh in self._my_ships(uid):
             st = sh.get("star") or 1
-            sy = systems.setdefault(st, {"star": st, "objects": [], "ships": [], "far_ships": 0})
+            sy = systems.setdefault(st, {"star": st, "star_name": players.star_name(self.cfg, st),
+                                         "objects": [], "ships": [], "far_ships": 0})
             far = math.hypot(sh["x"], sh["y"]) > 60_000      # в пути далеко от звезды — стрелкой на краю схемы
             sy["far_ships"] += 1 if far else 0
             sy["ships"].append({"id": sh["id"], "model": sh["model"], "x": sh["x"], "y": sh["y"], "near": sh.get("near"),
@@ -1106,7 +1108,8 @@ class PlayerWeb:
     def _my_ships(self, uid):
         fl = self._cached("fleet", 60, lambda: players.space_fleet(self.cfg))
         me = next((o for o in fl.get("owners") or [] if o.get("id") == uid), None)
-        return [{"id": sh["id"], "model": sh["model"], "star": sh.get("star"), "x": round(sh["x"]), "y": round(sh["y"]),
+        return [{"id": sh["id"], "model": sh["model"], "star": sh.get("star"), "star_name": sh.get("star_name"),
+                 "x": round(sh["x"]), "y": round(sh["y"]),
                  "moving": sh.get("moving"), "speed": sh.get("speed"), "health": sh.get("health"),
                  "crew": sh.get("aboard"), "cargo": sh.get("cargo") or [],
                  "near": sh.get("near"), "near_dist": sh.get("near_dist")}
@@ -1825,6 +1828,7 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "Звёздная система ":"Star system ","система ":"system ",
   "в пути":"travelling",
   "Планеты, спутники и астероиды, на которых у вас есть участки, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.":"Planets, moons and asteroids where you have plots, and your ships. The star is in the centre. Ships far from the star are shown as an arrow at the edge.",
   "в движении":"moving","в пути, далеко от звезды":"travelling, far from the star","В этой системе у вас нет участков — только корабли.":"You have no plots in this system — only ships.",
@@ -2863,7 +2867,7 @@ function tabShips(m){
     if(!d.ships.length && !d.stations.length) return;       // во вкладке «Космос» — просто ничего не добавляем
     d.ships.forEach(function(s){ box.appendChild(card(s.model+" #"+s.id,[kv([
       [L("Где"), s.near? L("рядом: ")+s.near+" · "+num(s.near_dist)+L(" ед.") : L("в пути, вдали от объектов системы")],
-      [L("Координаты"), s.x+", "+s.y+(s.star!=null? " · "+L("система #")+s.star : "")],
+      [L("Координаты"), s.x+", "+s.y+(s.star!=null? " · "+L("система ")+(s.star_name? s.star_name : "#"+s.star) : "")],
       [L("Движется"), s.moving? L("да")+(s.speed? " · "+L("скорость ")+num(s.speed) : "") : L("нет")],
       [L("Прочность"), s.health!=null? num(s.health) : ""],
       [L("На борту"), s.crew!=null? String(s.crew) : ""]]),
@@ -2895,7 +2899,8 @@ function spaceCard(box){
       function X(x){ return C+x*k; } function Y(y){ return C-y*k; }
       var g=[svgEl("rect",{x:0,y:0,width:W,height:W,rx:10,fill:"var(--panel2)"})];
       g.push(svgEl("circle",{cx:C,cy:C,r:14,fill:"#f2c14e",opacity:"0.25"}));
-      g.push(svgEl("circle",{cx:C,cy:C,r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")])]));
+      g.push(svgEl("circle",{cx:C,cy:C,r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")+(sy.star_name? " "+sy.star_name : "")])]));
+      if(sy.star_name) g.push(svgEl("text",{x:C,y:C+26,"text-anchor":"middle","font-size":"12",fill:"var(--mut)"},[sy.star_name]));
       // объекты космоса статичны — орбит не рисуем; спутник показываем рядом со своей планетой
       var own={}; sy.objects.forEach(function(o){ if(o.kind==="planet") own[o.name]=1; });
       var parents={}; sy.objects.forEach(function(o){ if(o.parent && !own[o.parent.name]) parents[o.parent.name]=o.parent; });
@@ -2934,7 +2939,7 @@ function spaceCard(box){
       var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("От звезды")],sy.objects,function(o){
         return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""), String(o.claims), num(o.dist)+L(" ед.")]; });
       kids.push(el("div",{style:"margin-bottom:12px"},[
-        el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система #")+sy.star])]),
+        el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система ")+(sy.star_name? sy.star_name+" (#"+sy.star+")" : "#"+sy.star)])]),
         el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[el("div",{style:"flex:1;min-width:260px;max-width:520px"},[svg,legend]),
           el("div",{style:"flex:1;min-width:240px"},[sy.objects.length? tbl : el("div",{class:"muted small"},[L("В этой системе у вас нет участков — только корабли.")])])])]));
     });
