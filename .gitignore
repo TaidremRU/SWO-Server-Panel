@@ -27,6 +27,8 @@ item_icons.png
 item_icons.json
 webui_audit.log
 webui_auth_selftest.json
+auth_guard.json
+auth_guard_selftest.json
 
 # --- python ---
 __pycache__/

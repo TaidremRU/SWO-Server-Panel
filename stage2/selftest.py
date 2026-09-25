@@ -63,8 +63,30 @@ with open(_wa_path, "w", encoding="utf-8") as _f:
     json.dump({"username": "boss", "algo": "pbkdf2_sha256", "iterations": 1000, "salt": _salt.hex(),
                "hash": webui.AuthStore._hash("old-pass-1", _salt, 1000), "must_change": False}, _f)
 _wa = webui.AuthStore(_wa_path)
-assert _wa.role_of("boss") == "admin" and _wa.verify("boss", "old-pass-1"), "webui: миграция старого файла"
+assert _wa.role_of("boss") == "gm" and _wa.verify("boss", "old-pass-1"), "webui: миграция старого файла (+ gm)"
 os.remove(_wa_path)
+# защита от перебора: блок адреса, блок учётки не мешает «своему» адресу, состояние на диске
+import authguard
+import activity
+authguard.FAIL_DELAY = authguard.FLOOD_DELAY = 0
+_gp = os.path.join(os.path.dirname(__file__), "auth_guard_selftest.json")
+for _x in (_gp,):
+    try:
+        os.remove(_x)
+    except OSError:
+        pass
+_g = authguard.Guard(_gp)
+_g.ok("10.0.0.1", "nick:bob")
+for _i in range(authguard.ACCT_RULE[0]):
+    _g.fail("10.1.0.%d" % _i, "nick:bob", "bob")
+assert not _g.check("10.9.9.9", "nick:bob")[0], "authguard: перебор по учётке не блокируется"
+assert _g.check("10.0.0.1", "nick:bob")[0], "authguard: блок учётки запер знакомый адрес"
+for _i in range(authguard.IP_RULE[0]):
+    _g.fail("10.2.0.1", None, "x")
+assert not authguard.Guard(_gp).check("10.2.0.1")[0], "authguard: блокировка не пережила перезапуск"
+os.remove(_gp)
+assert activity.redact({"password": "x", "code": "1", "q": "iron"}) == {"password": "***", "code": "***", "q": "iron"}, \
+    "activity: пароль попадает в журнал"
 _wcfg = cfg.get("webui", {}) or {}
 print("webui OK: auth admin/admin+must_change, PBKDF2, роли+миграция, host=%s port=%s enabled=%s"
       % (_wcfg.get("host", "0.0.0.0"), _wcfg.get("port", 8080), _wcfg.get("enabled", True)))

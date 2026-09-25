@@ -37,6 +37,8 @@ import urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import activity
+import authguard
 import common
 import gamectl
 import i18n
@@ -208,8 +210,9 @@ def _coerce_setting(path, typ, raw):
 
 
 # --------------------------------------------------------------------------- auth
-ROLES = ("admin", "moderator", "viewer")
-ROLE_LEVEL = {"viewer": 1, "moderator": 2, "admin": 3}
+# gm — главный уровень: всё, что у админа, + журнал активности/аудит/блокировки входа
+ROLES = ("gm", "admin", "moderator", "viewer")
+ROLE_LEVEL = {"viewer": 1, "moderator": 2, "admin": 3, "gm": 4}
 _NAME_RX = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
 
 
@@ -217,7 +220,8 @@ class AuthStore:
     """Пользователи веб-панели в ``webui_auth.json`` (PBKDF2-HMAC-SHA256):
     ``{"users": {name: {hash, salt, iterations, role, must_change, updated}}}``.
 
-    Роли — как у Telegram-бота: **admin** (всё), **moderator** (просмотр +
+    Роли — как у Telegram-бота: **gm** (всё + журнал активности, аудит,
+    блокировки входа), **admin** (всё остальное), **moderator** (просмотр +
     перезапуск игры/вход, скриншот, бан/разбан, нарушения/твинки), **viewer**
     (только просмотр, без паролей/приватов/IP игроков). Старый формат с одним
     пользователем (username/salt/hash) при загрузке становится админом."""
@@ -245,14 +249,29 @@ class AuthStore:
             if not d.get("users"):
                 raise ValueError("нет пользователей")
             self.d = d
+            self._ensure_gm()
         except FileNotFoundError:
-            self.d = {"users": {"admin": self._make("admin", "admin", True)}}
+            self.d = {"users": {"admin": self._make("admin", "gm", True)}}
             self._save()
             logging.warning("webui: создан %s — вход admin/admin, СМЕНИТЕ ПАРОЛЬ при первом входе", self.path)
         except Exception:  # noqa: BLE001
             logging.exception("webui: %s повреждён — пересоздаю admin/admin", self.path)
-            self.d = {"users": {"admin": self._make("admin", "admin", True)}}
+            self.d = {"users": {"admin": self._make("admin", "gm", True)}}
             self._save()
+
+    def _ensure_gm(self):
+        """Появление роли gm: если GM ещё нет — им становится локальный «admin»
+        (учётка восстановления через /webui reset), иначе первый локальный админ.
+        Игроки с ролью «Мастер» в игре получают gm сами (см. WebUI._effective_role)."""
+        users = self.d["users"]
+        if any(u.get("role") == "gm" for u in users.values()):
+            return
+        local = [n for n, u in users.items() if u.get("role", "admin") == "admin" and u.get("game_uid") is None]
+        if local:
+            name = "admin" if "admin" in local else local[0]
+            users[name]["role"] = "gm"
+            self._save()
+            logging.warning("webui: %s получил роль gm (журнал активности)", name)
 
     def _make(self, pw, role, must_change):
         salt = secrets.token_bytes(16)
@@ -270,7 +289,7 @@ class AuthStore:
     @property
     def username(self):
         """Первый админ (для строки в логе при старте)."""
-        return next((n for n, u in self.d["users"].items() if u.get("role") == "admin"), "admin")
+        return next((n for n, u in self.d["users"].items() if u.get("role") in ("gm", "admin")), "admin")
 
     def role_of(self, user):
         u = self._u(user)
@@ -283,7 +302,7 @@ class AuthStore:
     @property
     def must_change(self):
         """Хотя бы у одного админа пароль по умолчанию (для лога при старте)."""
-        return any(u.get("must_change") for u in self.d["users"].values() if u.get("role") == "admin")
+        return any(u.get("must_change") for u in self.d["users"].values() if u.get("role") in ("gm", "admin"))
 
     def verify(self, user, pw):
         u = self._u(user)
@@ -300,7 +319,10 @@ class AuthStore:
                 for n, u in sorted(self.d["users"].items())]
 
     def _admins(self):
-        return [n for n in self.d["users"] if self.role_of(n) == "admin"]
+        return [n for n in self.d["users"] if self.role_of(n) in ("gm", "admin")]
+
+    def _gms(self):
+        return [n for n in self.d["users"] if self.role_of(n) == "gm"]
 
     def set_password(self, user, newpw, newuser=None):
         """Смена своего пароля (и, по желанию, логина) — снимает must_change."""
@@ -331,7 +353,9 @@ class AuthStore:
             u = self._u(name)
             if not u:
                 raise _Bad("нет такого пользователя")
-            if u.get("role") == "admin" and role != "admin" and len(self._admins()) <= 1:
+            if self.role_of(name) == "gm" and role != "gm" and len(self._gms()) <= 1:
+                raise _Bad("нельзя оставить панель без GM")
+            if self.role_of(name) in ("gm", "admin") and role not in ("gm", "admin") and len(self._admins()) <= 1:
                 raise _Bad("нельзя оставить панель без админа")
             u["role"] = role
             u["updated"] = _now_iso()
@@ -349,7 +373,9 @@ class AuthStore:
         with self._lock:
             if not self._u(name):
                 raise _Bad("нет такого пользователя")
-            if self.role_of(name) == "admin" and len(self._admins()) <= 1:
+            if self.role_of(name) == "gm" and len(self._gms()) <= 1:
+                raise _Bad("нельзя удалить последнего GM")
+            if self.role_of(name) in ("gm", "admin") and len(self._admins()) <= 1:
                 raise _Bad("нельзя удалить последнего админа")
             self.d["users"].pop(name)
             self._save()
@@ -378,7 +404,7 @@ class AuthStore:
         """Сброс входа admin/admin + must_change (забытый пароль, без доступа к RDP) —
         дергается командой /webui reset из Telegram. Остальные пользователи остаются."""
         with self._lock:
-            self.d["users"]["admin"] = self._make("admin", "admin", True)
+            self.d["users"]["admin"] = self._make("admin", "gm", True)
             self._save()
         logging.warning("webui: вход admin сброшен на admin/admin через /webui reset")
 
@@ -446,38 +472,6 @@ class Sessions:
             return bool(s and s["elevated_until"] > time.time())
 
 
-class Throttle:
-    """Лок-аут входа по IP: N неудач за window -> блок на block секунд."""
-
-    def __init__(self, max_fail=5, window=300, block=60):
-        self.max_fail, self.window, self.block = max_fail, window, block
-        self._d = {}
-        self._lock = threading.Lock()
-
-    def check(self, ip):
-        with self._lock:
-            e = self._d.get(ip)
-            if not e:
-                return True, 0
-            if e.get("until", 0) > time.time():
-                return False, int(e["until"] - time.time())
-            return True, 0
-
-    def fail(self, ip):
-        with self._lock:
-            e = self._d.setdefault(ip, {"fails": 0, "first": time.time(), "until": 0})
-            if time.time() - e["first"] > self.window:
-                e["fails"], e["first"] = 0, time.time()
-            e["fails"] += 1
-            if e["fails"] >= self.max_fail:
-                e["until"] = time.time() + self.block
-                e["fails"], e["first"] = 0, time.time()
-
-    def ok(self, ip):
-        with self._lock:
-            self._d.pop(ip, None)
-
-
 # ------------------------------------------------------------------- log helpers
 _LOG_RX = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+) (\w+) \[([^\]]*)\] (.*)$")
 
@@ -538,6 +532,16 @@ def _ip_allowed(ip, nets):
     return any(a.version == n.version and a in n for n in nets)
 
 
+def _eff_super(tg):
+    """Кто реально главный админ бота: super_admin_id или первый из админов (как в bot.apply_roles)."""
+    return tg.get("super_admin_id") or ((tg.get("allowed_user_ids") or [None])[0])
+
+
+def _cip(h):
+    """Адрес клиента: с учётом доверенного прокси (см. dispatch), иначе — сокет."""
+    return getattr(h, "real_ip", None) or h.client_address[0]
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "SigmaWebUI/" + VERSION
 
@@ -560,7 +564,12 @@ class WebUI:
         base = cfg.get("base_dir", common.BASE_DIR)
         self.auth = AuthStore(os.path.join(base, "webui_auth.json"))
         self.sessions = Sessions()
-        self.throttle = Throttle()
+        ac = cfg.get("activity") or {}
+        self.act = activity.ActivityLog(os.path.join(base, "logs", "activity.jsonl"),
+                                        max_mb=ac.get("max_mb", 20), keep=ac.get("keep", 10))
+        self.guard = authguard.Guard(os.path.join(base, "auth_guard.json"),
+                                     alert=getattr(bot, "push_super", None) if bot else None,
+                                     on_event=lambda r: self.act.write(dict(r, src="guard")))
         self._audit_path = os.path.join(base, "webui_audit.log")
         self._audit_lock = threading.Lock()
         self._tt_state = os.path.join(base, "tech_track_state.json")
@@ -712,11 +721,13 @@ class WebUI:
         except OSError:
             logging.exception("webui: не удалось записать аудит")
         logging.info("webui audit: %s [%s] %s", user, ip, msg)
+        self.act.write({"src": "admin", "ev": "audit", "user": user, "ip": ip, "d": msg})
 
     # ------------------------------------------------------------- http helpers
     def _send(self, h, status, ctype, body, extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
+        h._st = status
         try:
             h.send_response(status)
             h.send_header("Content-Type", ctype)
@@ -748,9 +759,11 @@ class WebUI:
             return {}
         try:
             v = json.loads(raw.decode("utf-8"))
-            return v if isinstance(v, dict) else {}
+            v = v if isinstance(v, dict) else {}
         except Exception:  # noqa: BLE001
-            return {}
+            v = {}
+        h._req_body = v
+        return v
 
     def _session_of(self, h):
         c = http.cookies.SimpleCookie(h.headers.get("Cookie", ""))
@@ -771,7 +784,7 @@ class WebUI:
 
     # ------------------------------------------------- вход игроков-стаффа (порт 80)
     # роль в игре (user<N>.json "role": 0 игрок, 1 модератор, 2 админ, 3 мастер) -> роль панели
-    GAME_ROLE_PANEL = {1: "moderator", 2: "admin", 3: "admin"}
+    GAME_ROLE_PANEL = {1: "moderator", 2: "admin", 3: "gm"}
 
     def game_panel_role(self, uid):
         """Какая роль панели положена игроку по его роли в игре (None — никакая)."""
@@ -798,6 +811,8 @@ class WebUI:
         g = hit[1]
         if not g:
             return None
+        if g == "gm" and role == "admin":   # привязан как админ, в игре стал Мастером
+            return "gm"
         return role if ROLE_LEVEL[role] <= ROLE_LEVEL[g] else g
 
     def session_ok(self, h):
@@ -822,9 +837,14 @@ class WebUI:
             user = self.auth.add_game_user(uid, nick, new_password, role)
             self.audit(ip, user, "ПРИВЯЗКА игрока #%s (%s) к панели, роль %s" % (uid, nick, role))
         elif not self.auth.verify(user, password or ""):
+            self.act.write({"src": "admin", "ev": "login_fail", "user": user, "uid": uid, "ip": ip, "via": "/admin",
+                            "d": "неверный админский пароль (кнопка «Админка» в панели игрока %s)" % nick})
             self.audit(ip, user, "НЕВЕРНЫЙ админский пароль (вход из панели игроков)")
             return 403, {"error": "bad_password"}, None
         tok, csrf = self.sessions.new(user, ip)
+        self.act.write({"src": "admin", "ev": "login_ok", "user": user, "uid": uid, "ip": ip, "via": "/admin",
+                        "role": self._effective_role(user), "sid": hashlib.sha256(tok.encode()).hexdigest()[:10],
+                        "ua": (h.headers.get("User-Agent") or "")[:200], "d": "из панели игрока %s" % nick})
         self.audit(ip, user, "вход в панель из панели игроков")
         return 200, {"ok": True, "url": "/admin/"}, "sid=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (tok, SESSION_TTL)
 
@@ -839,7 +859,9 @@ class WebUI:
                      "world-backup", "players-csv", "users",
                      # рецепты микстур/кулинарии — знание только для админа
                      "buff-notepad", "buff-ingredients", "buff-optimize", "food-ingredients", "food-lib", "food-optimize"}
-    _POST_VIEW = {"job"}
+    _POST_VIEW = {"job", "track"}
+    # журнал активности, аудит, блокировки входа — только GM
+    _GM_ROUTES = {"activity-log", "guard", "audit"}
 
     def _need_level(self, route, method, q):
         if route.startswith("players/"):
@@ -850,6 +872,8 @@ class WebUI:
             if sub == "moderate":
                 return 2        # точнее — в _api_player_moderate (бан/разбан модератору, остальное админу)
             return 1
+        if route in self._GM_ROUTES:
+            return 4
         if route in self._ADMIN_ROUTES:
             return 3
         if route == "action":
@@ -871,11 +895,65 @@ class WebUI:
             self._ppage = (PAGE.replace('"/api/', '"/admin/api/').replace('"/favicon.ico', '"/admin/favicon.ico'))
         return self._ppage
 
+    def _trusted(self):
+        raw = tuple((self.cfg.get("webui") or {}).get("trusted_proxies") or [])
+        if getattr(self, "_tp_key", None) != raw:
+            self._tp, self._tp_key = authguard.parse_nets(raw), raw
+        return self._tp
+
     def dispatch(self, h, method, prefix=""):
+        """Обработка запроса + строка в журнал активности (для GM)."""
+        t0 = time.time()
+        if not getattr(h, "real_ip", None):      # через панель игроков — адрес уже определила она
+            h.real_ip = authguard.client_ip(h, self._trusted())
+        h._via = prefix or None
+        try:
+            return self._dispatch(h, method, prefix)
+        finally:
+            try:
+                self._log_request(h, method, t0)
+            except Exception:  # noqa: BLE001
+                logging.exception("webui: журнал активности")
+
+    _NOLOG_PATHS = {"/favicon.ico"}
+
+    def _log_request(self, h, method, t0):
+        if getattr(h, "_nolog", False):
+            return
+        path, _, qs = h.path.partition("?")
+        if path in self._NOLOG_PATHS:
+            return
+        st = getattr(h, "_st", None)
+        if path.startswith("/api/"):
+            ev = "denied" if st in (401, 403, 429) and path != "/api/session" else "req"
+        elif path in ("/", "/index.html"):
+            ev = "page"
+        elif path == "/healthz":
+            ev = "req"
+        else:
+            ev = "probe"            # чужие адреса — сканеры, подбор путей
+        ip = _cip(h)
+        sid = getattr(h, "_sid", None)
+        rep = 0
+        if method == "GET" and ev in ("req", "page"):
+            rep = self.act.dedup(("a", sid or ip, h.path))
+            if rep is True:
+                return
+        q = {k: (v[0] if len(v) == 1 else v) for k, v in urllib.parse.parse_qs(qs).items()}
+        rec = {"src": "admin", "ev": ev, "user": getattr(h, "_who", None), "role": getattr(h, "_role", None),
+               "ip": ip, "sid": sid, "m": method, "path": path, "q": activity.redact(q) if q else None,
+               "st": st, "ms": int((time.time() - t0) * 1000), "rep": rep or None, "via": getattr(h, "_via", None)}
+        if method == "POST":
+            rec["body"] = activity.redact(getattr(h, "_req_body", None))
+        if ev in ("page", "probe") or (ev == "denied" and not sid):
+            rec["ua"] = (h.headers.get("User-Agent") or "")[:200]
+        self.act.write(rec)
+
+    def _dispatch(self, h, method, prefix=""):
         """``prefix="/admin"`` — запрос пришёл через панель игроков (порт 80): путь
         уже без префикса, webui.allowed_nets не применяется (адреса отсекает сама
         панель игроков по playerweb.allowed_nets), вход — как обычно, по паролю."""
-        ip = h.client_address[0]
+        ip = _cip(h)
         if not prefix and not _ip_allowed(ip, self._allowed_nets()):
             now = time.time()
             seen = getattr(self, "_denied_log", {})
@@ -913,6 +991,7 @@ class WebUI:
                 sess = None
             if not sess:
                 return self._json(h, {"error": "auth"}, 401)
+            h._who, h._sid = sess["user"], hashlib.sha256(tok.encode()).hexdigest()[:10]
 
             if method == "POST":
                 given = h.headers.get("X-CSRF-Token", "")
@@ -920,6 +999,7 @@ class WebUI:
                     return self._json(h, {"error": "csrf"}, 403)
 
             if route == "logout" and method == "POST":
+                self._login_event(h, "logout", sess["user"], sid=h._sid)
                 self.sessions.drop(tok)
                 return self._json(h, {"ok": True}, set_cookie="sid=; Path=/; Max-Age=0")
             if route == "password" and method == "POST":
@@ -935,7 +1015,7 @@ class WebUI:
             need = self._need_level(route, method, q)
             if ROLE_LEVEL.get(role, 0) < need:
                 return self._json(h, {"error": "forbidden", "role": role}, 403)
-            sess["role"] = role
+            sess["role"] = h._role = role
 
             if route.startswith("players/"):
                 parts = route.split("/")
@@ -1027,7 +1107,7 @@ class WebUI:
                 os.remove(path)
             except OSError:
                 pass
-            self.audit(h.client_address[0], sess["user"], "иконка панели: убрана")
+            self.audit(_cip(h), sess["user"], "иконка панели: убрана")
             return self._json(h, {"ok": True, "v": 0})
         try:
             data = base64.b64decode(str(raw).split(",", 1)[-1], validate=False)
@@ -1041,7 +1121,7 @@ class WebUI:
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, path)
-        self.audit(h.client_address[0], sess["user"], "иконка панели: загружена (%d байт)" % len(data))
+        self.audit(_cip(h), sess["user"], "иконка панели: загружена (%d байт)" % len(data))
         return self._json(h, {"ok": True, "v": self._favicon_ver()})
 
     def _api_session(self, h):
@@ -1054,25 +1134,38 @@ class WebUI:
                        role=self._effective_role(sess["user"]) or self.auth.role_of(sess["user"]))
         return self._json(h, out)
 
+    def _login_event(self, h, ev, user, **kw):
+        h._nolog = True     # запрос уже описан этим событием
+        rec = {"src": "admin", "ev": ev, "user": (user or "")[:64], "ip": _cip(h),
+               "ua": (h.headers.get("User-Agent") or "")[:200], "via": getattr(h, "_via", None)}
+        rec.update(kw)
+        self.act.write(rec)
+
     def _api_login(self, h):
-        ip = h.client_address[0]
-        ok, wait = self.throttle.check(ip)
-        if not ok:
-            return self._json(h, {"error": "throttled", "retry": wait}, 429)
+        ip = _cip(h)
         b = self._body(h)
-        user = (b.get("username") or "").strip()
+        user = (b.get("username") or "").strip()[:64]
         pw = b.get("password") or ""
+        acct = "adm:" + user.lower()
+        ok, wait, what = self.guard.check(ip, acct)
+        if not ok:
+            self._login_event(h, "login_blocked", user, d="заблокировано %s ещё %d с" % (what, wait))
+            return self._json(h, {"error": "throttled", "retry": wait}, 429)
         if user and pw and self.auth.verify(user, pw):
-            self.throttle.ok(ip)
+            self.guard.ok(ip, acct, user, "админка")
             tok, csrf = self.sessions.new(user, ip)
+            self._login_event(h, "login_ok", user, sid=hashlib.sha256(tok.encode()).hexdigest()[:10],
+                              role=self._effective_role(user) or self.auth.role_of(user))
             self.audit(ip, user, "вход в панель")
             return self._json(
                 h, {"ok": True, "username": user, "csrf": csrf, "must_change": self.auth.must_change_of(user),
                     "role": self.auth.role_of(user)},
                 set_cookie="sid=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d" % (tok, SESSION_TTL),
             )
-        self.throttle.fail(ip)
+        self._login_event(h, "login_fail", user, d="нет такого логина" if self.auth.role_of(user) is None
+                          else "неверный пароль")
         logging.warning("webui: неудачный вход user=%r ip=%s", user, ip)
+        self.guard.fail(ip, acct, user, "админка")
         return self._json(h, {"error": "bad_credentials"}, 401)
 
     def _api_users(self, h, method, q, sess):
@@ -1082,6 +1175,8 @@ class WebUI:
             return self._json(h, {"ok": True, "users": self.auth.users(), "roles": list(ROLES), "me": sess["user"]})
         b = self._body(h)
         op, name = (b.get("op") or "").strip(), (b.get("name") or "").strip()
+        if sess.get("role") != "gm" and (self.auth.role_of(name) == "gm" or (b.get("role") or "").strip() == "gm"):
+            return self._json(h, {"error": "forbidden", "detail": "роль GM выдаёт и меняет только GM"}, 403)
         ok, resp = self._reauth(h, sess, "пользователи панели: %s %s" % (op, name), body=b)
         if not ok:
             return resp
@@ -1108,7 +1203,7 @@ class WebUI:
                 return self._json(h, {"error": "bad_op"}, 400)
         except _Bad as e:
             return self._json(h, {"error": "bad", "detail": str(e)}, 400)
-        self.audit(h.client_address[0], sess["user"], "ПОЛЬЗОВАТЕЛИ панели: %s %s%s" % (
+        self.audit(_cip(h), sess["user"], "ПОЛЬЗОВАТЕЛИ панели: %s %s%s" % (
             op, name, (" → " + b.get("role")) if op in ("add", "role") else ""))
         return self._json(h, {"ok": True, "users": self.auth.users()})
 
@@ -1122,7 +1217,7 @@ class WebUI:
         if new.lower() in ("admin", "password", sess["user"].lower()):
             return self._json(h, {"error": "too_weak"}, 400)
         self.auth.set_password(sess["user"], new)
-        self.audit(h.client_address[0], sess["user"], "смена пароля")
+        self.audit(_cip(h), sess["user"], "смена пароля")
         return self._json(h, {"ok": True})
 
     # ------------------------------------------------------------------ state
@@ -1256,19 +1351,20 @@ class WebUI:
         b = body if body is not None else self._body(h)
         if self.sessions.is_elevated(sess.get("tok")):
             return True, b
-        ip = h.client_address[0]
+        ip = _cip(h)
         pw = b.get("password") or ""
         if not pw:
             # 403, не 401 — 401 в api() трактуется фронтом как "сессия истекла" и разлогинивает
             return False, self._json(h, {"error": "password_required"}, 403)
-        okt, wait = self.throttle.check(ip)
+        acct = "adm:" + sess["user"].lower()
+        okt, wait, _ = self.guard.check(ip, acct)
         if not okt:
             return False, self._json(h, {"error": "throttled", "retry": wait}, 429)
         if not self.auth.verify(sess["user"], pw):
-            self.throttle.fail(ip)
             self.audit(ip, sess["user"], "НЕВЕРНЫЙ пароль: %s" % what)
+            self.guard.fail(ip, acct, sess["user"], "админка (подтверждение пароля)")
             return False, self._json(h, {"error": "bad_password"}, 403)
-        self.throttle.ok(ip)
+        self.guard.ok(ip, acct, sess["user"], "админка")
         self.sessions.elevate(sess.get("tok"), REAUTH_ELEVATE_SECONDS)
         return True, b
 
@@ -1282,7 +1378,7 @@ class WebUI:
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: player_code %s", pid)
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"], "ПОКАЗАН пароль игрока #%s" % pid)
+        self.audit(_cip(h), sess["user"], "ПОКАЗАН пароль игрока #%s" % pid)
         return self._json(h, {"ok": True, "code": code})
 
     def _api_player_sensitive(self, h, pid, sess):
@@ -1295,7 +1391,7 @@ class WebUI:
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: player_sensitive %s", pid)
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"],
+        self.audit(_cip(h), sess["user"],
                    "ПОКАЗАНЫ приваты/IP игрока #%s (%d сообщ., %d IP)"
                    % (pid, len(d.get("private", [])), len(d.get("distinct_ips", []))))
         return self._json(h, d)
@@ -1320,7 +1416,7 @@ class WebUI:
             except Exception as e:  # noqa: BLE001
                 logging.exception("webui: server_private_chat")
                 return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-            self.audit(h.client_address[0], sess["user"],
+            self.audit(_cip(h), sess["user"],
                        "ПРОСМОТР приватного чата сервера (%d сообщ.)" % len(d.get("messages", [])))
             return self._json(h, d)
         try:
@@ -1390,7 +1486,7 @@ class WebUI:
                 data = f.read()
         except OSError as e:
             return self._json(h, {"error": "read", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"],
+        self.audit(_cip(h), sess["user"],
                    "БЭКАП МИРА (%s, %d МБ) -> %s" % (scope, len(data) // 1048576, os.path.basename(path)))
         return self._send(h, 200, "application/zip", data,
                           {"Content-Disposition": 'attachment; filename="%s"' % os.path.basename(path),
@@ -1508,7 +1604,7 @@ class WebUI:
                 logging.exception("webui: buff_notepad_save")
                 d = {"ok": False, "error": str(e)}
             if d.get("ok"):
-                self.audit(h.client_address[0], sess["user"],
+                self.audit(_cip(h), sess["user"],
                            "buff_notepad: загружен (%s записей)" % d.get("count"))
             return self._json(h, d, 200 if d.get("ok") else 400)
         try:
@@ -1658,7 +1754,7 @@ class WebUI:
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: suspicious_read")
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"], "НАРУШЕНИЯ: просмотр журнала (%d)" % d.get("total", 0))
+        self.audit(_cip(h), sess["user"], "НАРУШЕНИЯ: просмотр журнала (%d)" % d.get("total", 0))
         return self._json(h, d)
 
     def _cached(self, name, fn, ttl=60):
@@ -1707,7 +1803,7 @@ class WebUI:
         ok, resp = self._reauth(h, sess, "инструменты админа: %s" % op, body=b)
         if not ok:
             return resp
-        ip, user = h.client_address[0], sess["user"]
+        ip, user = _cip(h), sess["user"]
         try:
             if op == "mass_give":
                 d = players.mass_give(self.cfg, b.get("targets"), b.get("item"), b.get("count"))
@@ -1891,7 +1987,7 @@ class WebUI:
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: twink_report")
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"],
+        self.audit(_cip(h), sess["user"],
                    "ТВИНК-ДЕТЕКТ: пароль %d групп / IP %d / >=%d акк."
                    % (d.get("code_flagged", 0), d.get("flagged_ips", 0), mn))
         return self._json(h, d)
@@ -1920,13 +2016,13 @@ class WebUI:
             logging.exception("webui: player_inventory %s %s", op, pid)
             return self._json(h, {"error": "internal", "detail": str(e)}, 500)
         if d.get("ok"):
-            self.audit(h.client_address[0], sess["user"],
+            self.audit(_cip(h), sess["user"],
                        "ИНВЕНТАРЬ игрока #%s: %s %s×%s %s (бэкап %s)"
                        % (pid, op, d.get("name") or item,
                           d.get("count") if op == "give" else d.get("removed"),
                           d.get("where"), d.get("backup")))
         else:
-            self.audit(h.client_address[0], sess["user"],
+            self.audit(_cip(h), sess["user"],
                        "ИНВЕНТАРЬ игрока #%s: %s отклонено — %s" % (pid, op, d.get("error")))
         return self._json(h, d, 200 if d.get("ok") else 400)
 
@@ -1937,8 +2033,17 @@ class WebUI:
         ACTS = {"ban", "unban", "role", "position", "tech", "stat", "reset_code"}
         if act not in ACTS:
             return self._json(h, {"error": "bad_action"}, 400)
-        if sess.get("role") != "admin" and act not in self._MOD_MODERATE:
+        if ROLE_LEVEL.get(sess.get("role"), 0) < 3 and act not in self._MOD_MODERATE:
             return self._json(h, {"error": "forbidden", "role": sess.get("role")}, 403)
+        # Мастер в игре = GM панели: выдать/снять Мастера или сбросить ему пароль — только GM
+        if sess.get("role") != "gm" and act in ("role", "reset_code"):
+            try:
+                to_master = act == "role" and int(body.get("role") or 0) == 3
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                return self._json(h, {"error": "bad"}, 400)
+            if to_master or self.game_panel_role(pid_i) == "gm":
+                return self._json(h, {"error": "forbidden", "detail": "роль Мастера — только GM"}, 403)
         ok, b = self._reauth(h, sess, "модерация игрока #%s (%s)" % (pid, act), body=body)
         if not ok:
             return b
@@ -1969,10 +2074,10 @@ class WebUI:
                 "stat": "%s=%s" % (b.get("field"), b.get("value")),
                 "reset_code": "сброс пароля"}.get(act, act)
         if d.get("ok"):
-            self.audit(h.client_address[0], sess["user"],
+            self.audit(_cip(h), sess["user"],
                        "МОДЕРАЦИЯ игрока #%s: %s (бэкап %s)" % (pid, summ, d.get("backup")))
         else:
-            self.audit(h.client_address[0], sess["user"],
+            self.audit(_cip(h), sess["user"],
                        "МОДЕРАЦИЯ игрока #%s: %s отклонено — %s" % (pid, summ, d.get("error")))
         return self._json(h, d, 200 if d.get("ok") else 400)
 
@@ -2030,6 +2135,68 @@ class WebUI:
                 rows.append({"ts": parts[0], "ip": parts[1], "user": parts[2], "msg": parts[3]})
         return self._json(h, {"lines": rows[-400:]})
 
+    # ------------------------------------------------------- журнал активности (GM)
+    _ACT_GROUPS = {
+        "logins": ("login_ok", "login_fail", "login_blocked", "logout", "admin_enter"),
+        "bad": ("login_fail", "login_blocked", "denied", "probe", "block", "flood"),
+        "req": ("req", "page"), "ui": ("ui",), "audit": ("audit",), "guard": ("block", "flood"),
+    }
+
+    def _api_activity_log(self, h, method, q, sess):
+        """GET ?src=admin|player&ev=<группа или события через запятую>&user=&ip=&text=
+        &hours=&before=&limit= — новые сверху, before — догрузка более старых."""
+        g = lambda k, d="": (q.get(k) or [d])[0]
+        ev = g("ev")
+        evs = self._ACT_GROUPS.get(ev) or [x for x in ev.split(",") if x]
+        try:
+            hours = float(g("hours", "0") or 0)
+            before = float(g("before", "0") or 0)
+            limit = max(20, min(2000, int(g("limit", "300"))))
+        except ValueError:
+            return self._json(h, {"error": "bad"}, 400)
+        d = self.act.query(src=g("src") or None, evs=evs, user=g("user"), ip=g("ip"), text=g("text"),
+                           since=time.time() - hours * 3600 if hours > 0 else None,
+                           before=before or None, limit=limit)
+        d.update(ok=True, size=self.act.size(), files=len(self.act.files()))
+        return self._json(h, d)
+
+    def _api_track(self, h, method, q, sess):
+        """Действия в интерфейсе, которые присылает браузер: вкладки, клики, ввод в
+        поля поиска/фильтров. Со стороны клиента — можно подделать, но не скрыть
+        запросы к API: они пишутся сервером отдельно."""
+        h._nolog = True
+        b = self._body(h)
+        cnt = getattr(self, "_trk_cnt", {})
+        now = time.time()
+        sid = getattr(h, "_sid", "")
+        c = cnt.get(sid)
+        if not c or now - c[0] > 3600:
+            c = cnt[sid] = [now, 0]
+        self._trk_cnt = cnt
+        for e in (b.get("ev") or [])[:60]:
+            if not isinstance(e, dict) or c[1] >= 5000:
+                break
+            c[1] += 1
+            self.act.write({"src": "admin", "ev": "ui", "user": sess["user"], "role": sess.get("role"),
+                            "ip": _cip(h), "sid": sid, "via": getattr(h, "_via", None),
+                            "a": str(e.get("a") or "")[:16], "tab": str(e.get("tab") or "")[:32],
+                            "d": str(e.get("d") or "")[:300]})
+        return self._json(h, {"ok": True})
+
+    def _api_guard(self, h, method, q, sess):
+        """Блокировки входа (обе панели). POST {op:"unblock", key}."""
+        if method == "POST":
+            b = self._body(h)
+            key = str(b.get("key") or "")
+            if b.get("op") != "unblock" or not key:
+                return self._json(h, {"error": "bad_op"}, 400)
+            done = self.guard.unblock(key)
+            self.audit(_cip(h), sess["user"], "РАЗБЛОКИРОВКА входа: %s" % key)
+            return self._json(h, {"ok": done})
+        d = self.guard.status()
+        d["ok"] = True
+        return self._json(h, d)
+
     def _nav_dir(self):
         return os.path.realpath(os.path.join(self.cfg.get("base_dir", common.BASE_DIR), "logs", "nav"))
 
@@ -2084,7 +2251,7 @@ class WebUI:
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: login_flow save_config")
             return self._json(h, {"error": "save_failed", "detail": str(e)}, 500)
-        self.audit(h.client_address[0], sess["user"], "login_flow: сохранён из тюнера")
+        self.audit(_cip(h), sess["user"], "login_flow: сохранён из тюнера")
         return self._json(h, {"ok": True})
 
     # ------------------------------------------------------------------- roles
@@ -2138,6 +2305,8 @@ class WebUI:
         alerts = bool(b.get("alerts_enabled", True))
 
         tg = self.cfg.setdefault("telegram", {})
+        if sess.get("role") != "gm" and _eff_super(tg) != _eff_super({"allowed_user_ids": admins, "super_admin_id": sa}):
+            return self._json(h, {"error": "forbidden", "detail": "главного админа Telegram меняет только GM"}, 403)
         tg.update(allowed_user_ids=admins, moderator_user_ids=mods,
                   super_admin_id=sa, default_lang=lang, alerts_enabled=alerts)
         try:
@@ -2146,7 +2315,7 @@ class WebUI:
             logging.exception("webui: save_config")
             return self._json(h, {"error": "save_failed", "detail": str(e)}, 500)
         self.bot.apply_roles(tg)
-        self.audit(h.client_address[0], sess["user"],
+        self.audit(_cip(h), sess["user"],
                    "роли: админы=%s модераторы=%s super=%s lang=%s alerts=%s"
                    % (admins, mods, sa, lang, alerts))
         return self._json(h, {"ok": True, "allowed_user_ids": admins, "moderator_user_ids": mods,
@@ -2236,6 +2405,8 @@ class WebUI:
             admins = tg.get("allowed_user_ids") or []
             if not admins:
                 raise _Bad("нужен хотя бы один администратор Telegram")
+            if sess.get("role") != "gm" and _eff_super(tg) != _eff_super(self.cfg.get("telegram") or {}):
+                raise _Bad("главного админа Telegram меняет только GM")
             sa = tg.get("super_admin_id")
             if sa is not None and sa not in admins:
                 raise _Bad("главный админ должен быть среди администраторов")
@@ -2249,9 +2420,9 @@ class WebUI:
                 nets = _parse_nets(_cfg_get_path(cfg, "webui.allowed_nets") or [])
             except ValueError as e:
                 raise _Bad("разрешённые адреса: %s" % e)
-            if not _ip_allowed(h.client_address[0], nets):
+            if not _ip_allowed(_cip(h), nets):
                 raise _Bad("разрешённые адреса: ваш текущий адрес %s в список не входит — "
-                           "сохранение заблокировало бы вам доступ" % h.client_address[0])
+                           "сохранение заблокировало бы вам доступ" % _cip(h))
         except _Bad as e:
             return self._json(h, {"error": "invalid", "detail": str(e)}, 400)
         except ValueError as e:
@@ -2281,7 +2452,7 @@ class WebUI:
                 self.wd.apply()
         except Exception:  # noqa: BLE001
             logging.exception("webui: watchdog apply after settings")
-        self.audit(h.client_address[0], sess["user"],
+        self.audit(_cip(h), sess["user"],
                    "настройки: изменено %d полей%s%s" % (
                        len(vals), " +login_flow" if b.get("login_flow") else "",
                        " +аккаунты(%d)" % len(cfg.get("game_accounts") or []) if "game_accounts" in b else ""))
@@ -2298,7 +2469,7 @@ class WebUI:
         op = (b.get("op") or "").strip()
         if op not in self._OPS:
             return self._json(h, {"error": "bad_op"}, 400)
-        if sess.get("role") != "admin" and op not in self._MOD_OPS:
+        if ROLE_LEVEL.get(sess.get("role"), 0) < 3 and op not in self._MOD_OPS:
             return self._json(h, {"error": "forbidden", "role": sess.get("role")}, 403)
         if op in self._CONFIRM and not b.get("confirm"):
             return self._json(h, {"error": "need_confirm"}, 400)
@@ -2316,7 +2487,7 @@ class WebUI:
             self._jobs[jid] = job
             while len(self._jobs) > 30:
                 self._jobs.pop(next(iter(self._jobs)))
-        ip, user = h.client_address[0], sess["user"]
+        ip, user = _cip(h), sess["user"]
         threading.Thread(target=self._run_job, args=(job, b, lang, ip, user),
                          name="webjob", daemon=True).start()
         return self._json(h, {"job": jid})
@@ -2702,7 +2873,17 @@ var T = {
   entry_seq:"Прогнать вход", entry_seq_confirm:"Прогнать полную последовательность входа (login) прямо сейчас?",
   entry_pick_hint:"кликните по снимку — координаты появятся здесь", entry_pick:"выбрано",
   entry_add_step:"+ шаг из выбранной точки", entry_use_pick:"взять выбранную точку", entry_saved:"Сохранено",
-  log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)",
+  log_sup:"Супервизор", log_audit:"Аудит панели", log_nav:"Вход в игру (скрины)", log_act:"Журнал активности", log_blocks:"Блокировки входа",
+  role_gm:"GM", ac_src_all:"— где —", ac_src_admin:"Админка", ac_src_player:"Панель игроков", ac_src_guard:"Защита входа",
+  ac_ev_all:"— все события —", ac_ev_logins:"Входы/выходы", ac_ev_bad:"Неудачи, отказы, зондирование", ac_ev_req:"Запросы (что смотрели/искали)",
+  ac_ev_ui:"Действия в интерфейсе", ac_ev_audit:"Аудит (изменения)", ac_ev_guard:"Блокировки",
+  ac_user:"кто (ник/логин/#id)", ac_ip:"IP", ac_text:"текст (поиск по всему)", ac_hours:"за", ac_h1:"1 час", ac_h24:"сутки", ac_h168:"неделю", ac_hall:"всё время",
+  ac_find:"Найти", ac_more:"Ещё", ac_col_ts:"Время", ac_col_src:"Где", ac_col_who:"Кто", ac_col_ev:"Событие", ac_col_d:"Подробности",
+  ac_none:"Ничего не найдено", ac_size:"Журнал", ac_intro:"Всё, что делают в админке и в панели игроков: входы и неудачные попытки, каждый запрос (что открывали и искали), действия в интерфейсе, изменения. Одинаковые автообновления — не чаще раза в 2 минуты (×N — сколько раз повторилось). Клик по нику или IP — отфильтровать.",
+  ev_login_ok:"вход", ev_login_fail:"НЕУДАЧНЫЙ вход", ev_login_blocked:"вход ЗАБЛОКИРОВАН", ev_logout:"выход", ev_admin_enter:"кнопка «Админка»",
+  ev_req:"запрос", ev_page:"открыл страницу", ev_denied:"ОТКАЗ", ev_probe:"зондирование", ev_ui:"действие", ev_audit:"изменение", ev_block:"БЛОКИРОВКА", ev_flood:"МАССОВЫЙ ПЕРЕБОР",
+  gb_intro:"Защита от перебора паролей (админка и панель игроков). Адрес: {ip} неудач за {ipw} мин → блок. Учётка: {ac} неудач за {acw} мин с любых адресов → вход с новых адресов закрыт (с адресов, откуда уже входили, — можно). Блокировка растёт: {steps}. О блокировках учёток и массовом переборе — тревога главному админу в Telegram.",
+  gb_fails10:"Неудачных входов за 10 мин", gb_flood:"идёт массовый перебор!", gb_key:"Ключ", gb_left:"Осталось", gb_lvl:"Уровень", gb_fails:"Неудач в окне", gb_who:"Последний логин", gb_unblock:"Снять", gb_none:"Блокировок нет",
   level:"Уровень", lines:"строк", download:"Скачать", navshots_none:"Скринов последовательности входа нет",
   chpass_title:"Смена пароля", chpass_note:"Вход по умолчанию admin/admin. Смените пароль сейчас — минимум 6 символов, не «admin».",
   chpass_old:"Текущий пароль", chpass_new:"Новый пароль", chpass_rep:"Повторите новый пароль",
@@ -2933,7 +3114,17 @@ var T = {
   entry_seq:"Run login", entry_seq_confirm:"Run the full login sequence right now?",
   entry_pick_hint:"click the screenshot — coordinates appear here", entry_pick:"picked",
   entry_add_step:"+ step from picked point", entry_use_pick:"use picked point", entry_saved:"Saved",
-  log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)",
+  log_sup:"Supervisor", log_audit:"Panel audit", log_nav:"In-game login (shots)", log_act:"Activity log", log_blocks:"Login blocks",
+  role_gm:"GM", ac_src_all:"— where —", ac_src_admin:"Admin panel", ac_src_player:"Player panel", ac_src_guard:"Login guard",
+  ac_ev_all:"— all events —", ac_ev_logins:"Logins/logouts", ac_ev_bad:"Failures, denials, probes", ac_ev_req:"Requests (viewed/searched)",
+  ac_ev_ui:"UI actions", ac_ev_audit:"Audit (changes)", ac_ev_guard:"Blocks",
+  ac_user:"who (nick/login/#id)", ac_ip:"IP", ac_text:"text (search everything)", ac_hours:"for", ac_h1:"1 hour", ac_h24:"day", ac_h168:"week", ac_hall:"all time",
+  ac_find:"Search", ac_more:"More", ac_col_ts:"Time", ac_col_src:"Where", ac_col_who:"Who", ac_col_ev:"Event", ac_col_d:"Details",
+  ac_none:"Nothing found", ac_size:"Log", ac_intro:"Everything done in the admin and player panels: logins and failed attempts, every request (what was opened and searched), UI actions, changes. Identical auto-refreshes are logged at most once per 2 minutes (×N = repeat count). Click a nick or IP to filter.",
+  ev_login_ok:"login", ev_login_fail:"FAILED login", ev_login_blocked:"login BLOCKED", ev_logout:"logout", ev_admin_enter:"«Admin» button",
+  ev_req:"request", ev_page:"opened page", ev_denied:"DENIED", ev_probe:"probe", ev_ui:"action", ev_audit:"change", ev_block:"BLOCK", ev_flood:"MASS BRUTE-FORCE",
+  gb_intro:"Password brute-force protection (admin and player panels). Address: {ip} failures in {ipw} min → block. Account: {ac} failures in {acw} min from any address → login from new addresses closed (known addresses still work). Blocks escalate: {steps}. Account blocks and mass brute-force alert the super admin in Telegram.",
+  gb_fails10:"Failed logins in 10 min", gb_flood:"mass brute-force in progress!", gb_key:"Key", gb_left:"Left", gb_lvl:"Level", gb_fails:"Failures in window", gb_who:"Last login", gb_unblock:"Lift", gb_none:"No blocks",
   level:"Level", lines:"lines", download:"Download", navshots_none:"No login-sequence screenshots",
   chpass_title:"Change password", chpass_note:"Default login is admin/admin. Change it now — at least 6 characters, not \"admin\".",
   chpass_old:"Current password", chpass_new:"New password", chpass_rep:"Repeat new password",
@@ -3066,6 +3257,32 @@ function api(path, opts){
   }).catch(function(e){ if(e&&e.err==="auth") throw e; if(e instanceof TypeError){ setConn(false); throw {err:"net"}; } throw e; });
 }
 function setConn(ok){ S.conn=ok; var d=$("#conn"); if(d) d.className="dot "+(ok?"ok":"err"); }
+
+// ---- журнал действий для GM: вкладки, клики, ввод в поиск/фильтры (пароли не шлём) ----
+var TRK=[],TRKT=null,TRKTAB=null,TRKIN={},TRK_SECRET=/pass|парол|token|токен|secret|секрет|key|ключ|code|код/i;
+function trkOn(){ return S.authed && !S.must_change; }
+function trkName(x){ var lb=x.closest&&x.closest("label");
+  return x.id||x.name||x.getAttribute("placeholder")||x.getAttribute("aria-label")||x.title||(lb? (lb.innerText||"").replace(/\s+/g," ").trim().slice(0,40):"")||x.tagName.toLowerCase(); }
+function trkLabel(x){ var s=x.id||x.getAttribute("aria-label")||x.title||"", tx=(x.innerText||x.value||"").replace(/\s+/g," ").trim().slice(0,80);
+  return s&&tx&&s!==tx? s+" «"+tx+"»" : (tx||s||x.tagName.toLowerCase()); }
+function trk(a,d){ if(!trkOn()) return; TRK.push({a:a,tab:S.tab,d:String(d==null?"":d).slice(0,300)});
+  if(TRK.length>=50) trkFlush(); else if(!TRKT) TRKT=setTimeout(trkFlush,5000); }
+function trkFlush(){ clearTimeout(TRKT); TRKT=null; if(!TRK.length) return; if(!trkOn()){ TRK=[]; return; }
+  var b=TRK.splice(0,60);
+  try{ fetch("/api/track",{method:"POST",keepalive:true,headers:{"Content-Type":"application/json","X-CSRF-Token":S.csrf},body:JSON.stringify({ev:b})}).catch(function(){}); }catch(e){} }
+function trkSecret(x){ return x.type==="password"||TRK_SECRET.test(trkName(x)); }
+document.addEventListener("click",function(e){ var x=e.target&&e.target.closest&&e.target.closest("button,a,summary,th,[onclick]");
+  if(x) trk("click",trkLabel(x)); },true);
+document.addEventListener("change",function(e){ var x=e.target; if(!x||trkSecret(x)) return;
+  if(x.tagName==="SELECT") trk("change",trkName(x)+" = "+(x.selectedIndex>=0&&x.options[x.selectedIndex]? x.options[x.selectedIndex].text : x.value));
+  else if(x.type==="checkbox"||x.type==="radio") trk("change",trkName(x)+" = "+(x.checked?"вкл":"выкл"));
+  else if(x.type==="file") trk("change",trkName(x)+" = файл "+((x.files&&x.files[0]&&x.files[0].name)||"")); },true);
+document.addEventListener("input",function(e){ var x=e.target;
+  if(!x||trkSecret(x)||x.tagName==="SELECT"||x.type==="checkbox"||x.type==="radio"||x.type==="file") return;
+  var k=trkName(x); clearTimeout(TRKIN[k]); TRKIN[k]=setTimeout(function(){ trk("input",k+" = "+x.value); },1200); },true);
+document.addEventListener("visibilitychange",function(){ if(document.hidden) trkFlush(); });
+window.addEventListener("pagehide",trkFlush);
+function trkTab(){ if(trkOn() && S.tab!==TRKTAB){ TRKTAB=S.tab; trk("tab",S.tab); } }
 function errText(e){ if(!e) return t("err_net"); if(e.err==="net") return t("err_net");
   var k="err_"+(e.error||e.err||""); return T[S.lang][k]||e.detail||e.error||t("err_net"); }
 
@@ -3143,6 +3360,7 @@ function render(){
   if(S.must_change){ app.appendChild(viewChpass()); return; }
   app.appendChild(shell());
   routeTab();
+  trkTab();
 }
 // место на диске мира — в шапке рядом с языком; меньше 10% свободно — красным
 var DISK_TIMER=null;
@@ -3174,7 +3392,8 @@ function header(){
 var ROLE_TABS={
   viewer:["dash","srv","chat","stats","map","players","activity","leaders","clans","fleet","trade","economy","craft"],
   moderator:["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","craft"]};
-function isAdmin(){ return (S.role||"admin")==="admin"; }
+function isAdmin(){ var r=S.role||"admin"; return r==="admin"||r==="gm"; }
+function isGM(){ return S.role==="gm"; }
 function shell(){
   var tabs=["dash","act","srv","chat","stats","map","players","activity","leaders","twinks","suspicious","clans","fleet","trade","economy","entry","buffs","food","craft","admin","roles","logs"];
   if(!isAdmin()){ var allow=ROLE_TABS[S.role]||ROLE_TABS.viewer; tabs=tabs.filter(function(x){ return allow.indexOf(x)>=0; });
@@ -5909,7 +6128,7 @@ function accRow(a){
 // ---- пользователи панели (только админ; изменения — под паролем, в аудит) ----
 function usersCard(){
   var body=el("div",{},[el("p",{class:"muted small"},["…"])]), msg=el("div",{});
-  function roleSel(v){ var s=el("select",{},["admin","moderator","viewer"].map(function(r){ var o=el("option",{value:r},[t("role_"+r)]); if(r===v) o.selected=true; return o; })); return s; }
+  function roleSel(v){ var s=el("select",{},(isGM()||v==="gm"?["gm"]:[]).concat(["admin","moderator","viewer"]).map(function(r){ var o=el("option",{value:r},[t("role_"+r)]); if(r===v) o.selected=true; return o; })); return s; }
   function call(extra){ msg.innerHTML="";
     gatedApi("/api/users",extra,function(d){ draw(d); },function(e){ msg.appendChild(el("div",{class:"msg err"},[e.detail||errText(e)])); }); }
   function draw(d){
@@ -5998,14 +6217,18 @@ var logTimer=null;
 function tabLogs(v){
   var sub=localStorage.getItem("sw_logsub")||"sup";
   var bar=el("nav",{style:"padding:0;border:0;background:transparent;margin-bottom:10px"},
-    [["sup","log_sup"],["audit","log_audit"],["nav","log_nav"]].map(function(x){
+    (isGM()? [["act","log_act"],["blocks","log_blocks"],["sup","log_sup"],["audit","log_audit"],["nav","log_nav"]]
+           : [["sup","log_sup"],["nav","log_nav"]]).map(function(x){
       return el("button",{class:sub===x[0]?"active":"",onclick:function(){ localStorage.setItem("sw_logsub",x[0]); render(); }},[t(x[1])]);
     }));
   var body=el("div",{id:"logbody"},[]);
   v.appendChild(el("div",{},[bar,body]));
   clearInterval(logTimer);
+  if(!isGM() && (sub==="act"||sub==="blocks"||sub==="audit")) sub="sup";
   if(sub==="sup") logSup(body);
   else if(sub==="audit") logAudit(body);
+  else if(sub==="act") logAct(body);
+  else if(sub==="blocks") logBlocks(body);
   else logNav(body);
 }
 function logSup(body){
@@ -6051,6 +6274,80 @@ function pullAudit(){
       tb.appendChild(el("tr",{},[el("td",{class:"mono"},[r.ts]),el("td",{class:"mono"},[r.ip]),el("td",{},[r.user]),el("td",{},[r.msg])]));
     });
   }).catch(function(){});
+}
+// ---- журнал активности (только GM) ----
+var AC_ROWS=[];
+function acFmtT(sec){ sec=Math.round(sec); return sec>=86400? Math.round(sec/3600)+" ч" : sec>=3600? (sec%3600? (sec/3600).toFixed(1) : sec/3600)+" ч" : sec>=60? Math.round(sec/60)+" мин" : sec+" с"; }
+function acDetail(r){
+  var q=r.q? Object.keys(r.q).map(function(k){ return k+"="+(typeof r.q[k]==="string"? r.q[k] : JSON.stringify(r.q[k])); }).join("&") : "";
+  if(r.ev==="req"||r.ev==="page"||r.ev==="denied"||r.ev==="probe"){
+    return (r.m||"")+" "+(r.via||"")+(r.path||"")+(q? "?"+q : "")+"  → "+(r.st||"?")+" · "+(r.ms||0)+" мс"
+      +(r.rep? "  ×"+(r.rep+1) : "")+(r.body&&Object.keys(r.body).length? "  "+JSON.stringify(r.body).slice(0,400) : "")
+      +(r.ua? "  ["+r.ua+"]" : ""); }
+  if(r.ev==="ui") return "["+(r.tab||"")+"] "+(r.a||"")+": "+(r.d||"");
+  if(r.ev==="block") return (r.key||"")+" — "+acFmtT(r.dur||0)+" (№"+(r.lvl||1)+(r.panel? ", "+r.panel : "")+")";
+  if(r.ev==="flood") return (r.n||"")+" / 10 мин"+(r.panel? ", "+r.panel : "");
+  return [r.d, r.role? "роль "+r.role : "", r.via? "через "+r.via : "", r.st? "код "+r.st : "", r.ua? "["+r.ua+"]" : ""].filter(Boolean).join(" · ");
+}
+function logAct(body){
+  body.innerHTML="";
+  function sel(id, opts){ return el("select",{id:id}, opts.map(function(o){ return el("option",{value:o[0]},[t(o[1])]); })); }
+  var src=sel("acsrc",[["","ac_src_all"],["admin","ac_src_admin"],["player","ac_src_player"],["guard","ac_src_guard"]]);
+  var ev=sel("acev",[["","ac_ev_all"],["logins","ac_ev_logins"],["bad","ac_ev_bad"],["req","ac_ev_req"],["ui","ac_ev_ui"],["audit","ac_ev_audit"],["guard","ac_ev_guard"]]);
+  var hrs=sel("achrs",[["24","ac_h24"],["1","ac_h1"],["168","ac_h168"],["0","ac_hall"]]);
+  var us=el("input",{id:"acuser",placeholder:t("ac_user"),style:"width:150px"}), ip=el("input",{id:"acip",placeholder:t("ac_ip"),style:"width:120px"}),
+      tx=el("input",{id:"actext",placeholder:t("ac_text"),style:"width:200px"});
+  [us,ip,tx].forEach(function(x){ x.addEventListener("keydown",function(e){ if(e.key==="Enter") pullAct(false); }); });
+  [src,ev,hrs].forEach(function(x){ x.onchange=function(){ pullAct(false); }; });
+  body.appendChild(el("p",{class:"muted small"},[t("ac_intro")]));
+  body.appendChild(el("div",{class:"row",style:"margin-bottom:8px;flex-wrap:wrap;gap:6px"},[src,ev,us,ip,tx,
+    el("label",{class:"small"},[t("ac_hours")+" ",hrs]),
+    el("button",{class:"small pri",onclick:function(){ pullAct(false); }},[t("ac_find")]),
+    el("span",{id:"acinfo",class:"muted small"},[])]));
+  body.appendChild(el("div",{style:"overflow-x:auto"},[el("table",{id:"actb"},[])]));
+  body.appendChild(el("div",{style:"margin-top:8px"},[el("button",{id:"acmore",class:"small",style:"display:none",onclick:function(){ pullAct(true); }},[t("ac_more")])]));
+  pullAct(false);
+}
+function pullAct(more){
+  var g=function(id){ return (($("#"+id)||{}).value||"").trim(); };
+  var qs="src="+encodeURIComponent(g("acsrc"))+"&ev="+encodeURIComponent(g("acev"))+"&user="+encodeURIComponent(g("acuser"))
+    +"&ip="+encodeURIComponent(g("acip"))+"&text="+encodeURIComponent(g("actext"))+"&hours="+encodeURIComponent(g("achrs"))+"&limit=300";
+  if(more && AC_ROWS.length) qs+="&before="+AC_ROWS[AC_ROWS.length-1].t;
+  api("/api/activity-log?"+qs).then(function(j){
+    AC_ROWS = more? AC_ROWS.concat(j.rows) : j.rows;
+    var tb=$("#actb"); if(!tb) return; tb.innerHTML="";
+    tb.appendChild(el("tr",{},[t("ac_col_ts"),t("ac_col_src"),t("ac_col_who"),"IP",t("ac_col_ev"),t("ac_col_d")].map(function(x){ return el("th",{},[x]); })));
+    if(!AC_ROWS.length) tb.appendChild(el("tr",{},[el("td",{colspan:"6",class:"muted"},[t("ac_none")])]));
+    var BAD={login_fail:1,login_blocked:1,denied:1,probe:1,block:1,flood:1};
+    AC_ROWS.forEach(function(r){
+      var who=r.user? r.user+(r.uid!=null? " #"+r.uid : "") : "—";
+      var wEl=el("a",{href:"#",onclick:function(e){ e.preventDefault(); $("#acuser").value=r.user||""; pullAct(false); }},[who]);
+      var iEl=el("a",{href:"#",class:"mono",onclick:function(e){ e.preventDefault(); $("#acip").value=r.ip||""; pullAct(false); }},[r.ip||""]);
+      tb.appendChild(el("tr",{style:BAD[r.ev]? "background:rgba(220,60,60,.10)" : (r.ev==="login_ok"? "background:rgba(60,180,90,.10)" : null)},[
+        el("td",{class:"mono small",style:"white-space:nowrap"},[r.ts||""]),
+        el("td",{class:"small"},[t("ac_src_"+(r.src||"admin"))]),
+        el("td",{class:"small"},[wEl, r.role? el("span",{class:"muted"},[" · "+r.role]) : null]),
+        el("td",{class:"small"},[iEl]),
+        el("td",{class:"small",style:"white-space:nowrap"},[T[S.lang]["ev_"+r.ev]||r.ev]),
+        el("td",{class:"small",style:"word-break:break-word"},[acDetail(r)])]));
+    });
+    var mb=$("#acmore"); if(mb) mb.style.display=j.more? "" : "none";
+    var inf=$("#acinfo"); if(inf) inf.textContent=AC_ROWS.length+" · "+t("ac_size")+" "+(j.size/1048576).toFixed(1)+" МБ / "+j.files;
+  }).catch(function(e){ var tb=$("#actb"); if(tb){ tb.innerHTML=""; tb.appendChild(el("tr",{},[el("td",{class:"msg err"},[errText(e)])])); } });
+}
+function logBlocks(body){
+  body.innerHTML="";
+  api("/api/guard").then(function(j){
+    var R=j.rules||{};
+    body.appendChild(el("p",{class:"muted small"},[t("gb_intro").replace("{ip}",R.ip[0]).replace("{ipw}",R.ip[1]/60).replace("{ac}",R.account[0])
+      .replace("{acw}",R.account[1]/60).replace("{steps}",(R.steps||[]).map(acFmtT).join(" → "))]));
+    body.appendChild(el("p",{},[t("gb_fails10")+": "+j.fails_10m, j.flood? el("b",{style:"color:#d33"},["  "+t("gb_flood")]) : null,
+      " ", el("button",{class:"small",onclick:function(){ logBlocks(body); }},[t("refresh")])]));
+    if(!j.keys.length){ body.appendChild(el("p",{class:"muted"},[t("gb_none")])); return; }
+    body.appendChild(ltable([t("gb_key"),t("gb_left"),t("gb_lvl"),t("gb_fails"),t("gb_who"),""], j.keys, function(k){
+      return [el("span",{class:"mono"},[k.key]), k.left? acFmtT(k.left) : "—", String(k.level), String(k.fails), k.who||"",
+        el("button",{class:"small",onclick:function(){ api("/api/guard",{body:{op:"unblock",key:k.key}}).then(function(){ logBlocks(body); }).catch(function(e){ alert(errText(e)); }); }},[t("gb_unblock")])]; }));
+  }).catch(function(e){ body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
 }
 function logNav(body){
   body.innerHTML="";

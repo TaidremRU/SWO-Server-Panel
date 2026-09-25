@@ -25,9 +25,11 @@ import urllib.parse
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 
+import activity
+import authguard
 import game_i18n
 import players
-from webui import Throttle, _Handler, _ip_allowed, _parse_nets
+from webui import _Handler, _cip, _ip_allowed, _parse_nets
 
 SESSION_TTL = 12 * 3600
 REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
@@ -169,8 +171,10 @@ class PlayerWeb:
         self._sessions = {}          # tok -> {uid, nick, exp, fp?, chk?}
         self._slock = threading.Lock()
         self._remember_path = os.path.join(base, "playerweb_remember.json")
-        self.throttle = Throttle()                                   # по IP
-        self.nick_throttle = Throttle(max_fail=8, window=900, block=900)  # по нику (перебор с разных IP)
+        # защита от перебора и журнал — общие с админкой (если она запущена)
+        self.act = web.act if web else activity.ActivityLog(os.path.join(base, "logs", "activity.jsonl"))
+        self.guard = web.guard if web else authguard.Guard(
+            os.path.join(base, "auth_guard.json"), on_event=lambda r: self.act.write(dict(r, src="guard")))
         self._cache = {}
         self._market = {"data": None, "ts": 0, "running": False}
         self._map_img = {}           # map -> (ts, {w, h, pixels})
@@ -343,6 +347,7 @@ class PlayerWeb:
     def _send(self, h, status, ctype, body, extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
+        h._st = status
         try:
             h.send_response(status)
             h.send_header("Content-Type", ctype)
@@ -367,14 +372,16 @@ class PlayerWeb:
 
     def _body(self, h):
         try:
-            n = min(int(h.headers.get("Content-Length") or 0), 4096)
+            n = min(int(h.headers.get("Content-Length") or 0), 65536)
         except ValueError:
             n = 0
         try:
             v = json.loads(h.rfile.read(n).decode("utf-8")) if n > 0 else {}
-            return v if isinstance(v, dict) else {}
+            v = v if isinstance(v, dict) else {}
         except Exception:  # noqa: BLE001
-            return {}
+            v = {}
+        h._req_body = v
+        return v
 
     @staticmethod
     def _thash(tok):
@@ -422,6 +429,8 @@ class PlayerWeb:
                     logging.info("playerweb: запомненный вход %s сброшен — пароль сменён", s["nick"])
                     return tok, None
                 s["chk"] = now
+        if s:
+            h._who, h._uid, h._sid = s["nick"], s["uid"], self._thash(tok)[:10]
         return tok, s
 
     def _title(self):
@@ -438,8 +447,61 @@ class PlayerWeb:
         return d
 
     # ---------------------------------------------------------------- dispatch
+    def _trusted(self):
+        raw = tuple(self._pcfg().get("trusted_proxies") or [])
+        if getattr(self, "_tp_key", None) != raw:
+            self._tp, self._tp_key = authguard.parse_nets(raw), raw
+        return self._tp
+
     def dispatch(self, h, method):
-        ip = h.client_address[0]
+        """Обработка запроса + строка в журнал активности (для GM)."""
+        t0 = time.time()
+        h.real_ip = authguard.client_ip(h, self._trusted())
+        try:
+            return self._dispatch(h, method)
+        finally:
+            try:
+                self._log_request(h, method, t0)
+            except Exception:  # noqa: BLE001
+                logging.exception("playerweb: журнал активности")
+
+    def _log_request(self, h, method, t0):
+        path, _, qs = h.path.partition("?")
+        if getattr(h, "_nolog", False) or getattr(h, "_via", None) or path == "/favicon.ico":
+            return          # /admin/… пишет сама админка
+        st = getattr(h, "_st", None)
+        if path.startswith("/api/"):
+            ev = "denied" if st in (401, 403, 429) and path != "/api/session" else "req"
+        elif path in ("/", "/index.html"):
+            ev = "page"
+        else:
+            ev = "probe"
+        ip = _cip(h)
+        sid = getattr(h, "_sid", None)
+        rep = 0
+        if method == "GET" and ev in ("req", "page"):
+            rep = self.act.dedup(("p", sid or ip, h.path))
+            if rep is True:
+                return
+        q = {k: (v[0] if len(v) == 1 else v) for k, v in urllib.parse.parse_qs(qs).items()}
+        rec = {"src": "player", "ev": ev, "user": getattr(h, "_who", None), "uid": getattr(h, "_uid", None),
+               "ip": ip, "sid": sid, "m": method, "path": path, "q": activity.redact(q) if q else None,
+               "st": st, "ms": int((time.time() - t0) * 1000), "rep": rep or None}
+        if method == "POST":
+            rec["body"] = activity.redact(getattr(h, "_req_body", None))
+        if ev in ("page", "probe") or (ev == "denied" and not sid):
+            rec["ua"] = (h.headers.get("User-Agent") or "")[:200]
+        self.act.write(rec)
+
+    def _event(self, h, ev, nick, **kw):
+        h._nolog = True
+        rec = {"src": "player", "ev": ev, "user": (nick or "")[:64], "ip": _cip(h),
+               "ua": (h.headers.get("User-Agent") or "")[:200]}
+        rec.update(kw)
+        self.act.write(rec)
+
+    def _dispatch(self, h, method):
+        ip = _cip(h)
         raw_nets = tuple(self._pcfg().get("allowed_nets") or [])
         if raw_nets:
             try:
@@ -509,7 +571,10 @@ class PlayerWeb:
             tok, s = self._session(h)
             if not s:
                 return self._json(h, {"error": "auth"}, 401)
+            if route == "track" and method == "POST":
+                return self._api_track(h, s)
             if route == "logout" and method == "POST":
+                self._event(h, "logout", s["nick"], uid=s["uid"], sid=h._sid)
                 with self._slock:
                     if (self._sessions.pop(tok, None) or {}).get("fp"):
                         d = self._remember_load()
@@ -537,16 +602,17 @@ class PlayerWeb:
 
     # ------------------------------------------------------------------- login
     def _api_login(self, h):
-        ip = h.client_address[0]
+        ip = _cip(h)
         b = self._body(h)
-        nick = str(b.get("nick") or "").strip()
+        nick = str(b.get("nick") or "").strip()[:64]
         code = str(b.get("code") or "")
-        key = "n:" + nick.lower()
-        for thr, k in ((self.throttle, ip), (self.nick_throttle, key)):
-            ok, wait = thr.check(k)
-            if not ok:
-                return self._json(h, {"error": "throttled", "retry": wait}, 429)
-        if not nick or not code or len(nick) > 64 or len(code) > 128:
+        key = "nick:" + nick.lower()
+        ok, wait, what = self.guard.check(ip, key)
+        if not ok:
+            self._event(h, "login_blocked", nick, d="заблокировано %s ещё %d с" % (what, wait))
+            return self._json(h, {"error": "throttled", "retry": wait}, 429)
+        if not nick or not code or len(code) > 128:
+            self._event(h, "login_fail", nick, d="пустой ник/пароль")
             return self._json(h, {"error": "bad_login"}, 403)
         world_dir = players.find_world_dir(self.cfg)
         uid = None
@@ -558,12 +624,13 @@ class PlayerWeb:
                         uid, nick = i, n
                         break
         if uid is None:
-            self.throttle.fail(ip)
-            self.nick_throttle.fail(key)
+            known = world_dir and any(n.strip().lower() == nick.lower()
+                                      for n in players.load_user_list(world_dir).values())
+            self._event(h, "login_fail", nick, d="неверный пароль" if known else "нет такого ника")
             logging.info("playerweb: неудачный вход «%s» с %s", nick[:32], ip)
+            self.guard.fail(ip, key, nick, "панель игроков")
             return self._json(h, {"error": "bad_login"}, 403)
-        self.throttle.ok(ip)
-        self.nick_throttle.ok(key)
+        self.guard.ok(ip, key, nick, "панель игроков")
         tok = secrets.token_urlsafe(32)
         remember = bool(b.get("remember"))
         with self._slock:
@@ -577,12 +644,32 @@ class PlayerWeb:
                 d[self._thash(tok)] = {"uid": uid, "nick": nick, "exp": s["exp"], "fp": s["fp"]}
                 self._remember_save(d)
             self._sessions[tok] = s
+        self._event(h, "login_ok", nick, uid=uid, sid=self._thash(tok)[:10], d="запомнить" if remember else None)
         logging.info("playerweb: вход %s (#%s) с %s%s", nick, uid, ip, " (запомнить)" if remember else "")
         # без «запомнить» — кука живёт до закрытия браузера
         cookie = "psid=%s; Path=/; HttpOnly; SameSite=Strict" % tok
         if remember:
             cookie += "; Max-Age=%d" % REMEMBER_TTL
         return self._json(h, {"ok": True, "nick": nick}, set_cookie=cookie)
+
+    def _api_track(self, h, s):
+        """Действия в интерфейсе от браузера (вкладки, клики, ввод в поиск)."""
+        h._nolog = True
+        b = self._body(h)
+        now = time.time()
+        cnt = getattr(self, "_trk_cnt", {})
+        c = cnt.get(h._sid)
+        if not c or now - c[0] > 3600:
+            c = cnt[h._sid] = [now, 0]
+        self._trk_cnt = cnt
+        for e in (b.get("ev") or [])[:60]:
+            if not isinstance(e, dict) or c[1] >= 5000:
+                break
+            c[1] += 1
+            self.act.write({"src": "player", "ev": "ui", "user": s["nick"], "uid": s["uid"], "ip": _cip(h),
+                            "sid": h._sid, "a": str(e.get("a") or "")[:16], "tab": str(e.get("tab") or "")[:32],
+                            "d": str(e.get("d") or "")[:300]})
+        return self._json(h, {"ok": True})
 
     # ------------------------------------------------------------ вход в админку
     def _staff(self, uid):
@@ -598,21 +685,22 @@ class PlayerWeb:
         """Вход в админку по ОТДЕЛЬНОМУ админскому паролю (первый раз — задать его)."""
         if not (self.web and self._pcfg().get("admin_proxy")):
             return self._json(h, {"error": "unknown"}, 404)
-        ip = h.client_address[0]
-        key = "a:%s" % s["uid"]
-        for thr, k in ((self.throttle, ip), (self.nick_throttle, key)):
-            ok, wait = thr.check(k)
-            if not ok:
-                return self._json(h, {"error": "throttled", "retry": wait}, 429)
+        ip = _cip(h)
+        key = "gm:%s" % s["uid"]
+        ok, wait, what = self.guard.check(ip, key)
+        if not ok:
+            self._event(h, "login_blocked", s["nick"], uid=s["uid"], sid=h._sid,
+                        d="«Админка»: заблокировано %s ещё %d с" % (what, wait))
+            return self._json(h, {"error": "throttled", "retry": wait}, 429)
         b = self._body(h)
         st, d, cookie = self.web.enter_as_game_user(h, s["uid"], s["nick"], str(b.get("password") or ""),
                                                    str(b.get("new_password") or ""), ip)
+        self._event(h, "admin_enter", s["nick"], uid=s["uid"], sid=h._sid, st=st,
+                    d="ok" if d.get("ok") else (d.get("error") or ("задать пароль" if d.get("need_setup") else "")))
         if d.get("error") == "bad_password":
-            self.throttle.fail(ip)
-            self.nick_throttle.fail(key)
+            self.guard.fail(ip, key, s["nick"], "вход стаффа в админку")
         elif d.get("ok"):
-            self.throttle.ok(ip)
-            self.nick_throttle.ok(key)
+            self.guard.ok(ip, key, s["nick"], "вход стаффа в админку")
         return self._json(h, d, st, set_cookie=cookie)
 
     # --------------------------------------------------------------------- api
@@ -1597,6 +1685,32 @@ function api(p,body){
 var ERR={bad_login:L("Неверный ник или пароль"), throttled:L("Слишком много попыток, подождите"), auth:L("Сессия истекла"), internal:L("Ошибка сервера")};
 function errText(e){ return (e&&(ERR[e.error]||e.error))||L("Нет связи с сервером"); }
 function errBox(e){ return el("div",{class:"msg err"},[errText(e)]); }
+
+// ---- журнал действий для GM: вкладки, клики, ввод в поиск/фильтры (пароли не шлём) ----
+var TRK=[],TRKT=null,TRKTAB=null,TRKIN={},TRK_SECRET=/pass|парол|token|токен|secret|секрет|key|ключ|code|код/i;
+function trkOn(){ return !!S.nick; }
+function trkName(x){ var lb=x.closest&&x.closest("label");
+  return x.id||x.name||x.getAttribute("placeholder")||x.getAttribute("aria-label")||x.title||(lb? (lb.innerText||"").replace(/\s+/g," ").trim().slice(0,40):"")||x.tagName.toLowerCase(); }
+function trkLabel(x){ var s=x.id||x.getAttribute("aria-label")||x.title||"", tx=(x.innerText||x.value||"").replace(/\s+/g," ").trim().slice(0,80);
+  return s&&tx&&s!==tx? s+" «"+tx+"»" : (tx||s||x.tagName.toLowerCase()); }
+function trk(a,d){ if(!trkOn()) return; TRK.push({a:a,tab:S.tab,d:String(d==null?"":d).slice(0,300)});
+  if(TRK.length>=50) trkFlush(); else if(!TRKT) TRKT=setTimeout(trkFlush,5000); }
+function trkFlush(){ clearTimeout(TRKT); TRKT=null; if(!TRK.length) return; if(!trkOn()){ TRK=[]; return; }
+  var b=TRK.splice(0,60);
+  try{ fetch("/api/track",{method:"POST",keepalive:true,headers:{"Content-Type":"application/json","X-Requested-With":"swp"},body:JSON.stringify({ev:b})}).catch(function(){}); }catch(e){} }
+function trkSecret(x){ return x.type==="password"||TRK_SECRET.test(trkName(x)); }
+document.addEventListener("click",function(e){ var x=e.target&&e.target.closest&&e.target.closest("button,a,summary,th,[onclick]");
+  if(x) trk("click",trkLabel(x)); },true);
+document.addEventListener("change",function(e){ var x=e.target; if(!x||trkSecret(x)) return;
+  if(x.tagName==="SELECT") trk("change",trkName(x)+" = "+(x.selectedIndex>=0&&x.options[x.selectedIndex]? x.options[x.selectedIndex].text : x.value));
+  else if(x.type==="checkbox"||x.type==="radio") trk("change",trkName(x)+" = "+(x.checked?"вкл":"выкл"));
+  else if(x.type==="file") trk("change",trkName(x)+" = файл "+((x.files&&x.files[0]&&x.files[0].name)||"")); },true);
+document.addEventListener("input",function(e){ var x=e.target;
+  if(!x||trkSecret(x)||x.tagName==="SELECT"||x.type==="checkbox"||x.type==="radio"||x.type==="file") return;
+  var k=trkName(x); clearTimeout(TRKIN[k]); TRKIN[k]=setTimeout(function(){ trk("input",k+" = "+x.value); },1200); },true);
+document.addEventListener("visibilitychange",function(){ if(document.hidden) trkFlush(); });
+window.addEventListener("pagehide",trkFlush);
+function trkTab(){ if(trkOn() && S.tab!==TRKTAB){ TRKTAB=S.tab; trk("tab",S.tab); } }
 function card(title,kids){ return el("div",{class:"card"},[title? el("h3",{},[title]):null].concat(kids)); }
 function table(head,rows,mk){ var t=el("table",{},[el("tr",{},head.map(function(h){ return el("th",{},[h]); }))]);
   rows.forEach(function(r){ t.appendChild(el("tr",{},mk(r).map(function(c){ return el("td",{},[c]); }))); }); return t; }
@@ -1683,6 +1797,7 @@ function render(){
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
   ({me:tabMe,hist:tabHist,tech:tabTech,craft:tabCraft,book:tabBook,market:tabMarket,map:tabMap,chests:tabChests,clan:tabClan,chat:tabChat,server:tabServer}[S.tab]||tabMe)(m);
+  trkTab();
 }
 
 // ---------------------------------------------------------------- профиль

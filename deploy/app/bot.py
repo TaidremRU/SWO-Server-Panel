@@ -157,6 +157,11 @@ class Bot:
         if self.alerts_enabled:
             self._outbox.put((None, text))
 
+    def push_super(self, text):
+        """Только главному админу (тревоги безопасности панели)."""
+        if self.alerts_enabled and self._super_admin:
+            self._outbox.put((self._super_admin, text))
+
     def _broadcast_roles(self, key, **kw):
         """Разослать локализованное сообщение всем админам И модераторам."""
         if not self.alerts_enabled:
@@ -373,7 +378,12 @@ class Bot:
             if not wui.get("enabled", True) or not self.web:
                 self.tg.send_message(chat, i18n.t(lang, "webui.disabled"))
             elif arg == "reset":
+                # учётка admin — GM (журнал активности): сбрасывает только главный админ
+                if self._super_admin and str(uid) != str(self._super_admin):
+                    self.tg.send_message(chat, i18n.t(lang, "reply.denied_cmd"))
+                    return
                 self.web.auth.reset()
+                self.web.audit("-", "telegram:%s" % uid, "СБРОС входа admin/admin (/webui reset)")
                 self.tg.send_message(chat, i18n.t(lang, "webui.reset_done"))
             else:
                 url = "http://%s:%s/" % (_lan_ip(), wui.get("port", 8080))
