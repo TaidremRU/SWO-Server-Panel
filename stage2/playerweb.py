@@ -2224,7 +2224,7 @@ function render(){
   ({me:function(m){ var r=el("div"); m.appendChild(r); tabMe(m); ratingCard(r); },
     journal:tabJournal,hist:tabHist,where:tabWhere,tech:tabTech,craft:tabCraft,book:tabBook,
     market:function(m){ tabMarket(m); m.appendChild(priceCard()); },map:tabMap,chests:tabChests,ships:tabShips,clan:tabClan,chat:tabChat,
-    server:function(m){ tabServer(m); var r=el("div"); m.appendChild(r); ratingCard(r); }}[S.tab]||tabMe)(m);
+    server:tabServer}[S.tab]||tabMe)(m);
   trkTab();
 }
 
