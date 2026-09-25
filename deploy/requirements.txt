@@ -2,3 +2,4 @@ psutil>=5.9
 pillow>=10
 pywin32>=306
 pydirectinput>=1.0.4
+cryptography>=42

@@ -84,9 +84,12 @@ try {
   if ($pj -and $pj.enabled) {
     $PlPort = 80
     if ($pj.port) { $PlPort = [int]$pj.port }
+    # HTTPS (playerweb.https, включается в «Настройках») — порт открываем заранее
+    $HttpsPort = 443
+    if ($pj.https -and $pj.https.port) { $HttpsPort = [int]$pj.https.port }
     New-NetFirewallRule -DisplayName 'SigmaSteamBot Player Panel' -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort $PlPort -Profile Any | Out-Null
-    Write-Output "[ok] firewall: inbound TCP $PlPort allowed (player panel)"
+        -Protocol TCP -LocalPort $PlPort, $HttpsPort -Profile Any | Out-Null
+    Write-Output "[ok] firewall: inbound TCP $PlPort, $HttpsPort allowed (player panel, HTTPS)"
   }
 } catch { Write-Output "[--] playerweb: $_" }
 

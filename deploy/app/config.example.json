@@ -32,7 +32,16 @@
     "port": 80,
     "allowed_nets": [],
     "admin_proxy": false,
-    "trusted_proxies": []
+    "trusted_proxies": [],
+    "https": {
+      "enabled": false,
+      "domain": "",
+      "builtin": false,
+      "email": "",
+      "port": 443,
+      "redirect_http": true,
+      "staging": false
+    }
   },
 
   "_metrics_comment": "Вкладка «Нагрузка»: снимок CPU/RAM/диска (IOPS, МБ/с)/сети сервера и процессов игры, Steam и панели + запросы к панелям и онлайн раз в interval_seconds в logs/metrics.jsonl (max_mb на файл, один старый файл хранится).",

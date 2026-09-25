@@ -96,10 +96,28 @@ SETTINGS_SCHEMA = [
         ("playerweb.host", "Хост", "Host", "str", "0.0.0.0 = все интерфейсы; нужен перезапуск"),
         ("playerweb.port", "Порт", "Port", "int", "по умолчанию 80; нужен перезапуск + правило фаервола (setup.bat)"),
         ("playerweb.allowed_nets", "Разрешённые адреса", "Allowed addresses", "strlist",
-         "пусто = пускать всех; для интернета — только через прокси с HTTPS"),
+         "пусто = пускать всех"),
         ("playerweb.title", "Название", "Title", "str", "пусто = как у админ-панели"),
+        ("playerweb.trusted_proxies", "Доверенные прокси", "Trusted proxies", "strlist",
+         "адреса обратного прокси: от них берутся X-Forwarded-For (реальный IP игрока) и X-Forwarded-Proto"),
         ("playerweb.admin_proxy", "Админка через панель игроков", "Admin panel via player panel", "bool",
          "кнопка «Админка» у игроков с ролью в игре (модератор/админ/мастер) и /admin/ на порту панели игроков; вход — по отдельному админскому паролю"),
+    ]),
+    ("https", "HTTPS панели игроков", "Player panel HTTPS", [
+        ("playerweb.https.enabled", "Включить HTTPS", "Enable HTTPS", "bool",
+         "панель работает только по https://<домен>; применяется сразу"),
+        ("playerweb.https.domain", "Домен", "Domain", "str", "должен указывать на внешний IP сервера (или прокси)"),
+        ("playerweb.https.builtin", "Свой сертификат (без прокси)", "Own certificate (no proxy)", "bool",
+         "выкл. — TLS снимает обратный прокси: он шлёт X-Forwarded-Proto, его адрес — в «Доверенные прокси» "
+         "панели игроков. Вкл. — панель сама получает сертификат Let's Encrypt и слушает 443 "
+         "(снаружи открыты 80 и 443 прямо на этот сервер)"),
+        ("playerweb.https.email", "E-mail для Let's Encrypt", "Let's Encrypt e-mail", "str",
+         "только для своего сертификата, необязательно"),
+        ("playerweb.https.port", "Порт HTTPS", "HTTPS port", "int", "только для своего сертификата; по умолчанию 443"),
+        ("playerweb.https.redirect_http", "Редирект http → https", "Redirect http → https", "bool",
+         "все запросы на порт панели игроков (и по IP) уводятся на https://<домен>"),
+        ("playerweb.https.staging", "Тестовый сертификат (staging)", "Test certificate (staging)", "bool",
+         "только для своего сертификата; для отладки: браузеры ему не доверяют, зато нет лимитов Let's Encrypt"),
     ]),
     ("watchdog", "Watchdog", "Watchdog", [
         ("watchdog.enabled", "Включён", "Enabled", "bool", ""),
@@ -153,6 +171,9 @@ SETTINGS_SCHEMA = [
     ]),
 ]
 _SETTINGS_FIELDS = {p: (typ, lr) for _, _, _, fs in SETTINGS_SCHEMA for (p, lr, le, typ, hint) in fs}
+# что показывать, если поля в config.json ещё нет (иначе «Сохранить» запишет false/пусто)
+_SETTINGS_DEFAULTS = {"playerweb.https.redirect_http": True, "playerweb.https.port": 443}
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
 def _cfg_get_path(d, path):
@@ -743,6 +764,8 @@ class WebUI:
             h.send_header("X-Content-Type-Options", "nosniff")
             h.send_header("Referrer-Policy", "no-referrer")
             for k, v in (extra or {}).items():
+                if k == "Set-Cookie" and getattr(h, "_tls", False) and "Secure" not in v:
+                    v += "; Secure"      # по HTTPS куки не должны уходить по http
                 h.send_header(k, v)
             h.end_headers()
             if h.command != "HEAD":
@@ -863,7 +886,7 @@ class WebUI:
     _MOD_ROUTES = {"shot", "suspicious", "twinks"}
     _MOD_OPS = {"restartgame", "login"}
     _MOD_MODERATE = {"ban", "unban"}
-    _ADMIN_ROUTES = {"audit", "log", "settings", "roles", "login-flow", "nav-shots", "nav-shot", "admin-tools",
+    _ADMIN_ROUTES = {"audit", "log", "settings", "https-cert", "roles", "login-flow", "nav-shots", "nav-shot", "admin-tools",
                      "world-backup", "players-csv", "users", "space-gen",
                      # рецепты микстур/кулинарии — знание только для админа
                      "buff-notepad", "buff-ingredients", "buff-optimize", "food-ingredients", "food-lib", "food-optimize"}
@@ -2454,6 +2477,26 @@ class WebUI:
         return self._json(h, {"ok": True, "allowed_user_ids": admins, "moderator_user_ids": mods,
                               "super_admin_id": sa, "default_lang": lang, "alerts_enabled": alerts})
 
+    def _api_https_cert(self, h, method, q, sess):
+        """Состояние HTTPS панели игроков; POST {op:"issue"} — выпустить/продлить сертификат сейчас."""
+        pw = getattr(self, "pweb", None)
+        if pw is None:
+            return self._json(h, {"ok": False, "error": "панель игроков не запущена"})
+        if method == "POST":
+            b = self._body(h)
+            if b.get("op") != "issue":
+                return self._json(h, {"error": "invalid"}, 400)
+            if not pw._domain():
+                return self._json(h, {"error": "invalid", "detail": "сначала укажите и сохраните домен"}, 400)
+            if not pw._hcfg().get("builtin"):
+                return self._json(h, {"error": "invalid", "detail": "сертификат выпускает обратный прокси "
+                                                                    "(включите «Свой сертификат», если прокси нет)"}, 400)
+            started = pw.issue_cert()
+            if started:
+                self.audit(_cip(h), sess["user"], "https: выпуск сертификата для %s" % pw._domain())
+            return self._json(h, dict(pw.https_status(), ok=True, started=started))
+        return self._json(h, dict(pw.https_status(), ok=True))
+
     def _api_settings(self, h, method, q, sess):
         """Полный редактор настроек бота (config.json) + игровые аккаунты."""
         if method == "GET":
@@ -2462,6 +2505,8 @@ class WebUI:
                 out_fields = []
                 for (p, lr, le, typ, hint) in fields:
                     cur = _cfg_get_path(self.cfg, p)
+                    if cur is None:
+                        cur = _SETTINGS_DEFAULTS.get(p)
                     fd = {"path": p, "label_ru": lr, "label_en": le, "type": typ, "hint": hint}
                     if typ == "secret":
                         fd["value"] = ""
@@ -2487,7 +2532,7 @@ class WebUI:
                 "ok": True, "sections": sections,
                 "game_accounts": accs, "active_account": self.cfg.get("active_account") or "",
                 "login_flow_json": json.dumps(lf, ensure_ascii=False, indent=2),
-                "restart_hint_ru": "watchdog, монитор сервера, Discord-стата, роли/язык/алерты применяются "
+                "restart_hint_ru": "watchdog, монитор сервера, Discord-стата, HTTPS, роли/язык/алерты применяются "
                                    "сразу; остальное (веб-панель, players.*, serverlist.*, поля Telegram-"
                                    "подключения) — после перезапуска задачи (кнопка «Перезапустить "
                                    "задачу» на вкладке «Действия»).",
@@ -2549,6 +2594,19 @@ class WebUI:
             port = _cfg_get_path(cfg, "webui.port")
             if port is not None and not (1 <= int(port) <= 65535):
                 raise _Bad("порт вне 1..65535")
+            hc = _cfg_get_path(cfg, "playerweb.https") or {}
+            if hc:
+                dom = (hc.get("domain") or "").strip().lower().rstrip(".")
+                hc["domain"] = dom
+                hc["email"] = (hc.get("email") or "").strip()
+                if dom and not _DOMAIN_RE.match(dom):
+                    raise _Bad("HTTPS: некорректный домен «%s»" % dom)
+                if hc.get("enabled") and not dom:
+                    raise _Bad("HTTPS: укажите домен")
+                if hc["email"] and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", hc["email"]):
+                    raise _Bad("HTTPS: некорректный e-mail")
+                if not (1 <= int(hc.get("port") or 443) <= 65535):
+                    raise _Bad("HTTPS: порт вне 1..65535")
             try:
                 nets = _parse_nets(_cfg_get_path(cfg, "webui.allowed_nets") or [])
             except ValueError as e:
@@ -2585,6 +2643,11 @@ class WebUI:
                 self.wd.apply()
         except Exception:  # noqa: BLE001
             logging.exception("webui: watchdog apply after settings")
+        try:
+            if getattr(self, "pweb", None) is not None:
+                self.pweb.apply_https()
+        except Exception:  # noqa: BLE001
+            logging.exception("webui: https apply after settings")
         self.audit(_cip(h), sess["user"],
                    "настройки: изменено %d полей%s%s" % (
                        len(vals), " +login_flow" if b.get("login_flow") else "",
@@ -2932,6 +2995,7 @@ var T = {
   col_name:"Сервер", col_players:"Игроки", col_map:"Мир", col_ver:"Версия", col_addr:"Адрес", col_mem:"В лобби",
   roles_admins:"Администраторы (Telegram ID)", roles_mods:"Модераторы (Telegram ID)",
   roles_super:"Главный админ (super_admin_id)", roles_lang:"Язык бота по умолчанию",
+  https_title:"HTTPS панели игроков", https_state:"Состояние", https_off:"выключен", https_on:"работает", https_wait:"ждёт сертификат", https_cert:"Сертификат", https_nocert:"нет", https_left:"осталось", https_days:"дн.", https_issue:"Выпуск", https_running:"идёт проверка домена…", https_err:"Последняя ошибка", https_get:"Выпустить сертификат", https_renew:"Продлить сейчас", https_proxy:"на обратном прокси", https_hint:"Включите HTTPS и укажите домен в разделе выше, нажмите «Сохранить настройки». За прокси: TLS и сертификат (certbot) — на прокси, он должен передавать X-Forwarded-Proto, а его адрес — стоять в «Доверенных прокси» панели игроков. Без прокси — включите «Свой сертификат»: Let's Encrypt выпустится сам и будет продлеваться за 30 дней до конца (порты 80 и 443 проброшены на этот сервер).",
   set_save:"Сохранить настройки", set_saved:"Сохранено", set_restart:"Часть изменений применится после перезапуска задачи.", set_accounts:"Игровые аккаунты", set_acc_add:"＋ аккаунт", set_acc_label:"метка", set_acc_user:"логин", set_acc_pw:"пароль (пусто = не менять)", set_acc_active:"активный", set_lf:"login_flow (JSON, продвинутое)", set_secret_set:"задан", set_secret_ph:"оставьте пустым, чтобы не менять", roles_alerts:"Алерты в Telegram включены", roles_hint:"ID через запятую/пробел/с новой строки. ID из обоих списков считается администратором. Нужен ≥1 админ. Главный админ должен быть среди администраторов.",
   save:"Сохранить", saved:"Сохранено, роли применены на лету",
   entry_intro:"Тюнер координат входа: снимок окна игры, клик по нему — проценты ширины/высоты окна (не зависят от разрешения/DPI). Требует запущенную задачу SigmaNav в интерактивной сессии.",
@@ -3203,6 +3267,7 @@ var T = {
   col_name:"Server", col_players:"Players", col_map:"World", col_ver:"Version", col_addr:"Address", col_mem:"In lobby",
   roles_admins:"Administrators (Telegram IDs)", roles_mods:"Moderators (Telegram IDs)",
   roles_super:"Super admin (super_admin_id)", roles_lang:"Default bot language",
+  https_title:"Player panel HTTPS", https_state:"State", https_off:"off", https_on:"running", https_wait:"waiting for certificate", https_cert:"Certificate", https_nocert:"none", https_left:"left", https_days:"days", https_issue:"Issuing", https_running:"validating domain…", https_err:"Last error", https_get:"Get certificate", https_renew:"Renew now", https_proxy:"on the reverse proxy", https_hint:"Enable HTTPS and set the domain in the section above, then Save settings. Behind a proxy: TLS and the certificate (certbot) live on the proxy; it must send X-Forwarded-Proto and be listed in the player panel's trusted proxies. Without a proxy, enable «Own certificate»: Let's Encrypt is issued automatically and renewed 30 days before expiry (ports 80 and 443 forwarded to this server).",
   set_save:"Save settings", set_saved:"Saved", set_restart:"Some changes take effect after restarting the task.", set_accounts:"Game accounts", set_acc_add:"＋ account", set_acc_label:"label", set_acc_user:"username", set_acc_pw:"password (empty = keep)", set_acc_active:"active", set_lf:"login_flow (JSON, advanced)", set_secret_set:"set", set_secret_ph:"leave empty to keep", roles_alerts:"Telegram alerts enabled", roles_hint:"IDs separated by comma / space / newline. An ID in both lists counts as admin. At least one admin required. Super admin must be one of the admins.",
   save:"Save", saved:"Saved, roles applied live",
   entry_intro:"Login-flow coordinate tuner: a screenshot of the game window, click on it — percent of window width/height (resolution/DPI independent). Needs the SigmaNav scheduled task running in an interactive session.",
@@ -6785,6 +6850,7 @@ function drawSettings(out,j){
   });
   out.appendChild(usersCard());
   out.appendChild(grid);
+  out.appendChild(httpsCard());
   out.appendChild(faviconCard());
 
   // игровые аккаунты
@@ -6991,6 +7057,35 @@ function applyBrand(title, favV){
   if(favV!=null){ S.favV=favV; var hl=document.getElementById("hlogo"); if(hl) hl.src="/favicon.ico?v="+favV; }
   var lk=document.getElementById("favicon");
   if(lk) lk.href="/favicon.ico?v="+(favV||0);
+}
+var httpsTimer=null;
+function httpsCard(){
+  var body=el("div",{},[el("p",{class:"muted small"},["…"])]);
+  function row(k,v){ return el("div",{class:"row",style:"gap:8px"},[el("span",{class:"muted",style:"min-width:150px"},[k]), el("span",{},[v])]); }
+  function draw(d){
+    body.innerHTML="";
+    if(!d.ok){ body.appendChild(el("div",{class:"msg err"},[d.error||"error"])); return; }
+    var c=d.cert||{};
+    var state = !d.enabled? t("https_off") : d.active? "✅ "+t("https_on")+" — https://"+d.domain+(d.builtin&&d.port!==443? ":"+d.port:"")+"/" : "⏳ "+t("https_wait");
+    body.appendChild(row(t("https_state"), state));
+    if(!d.builtin){ body.appendChild(row(t("https_cert"), t("https_proxy")));
+      body.appendChild(el("p",{class:"muted small"},[t("https_hint")])); return; }
+    body.appendChild(row(t("https_cert"), !c.exists? t("https_nocert") : c.error? c.error :
+      c.not_after+" ("+t("https_left")+" "+c.days_left+" "+t("https_days")+"), "+c.issuer+(c.staging? " — STAGING":"")));
+    if(d.running) body.appendChild(row(t("https_issue"), "⏳ "+t("https_running")));
+    if(d.last_error) body.appendChild(el("div",{class:"msg err",style:"margin-top:6px"},[t("https_err")+": "+d.last_error]));
+    body.appendChild(el("div",{class:"row",style:"margin-top:8px;gap:8px"},[
+      el("button",{class:"small",disabled:d.running||!d.domain? "disabled":null,onclick:function(){
+        api("/api/https-cert",{body:{op:"issue"}}).then(draw).catch(function(e){ body.appendChild(el("div",{class:"msg err"},[errText(e)])); });
+        setTimeout(load,1500); }},[c.exists? t("https_renew") : t("https_get")]),
+      el("button",{class:"small",onclick:load},["↻"])]));
+    clearTimeout(httpsTimer);
+    if(d.running) httpsTimer=setTimeout(function(){ if(document.body.contains(body)) load(); },3000);
+  }
+  function load(){ api("/api/https-cert").then(draw).catch(function(e){ body.innerHTML=""; body.appendChild(el("div",{class:"msg err"},[errText(e)])); }); }
+  load();
+  return el("div",{class:"card",style:"margin-top:12px"},[el("h3",{},["🔒 "+t("https_title")]), body,
+    el("p",{class:"muted small"},[t("https_hint")])]);
 }
 function faviconCard(){
   var prev=el("img",{src:"/favicon.ico?v="+Date.now(),style:"width:48px;height:48px;border-radius:8px;border:1px solid var(--line);object-fit:contain;background:var(--panel2)"});

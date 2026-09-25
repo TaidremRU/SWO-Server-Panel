@@ -7,8 +7,11 @@
 (статус сервера, рейтинги). Всё только на чтение — ничего в файлы мира не пишет.
 
 Запускается потоком внутри supervisor.py, если ``playerweb.enabled``.
-``playerweb.allowed_nets`` пусто = пускать всех (панель для игроков); для
-выхода в интернет — только через обратный прокси с HTTPS.
+``playerweb.allowed_nets`` пусто = пускать всех (панель для игроков).
+HTTPS — ``playerweb.https``: либо TLS на обратном прокси (он шлёт
+X-Forwarded-Proto, прокси — в ``trusted_proxies``), либо ``builtin`` — свой
+сертификат Let's Encrypt (acmecert.py) и порт 443; в обоих случаях
+http → https://<домен>.
 """
 import hashlib
 import html
@@ -20,17 +23,44 @@ import json
 import logging
 import os
 import secrets
+import ssl
 import threading
 import time
 import urllib.parse
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 
+import acmecert
 import activity
 import authguard
 import game_i18n
 import players
 from webui import _Handler, _cip, _ip_allowed, _parse_nets
+
+
+class _TLSHandler(_Handler):
+    """Тот же обработчик, но TLS-рукопожатие — в потоке запроса (не в accept),
+    с таймаутом: зависший клиент не держит сервер."""
+    timeout = 60
+
+    def setup(self):
+        self.request.settimeout(self.timeout)
+        self.request.do_handshake()
+        self._tls = True
+        super().setup()
+
+
+class _TLSServer(ThreadingHTTPServer):
+    daemon_threads = True
+    ctx = None                  # ssl.SSLContext; меняется на лету при продлении сертификата
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        return self.ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), addr
+
+    def handle_error(self, request, client_address):
+        # обрывы рукопожатия (сканеры, старые клиенты, http на 443) — норма, не трейсбек
+        logging.debug("playerweb https: ошибка соединения с %s", client_address[0], exc_info=True)
 
 SESSION_TTL = 12 * 3600
 REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
@@ -201,6 +231,10 @@ class PlayerWeb:
         self._srv_lock = threading.Lock()
         self._stop = threading.Event()
         self._srv = None
+        self._tls_srv = None         # HTTPS-сервер (playerweb.https), None = выключен/нет сертификата
+        self._acme = None            # текущий выпуск: его challenges отдаём на /.well-known/acme-challenge/
+        self._https = {"running": False, "last_error": None, "last_try": 0, "last_ok": 0}
+        self._hlock = threading.Lock()
 
     # ---------------------------------------------------------------- lifecycle
     def _pcfg(self):
@@ -221,15 +255,175 @@ class PlayerWeb:
         threading.Thread(target=self._bg_loop, name="pw-bg", daemon=True).start()
         threading.Thread(target=self._space_index_loop, name="pw-space-index", daemon=True).start()
         logging.info("playerweb: панель игроков на http://%s:%d/", host, port)
+        try:
+            self.apply_https()
+        except Exception:  # noqa: BLE001
+            logging.exception("playerweb: https")
+        threading.Thread(target=self._https_loop, name="pw-https", daemon=True).start()
 
     def stop(self):
         self._stop.set()
+        self._tls_stop()
         try:
             if self._srv:
                 self._srv.shutdown()
                 self._srv.server_close()
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: ошибка остановки")
+
+    # ------------------------------------------------------------------- HTTPS
+    def _hcfg(self):
+        return self._pcfg().get("https") or {}
+
+    def _domain(self):
+        return (self._hcfg().get("domain") or "").strip().lower().rstrip(".")
+
+    def https_status(self):
+        hc = self._hcfg()
+        dom = self._domain()
+        st = dict(self._https)
+        st.update({"enabled": bool(hc.get("enabled")), "domain": dom, "builtin": bool(hc.get("builtin")),
+                   "active": self._https_on(),
+                   "port": int(hc.get("port", 443)),
+                   "cert": acmecert.cert_info(self._base, dom) if dom else {"exists": False}})
+        return st
+
+    def apply_https(self):
+        """Привести HTTPS к настройкам: выключить, поднять/перечитать сертификат или
+        запустить выпуск. Зовётся при старте, после «Сохранить» в настройках и из
+        цикла продления."""
+        hc = self._hcfg()
+        dom = self._domain()
+        if not (hc.get("enabled") and dom and hc.get("builtin")):
+            self._tls_stop()
+            return
+        info = acmecert.cert_info(self._base, dom)
+        usable = info.get("exists") and not info.get("error") and info.get("days_left", 0) > 0 \
+            and bool(info.get("staging")) == bool(hc.get("staging"))
+        if usable:
+            self._tls_start()
+        else:
+            self._tls_stop()
+        if not usable or info.get("days_left", 0) < acmecert.RENEW_DAYS:
+            # после неудачи не долбим Let's Encrypt (лимит 5 неудачных проверок в час)
+            if time.time() - self._https["last_try"] > (3 * 3600 if self._https["last_error"] else 60):
+                self.issue_cert()
+
+    def issue_cert(self):
+        """Выпуск/продление в фоне. False — уже идёт."""
+        with self._hlock:
+            if self._https["running"]:
+                return False
+            self._https.update(running=True, last_try=time.time())
+        threading.Thread(target=self._issue_job, name="pw-acme", daemon=True).start()
+        return True
+
+    def _issue_job(self):
+        hc = self._hcfg()
+        dom = self._domain()
+        try:
+            self._acme = acmecert.Acme(self._base, hc.get("email") or "", staging=bool(hc.get("staging")))
+            self._acme.issue(dom)
+            self._https.update(last_error=None, last_ok=time.time())
+            if self._hcfg().get("enabled") and self._domain() == dom:
+                self._tls_start()
+        except Exception as e:  # noqa: BLE001
+            logging.exception("playerweb: сертификат для %s не получен", dom)
+            self._https["last_error"] = str(e)
+            bot = getattr(self.web, "bot", None)
+            if bot is not None and hasattr(bot, "push_super"):
+                try:
+                    bot.push_super("🔒 HTTPS: сертификат для %s не получен — %s" % (dom, e))
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            self._acme = None
+            self._https["running"] = False
+
+    def _tls_ctx(self):
+        full, key = acmecert.cert_paths(self._base, self._domain())
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(full, key)
+        ctx.set_alpn_protocols(["http/1.1"])
+        return ctx
+
+    def _tls_start(self):
+        with self._hlock:
+            ctx = self._tls_ctx()
+            port = int(self._hcfg().get("port", 443))
+            if self._tls_srv is not None and self._tls_srv.server_address[1] == port:
+                self._tls_srv.ctx = ctx          # продление — новые соединения уже с новым сертификатом
+                return
+            self._tls_stop_locked()
+            srv = _TLSServer((self._pcfg().get("host", "0.0.0.0"), port), _TLSHandler)
+            srv.ctx = ctx
+            srv.webui = self
+            threading.Thread(target=srv.serve_forever, name="playerweb-https", daemon=True).start()
+            self._tls_srv = srv
+        logging.info("playerweb: HTTPS на порту %d, домен %s", port, self._domain())
+
+    def _tls_stop(self):
+        with self._hlock:
+            self._tls_stop_locked()
+
+    def _tls_stop_locked(self):
+        srv, self._tls_srv = self._tls_srv, None
+        if srv is None:
+            return
+        try:
+            srv.shutdown()
+            srv.server_close()
+            logging.info("playerweb: HTTPS остановлен")
+        except Exception:  # noqa: BLE001
+            logging.exception("playerweb: остановка HTTPS")
+
+    def _https_loop(self):
+        """Раз в 12 часов — не пора ли продлить (Let's Encrypt даёт 90 дней, продляем за 30)."""
+        while not self._stop.wait(12 * 3600):
+            try:
+                self.apply_https()
+            except Exception:  # noqa: BLE001
+                logging.exception("playerweb: продление сертификата")
+
+    def _https_on(self):
+        """HTTPS реально работает: свой сервер с сертификатом или включён режим прокси."""
+        hc = self._hcfg()
+        if not (hc.get("enabled") and self._domain()):
+            return False
+        return self._tls_srv is not None if hc.get("builtin") else True
+
+    def _https_gate(self, h):
+        """Проверка ACME и редиректы на https://<домен>. True — запрос уже обработан."""
+        if not getattr(h, "_tls", False) and not self._hcfg().get("builtin"):
+            # TLS снят на обратном прокси: верим X-Forwarded-Proto только от доверенного
+            tp = self._trusted()
+            if tp and authguard._in_nets(h.client_address[0], tp) and \
+                    (h.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
+                h._tls = True
+        path = h.path.split("?", 1)[0]
+        if path.startswith("/.well-known/acme-challenge/"):
+            h._nolog = True
+            acme = self._acme
+            ka = acme.challenges.get(path.rsplit("/", 1)[-1]) if acme else None
+            if ka:
+                logging.info("playerweb: проверка ACME с %s", h.client_address[0])
+            self._send(h, 200 if ka else 404, "text/plain", ka or "not found")
+            return True
+        dom = self._domain()
+        if not self._https_on():
+            return False
+        tls = getattr(h, "_tls", False)
+        host = (h.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower().rstrip(".")
+        if (tls and host == dom) or (not tls and not self._hcfg().get("redirect_http", True)):
+            return False
+        port = int(self._hcfg().get("port", 443)) if self._hcfg().get("builtin") else 443
+        tail = h.path if h.path.startswith("/") else "/"
+        h._nolog = True
+        self._send(h, 301, "text/plain", "", {
+            "Location": "https://%s%s%s" % (dom, "" if port == 443 else ":%d" % port, tail),
+            "Cache-Control": "no-store"})
+        return True
 
     # ------------------------------------------------------------ фоновый цикл
     def _bg_loop(self):
@@ -375,6 +569,8 @@ class PlayerWeb:
             h.send_header("Referrer-Policy", "no-referrer")
             h.send_header("X-Frame-Options", "DENY")
             for k, v in (extra or {}).items():
+                if k == "Set-Cookie" and getattr(h, "_tls", False) and "Secure" not in v:
+                    v += "; Secure"      # по HTTPS куки не должны уходить по http
                 h.send_header(k, v)
             h.end_headers()
             if h.command != "HEAD":
@@ -482,6 +678,8 @@ class PlayerWeb:
         """Обработка запроса + строка в журнал активности (для GM)."""
         t0 = time.time()
         h.real_ip = authguard.client_ip(h, self._trusted())
+        if self._https_gate(h):
+            return
         try:
             return self._dispatch(h, method)
         finally:
