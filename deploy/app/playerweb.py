@@ -830,17 +830,23 @@ class PlayerWeb:
             if not o:
                 unknown.append({"map": mp, "claims": n})
                 continue
-            systems.setdefault(loc[0], {"star": loc[0], "objects": [], "ships": [], "far_ships": 0})["objects"].append(
-                {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
-                 "x": o["x"], "y": o["y"], "claims": n, "dist": round(math.hypot(o["x"], o["y"]))})
+            row = {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
+                   "x": o["x"], "y": o["y"], "claims": n, "dist": round(math.hypot(o["x"], o["y"]))}
+            if o["kind"] == "satellite":
+                # спутник висит у своей планеты (21–195 ед., планеты не движутся) — ближайшая планета
+                par = min((p for p in objs if p["kind"] == "planet"),
+                          key=lambda p: math.hypot(p["x"] - o["x"], p["y"] - o["y"]), default=None)
+                if par and math.hypot(par["x"] - o["x"], par["y"] - o["y"]) < 1000:
+                    row["parent"] = {"name": par["name"], "x": par["x"], "y": par["y"],
+                                     "dist": round(math.hypot(par["x"], par["y"]))}
+            systems.setdefault(loc[0], {"star": loc[0], "objects": [], "ships": [], "far_ships": 0})["objects"].append(row)
         for sh in self._my_ships(uid):
-            sy = systems.get(sh.get("star") or 1)
-            if not sy:
-                continue
-            if math.hypot(sh["x"], sh["y"]) > 60_000:
-                sy["far_ships"] += 1          # в пути далеко от звезды — на схеме системы не поместится
-            else:
-                sy["ships"].append({"model": sh["model"], "x": sh["x"], "y": sh["y"], "near": sh.get("near")})
+            st = sh.get("star") or 1
+            sy = systems.setdefault(st, {"star": st, "objects": [], "ships": [], "far_ships": 0})
+            far = math.hypot(sh["x"], sh["y"]) > 60_000      # в пути далеко от звезды — стрелкой на краю схемы
+            sy["far_ships"] += 1 if far else 0
+            sy["ships"].append({"id": sh["id"], "model": sh["model"], "x": sh["x"], "y": sh["y"], "near": sh.get("near"),
+                                "moving": sh.get("moving"), "far": far})
         return {"ok": True, "systems": list(systems.values()), "unknown": unknown}
 
     def _with_map_names(self, pos):
@@ -1820,6 +1826,11 @@ var LANG=(function(){ try{ var v=localStorage.getItem("swp_lang"); if(v==="ru"||
   return /^(ru|uk|be)/i.test(navigator.language||"")? "ru" : "en"; })();
 var LOC=LANG==="en"? "en" : "ru";
 var EN_DICT={
+  "в пути":"travelling",
+  "Планеты, спутники и астероиды, на которых у вас есть участки, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.":"Planets, moons and asteroids where you have plots, and your ships. The star is in the centre. Ships far from the star are shown as an arrow at the edge.",
+  "в движении":"moving","в пути, далеко от звезды":"travelling, far from the star","В этой системе у вас нет участков — только корабли.":"You have no plots in this system — only ships.",
+  "У вас пока нет участков на планетах и кораблей в космосе.":"You have no plots on planets and no ships in space yet.","Космос: мои планеты и корабли":"Space: my planets and ships",
+  "планеты":"of planet",
   "Космос":"Space","У вас пока нет участков на планетах.":"You have no plots on planets yet.",
   "Планеты и спутники, на которых у вас есть участки, и ваши корабли рядом. Звезда — в центре, пунктир — орбита.":"Planets and moons where you have plots, and your ships nearby. The star is in the centre, dashed lines are orbits.",
   "Звезда":"Star",
@@ -2301,7 +2312,7 @@ function renderLanding(){
 }
 
 // ---------------------------------------------------------------- каркас
-var TABS=[["me",L("Профиль")],["journal",L("Журнал")],["hist",L("История")],["where",L("Где лежит?")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["space",L("Космос")],["chests",L("Сундуки")],["ships",L("Корабли")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
+var TABS=[["me",L("Профиль")],["journal",L("Журнал")],["hist",L("История")],["where",L("Где лежит?")],["tech",L("Изучение")],["craft",L("Крафт")],["book",L("Справочник")],["market",L("Рынок")],["map",L("Карта")],["space",L("Космос")],["chests",L("Сундуки")],["clan",L("Клан")],["chat",L("Чат")],["server",L("Сервер")]];
 // иконки предметов: атлас item_icons.png, клетка по индексу; ключ — slug или русское имя
 var ICONS=null;
 function ico(key,size){
@@ -2362,7 +2373,7 @@ function render(){
   ({me:function(m){ var r=el("div"); m.appendChild(r); tabMe(m); ratingCard(r); },
     journal:tabJournal,hist:tabHist,where:tabWhere,tech:tabTech,craft:tabCraft,book:tabBook,
     market:function(m){ tabMarket(m); m.appendChild(priceCard()); },
-    map:tabMap,space:tabSpace,chests:tabChests,ships:tabShips,clan:tabClan,chat:tabChat,
+    map:tabMap,space:tabSpace,chests:tabChests,ships:tabSpace,clan:tabClan,chat:tabChat,
     server:tabServer}[S.tab]||tabMe)(m);
   trkTab();
 }
@@ -2850,8 +2861,7 @@ function tabWhere(m){
 function tabShips(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/my-ships",function(d){
-    if(!d.ships.length && !d.stations.length){
-      box.appendChild(card(L("Мои корабли"),[el("div",{class:"muted"},[L("У вас нет кораблей в космосе.")])])); return; }
+    if(!d.ships.length && !d.stations.length) return;       // во вкладке «Космос» — просто ничего не добавляем
     d.ships.forEach(function(s){ box.appendChild(card(s.model+" #"+s.id,[kv([
       [L("Где"), s.near? L("рядом: ")+s.near+" · "+num(s.near_dist)+L(" ед.") : L("в пути, вдали от объектов системы")],
       [L("Координаты"), s.x+", "+s.y+(s.star!=null? " · "+L("система #")+s.star : "")],
@@ -2872,43 +2882,65 @@ function tabSpace(m){
   var box=el("div"); m.appendChild(box);
   box.appendChild(el("p",{class:"muted"},[L("Загрузка…")]));
   spaceCard(box);
+  tabShips(m);           // карточки кораблей (трюм, прочность) и станции — под схемой
 }
 function spaceCard(box){
   api("/api/my-space").then(function(d){
     box.innerHTML="";
     if(!d.ok){ box.appendChild(errBox(d)); return; }
-    if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Мои планеты в космосе"),[el("div",{class:"muted"},[L("У вас пока нет участков на планетах.")])])); return; }
-    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты и спутники, на которых у вас есть участки, и ваши корабли рядом. Звезда — в центре, пунктир — орбита.")])];
+    if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Космос"),[el("div",{class:"muted"},[L("У вас пока нет участков на планетах и кораблей в космосе.")])])); return; }
+    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты, спутники и астероиды, на которых у вас есть участки, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.")])];
     d.systems.forEach(function(sy){
-      var R=1; sy.objects.forEach(function(o){ R=Math.max(R,o.dist); }); sy.ships.forEach(function(s){ R=Math.max(R,Math.hypot(s.x,s.y)); });
+      var R=1; sy.objects.forEach(function(o){ R=Math.max(R,o.dist); }); sy.ships.forEach(function(s){ if(!s.far) R=Math.max(R,Math.hypot(s.x,s.y)); });
       R*=1.18; var W=520, C=W/2, k=(C-30)/R;
       function X(x){ return C+x*k; } function Y(y){ return C-y*k; }
       var g=[svgEl("rect",{x:0,y:0,width:W,height:W,rx:10,fill:"var(--panel2)"})];
       g.push(svgEl("circle",{cx:C,cy:C,r:14,fill:"#f2c14e",opacity:"0.25"}));
       g.push(svgEl("circle",{cx:C,cy:C,r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")])]));
-      sy.objects.forEach(function(o){ g.push(svgEl("circle",{cx:C,cy:C,r:o.dist*k,fill:"none",stroke:"var(--line)","stroke-dasharray":"4 5"})); });
-      sy.ships.forEach(function(s){ var x=X(s.x), y=Y(s.y);
-        g.push(svgEl("path",{d:"M"+x+" "+(y-7)+" L"+(x+6)+" "+(y+5)+" L"+(x-6)+" "+(y+5)+" Z",fill:"var(--s2)",stroke:"var(--panel)","stroke-width":"2"},
-          [svgEl("title",{},[s.model+(s.near? " · "+L("рядом: ")+s.near : "")])])); });
+      // объекты космоса статичны — орбит не рисуем; спутник показываем рядом со своей планетой
+      var own={}; sy.objects.forEach(function(o){ if(o.kind==="planet") own[o.name]=1; });
+      var parents={}; sy.objects.forEach(function(o){ if(o.parent && !own[o.parent.name]) parents[o.parent.name]=o.parent; });
+      Object.keys(parents).forEach(function(nm){ var p=parents[nm], x=X(p.x), y=Y(p.y), right=x<W-140;
+        g.push(svgEl("circle",{cx:x,cy:y,r:7,fill:"var(--mut)",opacity:"0.55"},[svgEl("title",{},[p.name+" ("+L("планета")+")"])]));
+        g.push(svgEl("text",{x:right? x+11 : x-11, y:y-10, "text-anchor":right?"start":"end","font-size":"12",fill:"var(--mut)"},[p.name])); });
+      var shipG=[];     // корабли — поверх планет
+      sy.ships.forEach(function(s){
+        var x=X(s.x), y=Y(s.y), tip=s.model+" #"+s.id+(s.near? " · "+L("рядом: ")+s.near : "")+(s.moving? " · "+L("в движении") : "");
+        if(s.far){           // за пределами схемы — стрелка на краю в сторону корабля
+          var a=Math.atan2(-(s.y), s.x), ex=C+Math.cos(a)*(C-16), ey=C+Math.sin(a)*(C-16), ca=Math.cos(a), sa=Math.sin(a);
+          shipG.push(svgEl("path",{d:"M"+(ex+ca*9)+" "+(ey+sa*9)+" L"+(ex-ca*6-sa*7)+" "+(ey-sa*6+ca*7)+" L"+(ex-ca*6+sa*7)+" "+(ey-sa*6-ca*7)+" Z",
+            fill:"var(--s2)",stroke:"var(--panel)","stroke-width":"2"},[svgEl("title",{},[tip+" · "+L("в пути, далеко от звезды")])]));
+          var lx=ex-ca*14, ly=ey-sa*14;
+          shipG.push(svgEl("text",{x:lx,y:ly+4,"text-anchor":ca>0.3?"end":ca<-0.3?"start":"middle","font-size":"12",fill:"var(--fg)"},[s.model+" · "+L("в пути")]));
+          return; }
+        shipG.push(svgEl("path",{d:"M"+x+" "+(y-7)+" L"+(x+6)+" "+(y+5)+" L"+(x-6)+" "+(y+5)+" Z",fill:"var(--s2)",stroke:"var(--panel)","stroke-width":"2"},
+          [svgEl("title",{},[tip])]));
+        shipG.push(svgEl("text",{x:x-9,y:y+17,"text-anchor":"end","font-size":"12",fill:"var(--s2)"},[s.model])); });
       sy.objects.forEach(function(o){ var x=X(o.x), y=Y(o.y), r=o.kind==="planet"?8:o.kind==="satellite"?6:5;
+        if(o.parent){        // 100 ед. на схеме не видно — спутник на кружке-орбите 22 px вокруг своей планеты, в реальную сторону
+          var px=X(o.parent.x), py=Y(o.parent.y), dx=o.x-o.parent.x, dy=-(o.y-o.parent.y), dl=Math.hypot(dx,dy)||1;
+          x=px+dx/dl*22; y=py+dy/dl*22;
+          g.push(svgEl("line",{x1:px,y1:py,x2:x,y2:y,stroke:"var(--mut)","stroke-width":"1",opacity:"0.6"})); }
         g.push(svgEl("circle",{cx:x,cy:y,r:r,fill:"var(--s1)",stroke:"var(--panel)","stroke-width":"2"},
           [svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+L("участков: ")+o.claims])]));
         var right=x<W-120;
         g.push(svgEl("text",{x:right? x+r+5 : x-r-5, y:y+4, "text-anchor":right?"start":"end","font-size":"13",fill:"var(--fg)"},[o.name+" · "+o.claims])); });
+      g=g.concat(shipG);
       var svg=svgEl("svg",{viewBox:"0 0 "+W+" "+W,style:"width:100%;max-width:520px;height:auto;display:block"},g);
       var dot=function(css){ return el("span",{style:"display:inline-block;margin-right:6px;"+css}); };
       var legend=el("div",{class:"row small",style:"gap:14px;margin:8px 0"},[
         el("span",{},[dot("width:10px;height:10px;border-radius:50%;background:#f2c14e"),L("звезда")]),
         el("span",{},[dot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои планеты (число — участков)")]),
         sy.ships.length? el("span",{},[dot("width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid var(--s2)"),L("мои корабли")]) : null]);
-      var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("От звезды")],sy.objects,function(o){ return [o.name, L(o.kind_ru), String(o.claims), num(o.dist)+L(" ед.")]; });
+      var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("От звезды")],sy.objects,function(o){
+        return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""), String(o.claims), num(o.dist)+L(" ед.")]; });
       kids.push(el("div",{style:"margin-bottom:12px"},[
         el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система #")+sy.star])]),
         el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[el("div",{style:"flex:1;min-width:260px;max-width:520px"},[svg,legend]),
-          el("div",{style:"flex:1;min-width:240px"},[tbl, sy.far_ships? el("div",{class:"muted small",style:"margin-top:6px"},[L("Ещё кораблей в пути вдали от звезды: ")+sy.far_ships]) : null])])]));
+          el("div",{style:"flex:1;min-width:240px"},[sy.objects.length? tbl : el("div",{class:"muted small"},[L("В этой системе у вас нет участков — только корабли.")])])])]));
     });
     if(d.unknown.length) kids.push(el("div",{class:"muted small"},[L("Участки в других системах (без схемы): ")+d.unknown.map(function(u){ return L("карта ")+u.map+" · "+u.claims; }).join(", ")]));
-    box.appendChild(card(L("Мои планеты в космосе"),kids));
+    box.appendChild(card(L("Космос: мои планеты и корабли"),kids));
   }).catch(function(e){ box.innerHTML=""; box.appendChild(errBox(e)); });
 }
 
