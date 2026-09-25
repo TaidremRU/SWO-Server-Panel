@@ -48,6 +48,25 @@ except Exception:  # noqa: BLE001
     mapdt = None
 
 _MACHINE_NAMES = ("not", "furnace", "crusher", "extractor", "distiller", "press")
+
+# Процесс игры-сервера: не запущен — сервер оффлайн, все игроки оффлайн (analytics.txt при остановке
+# оставляет «висящие» сессии). Имя exe выставляет webui из config.json (game_exe).
+GAME_EXE = "sigmaworld.exe"
+_GAME_RUN = [0.0, True]
+
+
+def game_running():
+    """Запущен ли процесс игры (кэш 10 с). Без psutil — считаем запущенным (ничего не ломаем)."""
+    now = time.time()
+    if now - _GAME_RUN[0] < 10:
+        return _GAME_RUN[1]
+    try:
+        import psutil
+        run = any((p.info.get("name") or "").lower() == GAME_EXE for p in psutil.process_iter(["name"]))
+    except Exception:  # noqa: BLE001
+        run = True
+    _GAME_RUN[0], _GAME_RUN[1] = now, run
+    return run
 _MAPDT_CACHE = {}       # path -> (mtime, summary)
 _MAPDT_FIND_CACHE = {}  # (path, frozenset(want)) -> (mtime, result)
 
@@ -1268,6 +1287,9 @@ def _resolve_item_query(world_dir, query):
     s = str(query or "").strip()
     if not s:
         return set(), []
+    m0 = re.search(r"#(\d+)\s*$", s)
+    if m0 and int(m0.group(1)) in by_id:
+        s = m0.group(1)
     if s.isdigit() and int(s) in by_id:
         i = int(s)
         return {i}, [{"id": i, "name": by_id[i].get("name")}]
@@ -2740,6 +2762,9 @@ def _resolve_targets(cfg, spec):
     for tok in re.split(r"[\s,;]+", str(spec or "").strip()):
         if not tok:
             continue
+        if tok.lower() in ("all", "*", "все"):
+            out.update(load_user_list(world_dir).keys())
+            continue
         if tok.startswith("clan:"):
             try:
                 cid = int(tok[5:])
@@ -2771,8 +2796,8 @@ def mass_give(cfg, spec, item, count):
         return {"ok": False, "error": err}
     if not uids:
         return {"ok": False, "error": "список игроков пуст"}
-    if len(uids) > 500:
-        return {"ok": False, "error": "слишком много игроков (%d > 500)" % len(uids)}
+    if len(uids) > 5000:
+        return {"ok": False, "error": "слишком много игроков (%d > 5000)" % len(uids)}
     names = load_user_list(find_world_dir(cfg))
     res = []
     for u in uids:
@@ -2783,16 +2808,73 @@ def mass_give(cfg, spec, item, count):
 
 
 def clan_give_tech(cfg, clan_id, techs):
-    uids, err = _resolve_targets(cfg, "clan:%s" % clan_id)
-    if err:
+    """Техи клану: клановые (tech.json isClan) — в список клана ``clans.json → tech`` (только при
+    остановленной игре: кланы игра держит в памяти и перезапишет файл); обычные — каждому
+    участнику в личный techList (оффлайн-игрокам)."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    tj = {it["id"]: it for it in (_read_json(os.path.join(wd, "Data", "tech.json")) or {}).get("items", []) if "id" in it}
+    reqs = [x.strip() for x in re.split(r"[\s,]+", str(techs or "")) if x.strip()]
+    if not reqs:
+        return {"ok": False, "error": "не указаны техи"}
+    bad = [x for x in reqs if x not in tj]
+    if bad:
+        return {"ok": False, "error": "нет таких техов: %s" % ", ".join(bad[:10])}
+    clan_t = [x for x in reqs if tj[x].get("isClan")]
+    pers_t = [x for x in reqs if not tj[x].get("isClan")]
+    out = {"ok": True, "done": 0, "total": 0, "results": [], "clan_added": [], "clan_error": None}
+    if clan_t:
+        r = clan_add_tech(cfg, clan_id, clan_t)
+        if r.get("ok"):
+            out["clan_added"] = r.get("added") or []
+            out["backup"] = r.get("backup")
+        else:
+            out["clan_error"] = r.get("error")
+            if not pers_t:
+                return {"ok": False, "error": r.get("error")}
+    if pers_t:
+        uids, err = _resolve_targets(cfg, "clan:%s" % clan_id)
+        if err:
+            return {"ok": False, "error": err}
+        names = load_user_list(wd)
+        for u in uids:
+            r = player_add_tech(cfg, u, " ".join(pers_t))
+            out["results"].append({"id": u, "name": names.get(u) or ("id %s" % u), "ok": bool(r.get("ok")),
+                                   "error": r.get("error"), "added": r.get("added")})
+        out["done"] = sum(1 for r in out["results"] if r["ok"])
+        out["total"] = len(out["results"])
+    return out
+
+
+def clan_add_tech(cfg, clan_id, techs):
+    """Добавить клановые технологии в ``Data\\game\\clans.json`` (бэкап перед записью). Только
+    когда игра не запущена — иначе она перезапишет файл своим состоянием из памяти."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    if game_running():
+        return {"ok": False, "error": "игра запущена — клановые техи можно выдать только при остановленном сервере"}
+    path = os.path.join(wd, "Data", "game", "clans.json")
+    try:
+        cid = int(clan_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "неверный клан"}
+    mt = os.path.getmtime(path)
+    raw = _read_json(path) or {}
+    c = next((x for x in raw.get("clans") or [] if x.get("id") == cid), None)
+    if not c:
+        return {"ok": False, "error": "нет клана %s" % cid}
+    cur = c.setdefault("tech", [])
+    added = [t for t in techs if t not in cur]
+    cur.extend(added)
+    if game_running():
+        return {"ok": False, "error": "игра запустилась — запись отменена"}
+    bak = _game_edit_backup(cfg, path)
+    ok, err = _write_json_compact(path, raw, mt)
+    if not ok:
         return {"ok": False, "error": err}
-    names = load_user_list(find_world_dir(cfg))
-    res = []
-    for u in uids:
-        r = player_add_tech(cfg, u, techs)
-        res.append({"id": u, "name": names.get(u) or ("id %s" % u), "ok": bool(r.get("ok")),
-                    "error": r.get("error"), "added": r.get("added")})
-    return {"ok": True, "done": sum(1 for r in res if r["ok"]), "total": len(res), "results": res}
+    return {"ok": True, "added": added, "backup": os.path.basename(os.path.dirname(bak))}
 
 
 def player_backups(cfg, uid):
@@ -3756,7 +3838,7 @@ def item_catalog(cfg):
     if not world_dir:
         return {"ok": False, "error": "каталог мира не найден"}
     by_id, _ = _items_full(world_dir)
-    out = [{"id": i, "name": d.get("name"), "stack": d.get("stack", 1)}
+    out = [{"id": i, "name": d.get("name"), "label": item_label(d.get("name")) or d.get("name"), "stack": d.get("stack", 1)}
            for i, d in by_id.items()]
     out.sort(key=lambda x: (x["name"] or ""))
     return {"ok": True, "items": out}
@@ -3765,6 +3847,9 @@ def item_catalog(cfg):
 def _resolve_item(world_dir, item):
     by_id, by_name = _items_full(world_dir)
     s = str(item).strip()
+    m = re.search(r"#(\d+)\s*$", s)            # «Уголь · coal #12» из списка выбора
+    if m and int(m.group(1)) in by_id:
+        return int(m.group(1)), by_id[int(m.group(1))]
     if s.isdigit() and int(s) in by_id:
         return int(s), by_id[int(s)]
     if s in by_name:
@@ -3928,6 +4013,19 @@ def buff_notepad_save(path, raw):
     return {"ok": True, "count": len(out["items"])}
 
 
+def buff_lib_as_notepad(cfg):
+    """Библиотека рецептов микстур самого сервера (``Data\\product\\buff_lib.json``: все смешивания
+    всех игроков, игра ведёт сама) в формате buff_notepad — ручная загрузка файла не нужна."""
+    wd = find_world_dir(cfg)
+    lib = _read_json(os.path.join(wd, "Data", "product", "buff_lib.json")) if wd else None
+    if not lib:
+        return None
+    return {"items": [{"items": r.get("Materials") or [], "time": r.get("time"), "buff": r.get("Buffs") or []}
+                      for r in lib.get("items") or []],
+            "saved_at": datetime.fromtimestamp(os.path.getmtime(os.path.join(wd, "Data", "product", "buff_lib.json"))).strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "server"}
+
+
 def buff_notepad_read(cfg, path):
     """Загруженный buff_notepad с именами ингредиентов (из ``Data\\items.json``,
     с RU-подписью через ``_buff_material_label`` где есть) и списком-индексом
@@ -3935,7 +4033,7 @@ def buff_notepad_read(cfg, path):
     Названия эффектов (``buff[].state``) — см. ``_BUFF_TYPE_NAMES_RU``
     (``ZData.BuffType``, расшифрован Ghidra-дампом 2026-09-17/18, см.
     [[sigma-buff-recipe-algorithm]]; это ОТДЕЛЬНЫЙ enum от статов игрока)."""
-    d = _read_json(path) or {}
+    d = buff_lib_as_notepad(cfg) or _read_json(path) or {}      # сначала серверная библиотека
     recs = d.get("items") or []
     if not recs:
         return {"ok": True, "count": 0, "records": [], "by_item": [], "saved_at": d.get("saved_at")}
@@ -3961,7 +4059,7 @@ def buff_notepad_read(cfg, path):
             slot = by_item.setdefault(i, {"id": i, "name": iname(i), "count": 0})
             slot["count"] += 1
     by_item_list = sorted(by_item.values(), key=lambda x: x["name"].lower())
-    return {"ok": True, "count": len(records), "records": records,
+    return {"ok": True, "source": d.get("source") or "upload", "count": len(records), "records": records,
             "by_item": by_item_list, "saved_at": d.get("saved_at")}
 
 
@@ -4740,6 +4838,11 @@ def parse_analytics(path):
             if u["online"] and u["last_epoch"] and u["last_epoch"] < cutoff:
                 u["online"] = False
                 u["stale_online"] = True
+    if not game_running():                   # игра остановлена — никого нет в сети
+        for u in per.values():
+            if u.get("online"):
+                u["online"] = False
+                u["server_off"] = True
     return per, events
 
 
@@ -5209,6 +5312,166 @@ def build_space_index(cfg, path, pause=0.02, stop=None):
     if parsed or removed or not os.path.exists(path):
         _save_json(path, {"world": os.path.basename(wd), "updated": time.time(), "stars": stars})
     return {"ok": True, "stars": len(stars), "parsed": parsed, "removed": len(removed)}
+
+
+def map_labels(cfg, index_path=None):
+    """{id карты: {name, kind, star, star_name}} для всех map*.dt: id карты = сквозной id объекта
+    космоса; система ищется по индексу space_index.json (панель игроков строит его раз в час), без
+    индекса — система 1 и последняя добавленная. 0 = космос."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {}
+    try:
+        ids = sorted(int(m.group(1)) for f in os.listdir(os.path.join(wd, "Data", "maps"))
+                     for m in [re.match(r"map(\d+)\.dt$", f)] if m)
+    except OSError:
+        ids = []
+    rng = []
+    idx = _read_json(index_path) if index_path and os.path.exists(index_path) else None
+    if idx and idx.get("stars"):
+        rng = sorted((v["min"], v["max"], int(k), v.get("name")) for k, v in idx["stars"].items() if v.get("min") is not None)
+    else:
+        sg = _read_json(os.path.join(wd, "Data", "world", "space_game.json")) or {}
+        for st in {1, int(sg.get("curStarId") or 1)}:
+            ob = space_objects(cfg, st).get("objects") or []
+            if ob:
+                rng.append((min(o["id"] for o in ob), max(o["id"] for o in ob), st, star_name(cfg, st)))
+        rng.sort()
+    import bisect
+    objs_by_star, out = {}, {0: {"name": "Космос", "kind": "space"}}
+    for mid in ids:
+        if mid == 0:
+            continue
+        i = bisect.bisect_right(rng, (mid, float("inf"), 0, "")) - 1
+        if i < 0 or not (rng[i][0] <= mid <= rng[i][1]):
+            continue
+        st = rng[i][2]
+        if st not in objs_by_star:
+            objs_by_star[st] = {o["id"]: o for o in space_objects(cfg, st).get("objects") or []}
+        o = objs_by_star[st].get(mid)
+        if o:
+            out[mid] = {"name": o["name"], "kind": _SPACE_KIND_RU.get(o["kind"], o["kind"]), "star": st,
+                        "star_name": rng[i][3] or ("#%s" % st)}
+    return out
+
+
+_CLAIMS_CACHE = {}
+
+
+def claims_by_map(cfg, ttl=120):
+    """{id карты: {uid: число участков}} по userTerritories всех игроков (кэш ``ttl`` с)."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {}
+    hit = _CLAIMS_CACHE.get(wd)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    out = {}
+    d = os.path.join(wd, "Data", "users")
+    try:
+        files = os.listdir(d)
+    except OSError:
+        files = []
+    for f in files:
+        m = re.match(r"user(\d+)\.json$", f)
+        if not m:
+            continue
+        raw = _read_json(os.path.join(d, f)) or {}
+        uid = int(m.group(1))
+        for t in raw.get("userTerritories") or []:
+            mp = t.get("mapId")
+            if mp:
+                cur = out.setdefault(mp, {})
+                cur[uid] = cur.get(uid, 0) + 1
+    _CLAIMS_CACHE[wd] = (time.time(), out)
+    return out
+
+
+def _index_ranges(index_path):
+    idx = _read_json(index_path) if index_path and os.path.exists(index_path) else None
+    stars = {int(k): v for k, v in ((idx or {}).get("stars") or {}).items()}
+    rng = sorted((v["min"], v["max"], k) for k, v in stars.items() if v.get("min") is not None)
+    return stars, rng
+
+
+def _star_of_id(rng, obj_id):
+    import bisect
+    i = bisect.bisect_right(rng, (obj_id, float("inf"), 0)) - 1
+    return rng[i][2] if i >= 0 and rng[i][0] <= obj_id <= rng[i][1] else None
+
+
+def admin_space_galaxy(cfg, index_path):
+    """Галактика для админки: все системы (позиция, имя, кластер) + по каждой — участков, владельцев,
+    кораблей. Нужен индекс space_index.json (строит панель игроков раз в час)."""
+    stars, rng = _index_ranges(index_path)
+    if not stars:
+        return {"ok": False, "error": "индекс систем ещё не построен (панель игроков строит его в фоне раз в час)"}
+    names = load_user_list(find_world_dir(cfg))
+    per = {}
+    for mp, owners in claims_by_map(cfg).items():
+        st = _star_of_id(rng, mp)
+        if st is None:
+            continue
+        e = per.setdefault(st, {"claims": 0, "owners": set(), "ships": 0})
+        e["claims"] += sum(owners.values())
+        e["owners"].update(owners)
+    su = space_units(cfg)
+    for sh in su.get("ships") or [] if su.get("ok") else []:
+        per.setdefault(sh.get("star_id") or 1, {"claims": 0, "owners": set(), "ships": 0})["ships"] += 1
+    rows = []
+    for k, v in sorted(stars.items()):
+        if v.get("x") is None:
+            continue
+        e = per.get(k) or {}
+        rows.append([k, v.get("x"), v.get("y"), v.get("name") or "", v.get("cluster"), e.get("claims", 0),
+                     len(e.get("owners") or ()), e.get("ships", 0), v.get("n", 0)])
+    top = sorted(((k, e) for k, e in per.items()), key=lambda x: -x[1]["claims"])[:30]
+    return {"ok": True, "stars": rows, "columns": ["id", "x", "y", "name", "cluster", "claims", "owners", "ships", "objects"],
+            "busiest": [{"star": k, "name": (stars.get(k) or {}).get("name") or "#%s" % k, "claims": e["claims"],
+                         "owners": [names.get(u) or "id %s" % u for u in list(e["owners"])[:8]], "ships": e["ships"]} for k, e in top],
+            "index_updated": (_read_json(index_path) or {}).get("updated")}
+
+
+def admin_space_system(cfg, index_path, star_id):
+    """Одна система для админки: все объекты (id, имя, тип, x, y) с участками и владельцами, все
+    корабли с владельцами и статусом (на земле / у объекта / в полёте / в открытом космосе),
+    метеориты, станции."""
+    wd = find_world_dir(cfg)
+    if not wd:
+        return {"ok": False, "error": "каталог мира не найден"}
+    try:
+        star_id = int(star_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad star"}
+    so = space_objects(cfg, star_id)
+    if not so.get("ok"):
+        return so
+    names = load_user_list(wd)
+    claims = claims_by_map(cfg)
+    stars, _rng = _index_ranges(index_path)
+    meta = stars.get(star_id) or {}
+    objs = []
+    for o in so.get("objects") or []:
+        own = claims.get(o["id"]) or {}
+        objs.append({"id": o["id"], "name": o["name"], "kind": o["kind"], "x": o["x"], "y": o["y"],
+                     "claims": sum(own.values()),
+                     "owners": sorted(({"id": u, "name": names.get(u) or "id %s" % u, "n": n} for u, n in own.items()),
+                                      key=lambda z: -z["n"])})
+    su = space_units(cfg, star_id)
+    ships, meteorites = [], []
+    if su.get("ok"):
+        for sh in su.get("ships") or []:
+            near, dist = nearest_space_object(cfg, star_id, sh["x"], sh["y"])
+            st = "flight" if sh.get("moving") else ("landed" if near and dist is not None and dist <= 300 else
+                                                    ("parked" if near and dist is not None and dist <= 2000 else "open"))
+            ships.append({"id": sh["id"], "owner": sh.get("user_id"), "owner_name": sh.get("name"), "model": sh.get("box_name"),
+                          "x": sh["x"], "y": sh["y"], "status": st, "near": near, "health": sh.get("health"),
+                          "aboard": sh.get("aboard"), "cargo_items": sh.get("cargo_items")})
+        meteorites = [[m["x"], m["y"], m.get("cargo_items", 0)] for m in su.get("meteorites") or []]
+    stations = [st for st in (space_fleet(cfg).get("stations") or []) if (st.get("star") or 1) == star_id]
+    return {"ok": True, "star": star_id, "name": meta.get("name") or star_name(cfg, star_id), "cluster": meta.get("cluster"),
+            "radius": meta.get("radius"), "objects": objs, "ships": ships, "meteorites": meteorites,
+            "meteorite_count": su.get("meteorite_count", 0) if su.get("ok") else 0, "stations": stations}
 
 
 def _save_json(path, d):
