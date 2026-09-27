@@ -237,6 +237,35 @@ def load_clans(world_dir):
     return out
 
 
+_LOG_CACHE = {}  # (path, ключ разбора) -> ((mtime, size), результат)
+
+
+def _log_parsed(path, key, build):
+    """Разобрать журнал один раз на все запросы, пока файл не изменился:
+    ``build(текст)`` -> результат (обычно {uid: [...]}). Журналы игры дописываются,
+    но разбор всего файла под каждого игрока стоил секунды на запрос."""
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime, st.st_size)
+    except OSError:
+        sig = None
+    hit = _LOG_CACHE.get((path, key))
+    if hit and hit[0] == sig:
+        return hit[1]
+    res = build(_read_text(path) if sig else "")
+    _LOG_CACHE[(path, key)] = (sig, res)
+    return res
+
+
+def _sessions_by_uid(text):
+    out = {}
+    for ln in text.splitlines():
+        m = _LINE_RX.match(ln)
+        if m:
+            out.setdefault(int(m.group(3)), []).append((m.group(1), m.group(2), m.group(4)))
+    return out
+
+
 def _user_sessions(analytics_path, uid):
     """Полная история сессий одного игрока из analytics.txt.
 
@@ -249,13 +278,7 @@ def _user_sessions(analytics_path, uid):
     first_seen = None
     last_enter = None
     online = False
-    for ln in _read_text(analytics_path).splitlines():
-        m = _LINE_RX.match(ln)
-        if not m:
-            continue
-        ts, kind, u, extra = m.group(1), m.group(2), int(m.group(3)), m.group(4)
-        if u != uid:
-            continue
+    for ts, kind, extra in _log_parsed(analytics_path, "sessions", _sessions_by_uid).get(uid, ()):
         if first_seen is None:
             first_seen = ts
         if kind == "enter":
@@ -466,19 +489,19 @@ def player_chat(cfg, uid, limit=60):
     return {"ok": True, "nick": nick, "count": len(msgs), "messages": msgs[-limit:][::-1]}
 
 
+def _rx_rows(rx, search=False):
+    """build для _log_parsed: все совпадения ``rx`` в файле -> [groups]."""
+    f = rx.search if search else rx.match
+    return lambda text: [m.groups() for m in map(f, text.splitlines()) if m]
+
+
 def _activity(world_dir, uid, nick):
     logs = os.path.join(world_dir, "Logs")
-    deaths = []
-    for ln in _read_text(os.path.join(logs, "dead_user.txt")).splitlines():
-        m = _DEAD_RX.match(ln)
-        if m and m.group(2) == nick:
-            deaths.append({"ts": m.group(1), "event": m.group(3)})
+    deaths = [{"ts": g[0], "event": g[2]}
+              for g in _log_parsed(os.path.join(logs, "dead_user.txt"), "dead", _rx_rows(_DEAD_RX)) if g[1] == nick]
     roles = []
-    for ln in _read_text(os.path.join(logs, "user_role.txt")).splitlines():
-        m = _ROLE_RX.search(ln)
-        if not m:
-            continue
-        tgt, tgt_nm, by, by_nm, rname = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4), m.group(5)
+    for g in _log_parsed(os.path.join(logs, "user_role.txt"), "role", _rx_rows(_ROLE_RX, True)):
+        tgt, tgt_nm, by, by_nm, rname = int(g[0]), g[1], int(g[2]), g[3], g[4]
         if tgt == uid or by == uid:
             roles.append({"target_id": tgt, "target": tgt_nm, "by_id": by, "by": by_nm,
                           "role": rname, "as_target": tgt == uid})
@@ -486,19 +509,15 @@ def _activity(world_dir, uid, nick):
     try:
         for f in os.listdir(logs):
             if f.startswith("delete_land") and f.endswith(".txt"):
-                for ln in _read_text(os.path.join(logs, f)).splitlines():
-                    m = _LAND_RX.match(ln)
-                    if m and int(m.group(2)) == uid:
-                        lands.append({"ts": m.group(1), "map": int(m.group(3)),
-                                      "x": int(m.group(4)), "y": int(m.group(5))})
+                for g in _log_parsed(os.path.join(logs, f), "land", _rx_rows(_LAND_RX)):
+                    if int(g[1]) == uid:
+                        lands.append({"ts": g[0], "map": int(g[2]), "x": int(g[3]), "y": int(g[4])})
     except OSError:
         pass
     lands.sort(key=lambda x: _to_epoch(x["ts"]))
-    rewards = []
-    for ln in _read_text(os.path.join(logs, "reward_order.txt")).splitlines():
-        m = _REWARD_RX.match(ln)
-        if m and int(m.group(2)) == uid:
-            rewards.append({"ts": m.group(1), "reward": int(m.group(3))})
+    rewards = [{"ts": g[0], "reward": int(g[2])}
+               for g in _log_parsed(os.path.join(logs, "reward_order.txt"), "reward", _rx_rows(_REWARD_RX))
+               if int(g[1]) == uid]
     return {
         "deaths": deaths[-20:][::-1],
         "role_grants": roles,
@@ -5736,7 +5755,7 @@ def space_objects(cfg, star_id=1):
     else:
         objs = _parse_star_file(path)
         _STAROBJ_CACHE[path] = (mt, objs)
-        if len(_STAROBJ_CACHE) > 8:
+        if len(_STAROBJ_CACHE) > 64:
             _STAROBJ_CACHE.pop(next(iter(_STAROBJ_CACHE)))
     return {"ok": True, "star_id": star_id, "name": star_name(cfg, star_id), "count": len(objs), "objects": objs,
             "note": "разбор бинарного формата без исходника — координаты x,y проверены "

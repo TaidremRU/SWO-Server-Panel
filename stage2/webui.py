@@ -1469,6 +1469,7 @@ class WebUI:
             return self._json(h, {"error": "bad"}, 400)
         pw = self._pw()
         if sub == "where":
+            pw._personal_refresh(uid)       # админке — всегда свежее (игроку отдаётся кэш до 5 мин)
             d = pw._api_where(uid, q)
         elif sub == "history":
             d = pw._api_history(uid, q)

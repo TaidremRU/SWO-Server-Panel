@@ -66,10 +66,14 @@ SESSION_TTL = 12 * 3600
 REMEMBER_TTL = 30 * 86400    # «Запомнить меня»: токен на 30 дней, на диске — только его хэш
 REMEMBER_RECHECK = 60        # как часто сверять, не сменил ли игрок пароль в игре
 LEADERS_CACHE_SEC = 300
-MAP_IMG_CACHE_SEC = 600    # сырые пиксели карты (без клаймов) — одни на всех, туман накладывается на каждый запрос
 FOG_RADIUS = 20            # клеток: видно вокруг персонажа и вокруг своих участков
 FOG_RGB = (22, 25, 31)
-SAMPLE_SEC = 120           # фоновый цикл: где бывали онлайн-игроки (открытые места карты), прогрев карт
+SAMPLE_SEC = 120           # фоновый цикл: где бывали онлайн-игроки (открытые места карты)
+PREWARM_SEC = 60           # прогрев: заново считаем карты/сундуки/рынок только если игра пересохранила файлы
+PREWARM_SETS_SEC = 600     # как часто пересобирать список карт всех игроков (чтение всех user*.json)
+PERSONAL_SEC = 240         # карточка и «Где лежит» тех, кто заходил в панель, — заранее
+PERSONAL_TTL = 300         # сколько живёт своя карточка/«Где лежит» (дальше — по кнопке «Пересчитать» или фоном)
+REFRESH_EVERY = 30         # кнопка «Пересчитать»: не чаще раза в N с на игрока
 HISTORY_SEC = 3600         # почасовой снимок уровня/рейтинга/техов всех игроков для «Моей истории»
 MARKET_CACHE_SEC = 300
 SERVER_SUMMARY_SEC = 600
@@ -217,6 +221,9 @@ class PlayerWeb:
         self._map_lock = threading.Lock()
         self._map_busy = set()       # карты, которые сейчас перерисовываются в фоне
         self._map_seen = {}          # map -> когда её последний раз смотрели (что держать тёплым)
+        self._file_mt = {}           # ("pix"|"containers", map) -> mtime map<N>.dt, с которого посчитан кэш
+        self._prewarm_sets = (0, set(), set(), set())   # (когда, карты для картинок, карты с участками, системы)
+        self._refresh_at = {}        # uid -> когда жал «Пересчитать»
         self._trade_own = {"terminals": [], "shops": []}   # с id владельцев — наружу только своё
         self._vehicles = None        # наземный/водный транспорт на картах (из того же фонового прохода)
         self._explored_path = os.path.join(base, "playerweb_explored.json")
@@ -253,6 +260,7 @@ class PlayerWeb:
         t.daemon = True
         t.start()
         threading.Thread(target=self._bg_loop, name="pw-bg", daemon=True).start()
+        threading.Thread(target=self._prewarm_loop, name="pw-prewarm", daemon=True).start()
         threading.Thread(target=self._space_index_loop, name="pw-space-index", daemon=True).start()
         logging.info("playerweb: панель игроков на http://%s:%d/", host, port)
         try:
@@ -428,8 +436,8 @@ class PlayerWeb:
     # ------------------------------------------------------------ фоновый цикл
     def _bg_loop(self):
         """Раз в SAMPLE_SEC: блоки 8×8, где стоят онлайн-игроки (туман войны
-        запоминает исследованное), прогрев карт онлайн-игроков; раз в час —
-        снимок уровня/рейтинга/техов для «Моей истории»."""
+        запоминает исследованное), сводка «Сервер»; раз в час — снимок
+        уровня/рейтинга/техов для «Моей истории». Карты греет _prewarm_loop."""
         if self._stop.wait(30):
             return
         last_hist = 0
@@ -439,12 +447,10 @@ class PlayerWeb:
             except ValueError:
                 pass
         while not self._stop.is_set():
-            warm, chest_maps = set(), set()
             try:
                 wd = players.find_world_dir(self.cfg)
                 if wd:
-                    warm = self._sample_explored(wd)
-                    chest_maps = self._panel_territory_maps(wd)
+                    self._sample_explored(wd)
                     if time.time() - last_hist >= HISTORY_SEC:
                         self._history_snapshot(wd)
                         last_hist = time.time()
@@ -455,32 +461,163 @@ class PlayerWeb:
                     self._server_refresh()
                 except Exception:  # noqa: BLE001
                     logging.exception("playerweb: сводка сервера")
-            now = time.time()
-            warm |= {m for m, ts in self._map_seen.items() if now - ts < 3600}
-            for mp in sorted(warm):
-                if self._stop.is_set():
-                    return
-                hit = self._map_img.get(mp)
-                if not hit or now - hit[0] >= MAP_IMG_CACHE_SEC - SAMPLE_SEC:
-                    self._map_refresh(mp)
-            for mp in sorted(chest_maps):       # «Мои сундуки» — чтобы не ждать разбора карты
-                if self._stop.is_set():
-                    return
-                hit = self._cache.get(("containers", mp))
-                if not hit or time.time() - hit[0] >= self.CHESTS_TTL - SAMPLE_SEC:
-                    self._containers_refresh(wd, mp)
+            # карты и сундуки держит тёплыми pw-prewarm (_prewarm_loop) — для всех карт игроков
             if self._stop.wait(SAMPLE_SEC):
                 return
 
-    def _panel_territory_maps(self, wd):
-        """Карты, где есть участки у игроков, вошедших в панель (их сундуки держим тёплыми)."""
+    # ------------------------------------------------------------ прогрев
+    def _map_file_mt(self, wd, mp):
+        try:
+            return os.path.getmtime(os.path.join(wd, "Data", "maps", "map%d.dt" % mp))
+        except OSError:
+            return None
+
+    def _stale(self, kind, wd, mp):
+        """Кэш карты устарел = игра пересохранила map<N>.dt после того, как мы его посчитали."""
+        return self._file_mt.get((kind, mp)) != self._map_file_mt(wd, mp)
+
+    def _panel_uids(self):
+        """Кто пользуется панелью: открытые сессии + «Запомнить меня» (не истёкшие)."""
         with self._slock:
             uids = {v["uid"] for v in self._sessions.values()}
-        maps = set()
-        for u in uids:
+        now = time.time()
+        uids |= {v.get("uid") for v in self._remember_load().values()
+                 if isinstance(v, dict) and v.get("exp", 0) > now and v.get("uid") is not None}
+        return uids
+
+    def _prewarm_targets(self, wd):
+        """(карты для картинок, карты с участками, звёздные системы с участками) по ВСЕМ игрокам —
+        пересобирается раз в PREWARM_SETS_SEC (чтение всех user*.json)."""
+        t, pix, terr, stars = self._prewarm_sets
+        if time.time() - t < PREWARM_SETS_SEC and pix:
+            return pix, terr, stars
+        pix, terr = set(), set()
+        for u in players.load_user_list(wd):
             raw = players._read_json(players._user_file(wd, u)) or {}
-            maps.update(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId") is not None)
-        return maps
+            mine = {tt.get("mapId") for tt in raw.get("userTerritories") or [] if tt.get("mapId")}
+            terr |= mine
+            pix |= mine
+            if raw.get("mapId"):
+                pix.add(raw["mapId"])
+        with self._elock:
+            pix |= {int(k) for v in self._explored.values() for k, pts in (v or {}).items() if pts}
+        pix.discard(0)
+        stars = {st for st in (self._star_of(mp) for mp in terr) if st is not None}
+        self._prewarm_sets = (time.time(), pix, terr, stars)
+        return pix, terr, stars
+
+    def _prewarm_once(self, wd, personal=False):
+        """Один проход: всё, что устарело по файлам, — пересчитать. Большие карты — десятки
+        секунд, поэтому по одной, с паузой (процесс панели в пониженном приоритете)."""
+        pix, terr, stars = self._prewarm_targets(wd)
+        for mp in sorted(terr, key=lambda m: m not in self._map_seen):    # сначала то, что смотрят
+            if self._stop.is_set():
+                return
+            if ("containers", mp) not in self._cache or self._stale("containers", wd, mp):
+                self._containers_refresh(wd, mp)
+                self._stop.wait(0.2)
+        for mp in sorted(pix, key=lambda m: m not in self._map_seen):
+            if self._stop.is_set():
+                return
+            if mp not in self._map_img or self._stale("pix", wd, mp):
+                self._map_refresh(mp)
+                self._stop.wait(0.2)
+        for st in sorted(stars):            # «Космос»: разбор большой системы — до десятков секунд
+            if self._stop.is_set():
+                return
+            players.space_objects(self.cfg, st)     # сам кэширует по mtime star<N>.json
+        m = self._market
+        if time.time() - m["ts"] > MARKET_CACHE_SEC and not m["running"]:
+            sig = self._market_sig(wd)
+            if sig != m.get("sig"):
+                m["running"] = True
+                self._market_build()
+        if personal:
+            for u in sorted(self._panel_uids()):
+                if self._stop.is_set():
+                    return
+                self._personal_refresh(u)
+
+    def _market_sig(self, wd):
+        """Подпись входов рынка: терминалы + файлы карт (магазины и транспорт — в map*.dt)."""
+        try:
+            md = os.path.join(wd, "Data", "maps")
+            mts = max((e.stat().st_mtime for e in os.scandir(md) if e.name.endswith(".dt")), default=0)
+        except OSError:
+            mts = 0
+        try:
+            tm = os.path.getmtime(os.path.join(wd, "Data", "game", "terminals.dt2"))
+        except OSError:
+            tm = 0
+        return (mts, tm)
+
+    def _prewarm_loop(self):
+        """Держит общие данные панели тёплыми для всех карт игроков: картинки карт, сундуки,
+        системы космоса, рынок — только когда игра их пересохранила; раз в PERSONAL_SEC —
+        карточка и «Где лежит» тех, кто заходил в панель. Первый проход — несколько минут."""
+        if self._stop.wait(45):
+            return
+        last_personal = 0
+        while not self._stop.is_set():
+            t0 = time.time()
+            try:
+                wd = players.find_world_dir(self.cfg)
+                if wd:
+                    personal = time.time() - last_personal >= PERSONAL_SEC
+                    self._prewarm_once(wd, personal)
+                    if personal:
+                        last_personal = time.time()
+            except Exception:  # noqa: BLE001
+                logging.exception("playerweb: прогрев")
+            dt = time.time() - t0
+            if dt > 30:
+                logging.info("playerweb: прогрев %.0f с", dt)
+            if self._stop.wait(PREWARM_SEC):
+                return
+
+    # ------------------------------------------------------------ своё: карточка и «Где лежит»
+    def _detail(self, uid):
+        return self._cached(("detail", uid), PERSONAL_TTL, lambda: players.player_detail(self.cfg, uid))
+
+    def _personal_refresh(self, uid):
+        """Пересчитать своё (карточка, «Где лежит») и положить в кэш."""
+        for k in (("detail", uid), ("where", uid)):
+            self._cache.pop(k, None)
+        self._detail(uid)
+        self._cached(("where", uid), PERSONAL_TTL, lambda: self._where_all(uid))
+
+    def _api_refresh(self, h, s):
+        """Кнопка «Пересчитать»: своё — сразу; общие карты игрока, если игра их пересохранила, —
+        в фоне; рынок — в фоне, если старше минуты. Не чаще REFRESH_EVERY с на игрока."""
+        uid = s["uid"]
+        now = time.time()
+        wait = REFRESH_EVERY - (now - self._refresh_at.get(uid, 0))
+        if wait > 0:
+            return self._json(h, {"error": "throttled", "retry": int(wait) + 1}, 429)
+        self._refresh_at[uid] = now
+        wd, raw, ids = self._my_map_ids(uid)
+        if not wd:
+            return self._json(h, {"ok": False, "error": "каталог мира не найден"}, 404)
+        self._personal_refresh(uid)
+        terr = {t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId")}
+        todo = [("containers", mp) for mp in sorted(terr) if self._stale("containers", wd, mp)] + \
+               [("pix", mp) for mp in ids if self._stale("pix", wd, mp)]
+
+        def bg():
+            for kind, mp in todo:
+                if kind == "containers":
+                    self._containers_refresh(wd, mp)
+                else:
+                    self._map_refresh(mp)
+            self._cache.pop(("where", uid), None)     # сундуки могли обновиться
+        if todo:
+            threading.Thread(target=bg, name="pw-refresh", daemon=True).start()
+        m = self._market
+        if now - m["ts"] > 60 and not m["running"]:
+            m["running"] = True
+            threading.Thread(target=self._market_build, name="pw-market", daemon=True).start()
+        self._event(h, "refresh", s["nick"], uid=uid, sid=h._sid, d="карт в фоне: %d" % len(todo))
+        return self._json(h, {"ok": True, "pending_maps": len(todo)})
 
     def _sample_explored(self, wd):
         """-> карты онлайн-игроков, у которых открыта панель (их стоит держать
@@ -816,6 +953,8 @@ class PlayerWeb:
                         d.pop(self._thash(tok), None)
                         self._remember_save(d)
                 return self._json(h, {"ok": True}, set_cookie="psid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
+            if route == "refresh" and method == "POST":
+                return self._api_refresh(h, s)
             if method != "GET":
                 return self._json(h, {"error": "unknown"}, 404)
             if route == "server":
@@ -944,7 +1083,7 @@ class PlayerWeb:
     # --------------------------------------------------------------------- api
     def _api_me(self, uid, q):
         """Своя карточка — белым списком из player_detail (без железа/страны/IP)."""
-        d = players.player_detail(self.cfg, uid)
+        d = self._detail(uid)
         if not d.get("ok"):
             return d
         p, a = d.get("profile") or {}, d.get("avatar") or {}
@@ -1154,6 +1293,8 @@ class PlayerWeb:
         """Из trade_report — только то, что и так видно в игре у терминала/магазина:
         что продают, за что, продавец и его клан, где стоит магазин. Без выручки,
         склада терминала, простоя и онлайна продавцов."""
+        wd0 = players.find_world_dir(self.cfg)
+        sig = self._market_sig(wd0) if wd0 else None
         try:
             d = players.trade_report(self.cfg)
             if d.get("ok"):
@@ -1190,7 +1331,7 @@ class PlayerWeb:
                                "where": "%s · %d, %d" % ("Космос" if sh["map"] == 0 else names.get(sh["map"]) or "карта %s" % sh["map"], sh["x"], sh["y"]),
                                "map": sh["map"], "x": sh["x"], "y": sh["y"], "storage": it(sh.get("storage"))}
                               for sh in d.get("shops") or []]}
-                self._market.update(data={"ok": True, "offers": offers}, ts=time.time())
+                self._market.update(data={"ok": True, "offers": offers}, ts=time.time(), sig=sig)
             else:
                 logging.warning("playerweb: рынок — %s", d.get("error"))
         except Exception:  # noqa: BLE001
@@ -1327,7 +1468,7 @@ class PlayerWeb:
         """Всё моё имущество одним списком: с собой, склад, сундуки на моих участках,
         склад терминала и магазинов, выставленное на продажу, трюмы моих кораблей.
         ?q= — фильтр по названию. Только своё."""
-        full = self._cached(("where", uid), 60, lambda: self._where_all(uid))
+        full = self._cached(("where", uid), PERSONAL_TTL, lambda: self._where_all(uid))
         if not full.get("ok"):
             return full
         places = [dict(p, items=list(p["items"])) for p in full["places"]]
@@ -1364,7 +1505,7 @@ class PlayerWeb:
             if its:
                 places.append({"kind": kind, "where": where, "items": its})
 
-        det = players.player_detail(self.cfg, uid)
+        det = self._detail(uid)
         a = (det.get("avatar") or {}) if det.get("ok") else {}
         for key, kind, title in (("carry", "carry", "С собой"), ("stash", "stash", "Склад персонажа")):
             add(kind, title, [(r.get("name"), players.item_label(r.get("name")), r.get("count")) for r in a.get(key) or []])
@@ -1588,8 +1729,10 @@ class PlayerWeb:
         m = self._market
         now = time.time()
         if now - m["ts"] > MARKET_CACHE_SEC and not m["running"]:
-            m["running"] = True
-            threading.Thread(target=self._market_build, name="pw-market", daemon=True).start()
+            wd = players.find_world_dir(self.cfg)
+            if not m["data"] or (wd and self._market_sig(wd) != m.get("sig")):    # ничего не менялось — не пересобираем
+                m["running"] = True
+                threading.Thread(target=self._market_build, name="pw-market", daemon=True).start()
         if not m["data"]:
             return {"ok": True, "pending": True}
         out = []
@@ -1813,8 +1956,6 @@ class PlayerWeb:
         return d
 
     # ------------------------------------------------------------------ сундуки
-    CHESTS_TTL = 300
-
     def _containers_refresh(self, wd, mp):
         """Разобрать хранилища карты (map<N>.dt — секунды, на больших картах до ~30 с);
         не больше одного разбора на карту одновременно."""
@@ -1825,9 +1966,11 @@ class PlayerWeb:
             self._map_busy.add(key)
         try:
             path = os.path.join(wd, "Data", "maps", "map%d.dt" % mp)
+            mt = self._map_file_mt(wd, mp)
             d = players.mapdt.list_containers(path, world_dir=wd, item_names=players.load_items(wd), cap=10 ** 6, min_items=1)
             if d.get("ok"):
                 self._cache[key] = (time.time(), d)
+                self._file_mt[("containers", mp)] = mt
             return d
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: хранилища карты %s", mp)
@@ -1843,7 +1986,7 @@ class PlayerWeb:
         key = ("containers", mp)
         hit = self._cache.get(key)
         if hit:
-            if time.time() - hit[0] >= self.CHESTS_TTL and key not in self._map_busy:
+            if key not in self._map_busy and self._stale("containers", wd, mp):
                 threading.Thread(target=self._containers_refresh, args=(wd, mp), daemon=True).start()
             return hit[1]
         for _ in range(900):            # кто-то уже разбирает эту карту — дождаться
@@ -1972,9 +2115,12 @@ class PlayerWeb:
                 return None
             self._map_busy.add(mp)
         try:
+            wd = players.find_world_dir(self.cfg)
+            mt = self._map_file_mt(wd, mp) if wd else None     # до разбора: сохранение во время него — пересчёт позже
             d = players.map_pixels(self.cfg, mp)
             if d.get("ok"):
                 self._map_img[mp] = (time.time(), d)
+                self._file_mt[("pix", mp)] = mt
             return d
         except Exception:  # noqa: BLE001
             logging.exception("playerweb: карта %s", mp)
@@ -1988,7 +2134,8 @@ class PlayerWeb:
         перерисовка идёт в фоне; ждать приходится только самый первый раз."""
         hit = self._map_img.get(mp)
         if hit:
-            if time.time() - hit[0] >= MAP_IMG_CACHE_SEC and mp not in self._map_busy:
+            wd = players.find_world_dir(self.cfg)
+            if wd and mp not in self._map_busy and self._stale("pix", wd, mp):
                 threading.Thread(target=self._map_refresh, args=(mp,), daemon=True).start()
             return hit[1]
         for _ in range(600):         # кто-то уже рисует её — дождаться
@@ -2459,6 +2606,11 @@ var EN_DICT={
   "Раскладка до сырья":"Raw material breakdown",
   "Посчитать":"Calculate",
   "Калькулятор крафта":"Craft calculator",
+  "Пересчитать":"Recalculate",
+  "Пересчитать данные этой вкладки":"Recalculate this tab's data",
+  "Считаю…":"Calculating…",
+  "Карты пересчитываются в фоне — обновите вкладку через минуту":"Maps are being recalculated in the background — reopen the tab in a minute",
+  "Можно раз в 30 с, ещё ":"Once per 30 s, wait ",
   "+ Добавить":"+ Add",
   "Убрать":"Remove",
   "Нет рецепта: ":"No recipe: ",
@@ -2741,6 +2893,18 @@ function openAdminEnter(){
   bg.appendChild(form); document.body.appendChild(bg); p1.focus();
 }
 function setLang(v){ try{ localStorage.setItem("swp_lang",v); }catch(e){} location.reload(); }
+// «Пересчитать»: своё — сразу, изменившиеся карты и рынок — в фоне (сервер пускает раз в 30 с)
+var REFRESH_TABS={me:1,journal:1,where:1,tech:1,market:1,map:1,space:1,transport:1,chests:1,clan:1};
+function refreshBar(){
+  var msg=el("span",{class:"muted small"});
+  var b=el("button",{type:"button",title:L("Пересчитать данные этой вкладки"),onclick:function(){
+    b.disabled=true; msg.textContent=L("Считаю…");
+    api("/api/refresh",{tab:S.tab}).then(function(d){ render();
+        if(d.pending_maps){ var x=$("#rfmsg"); if(x) x.textContent=L("Карты пересчитываются в фоне — обновите вкладку через минуту"); } })
+      .catch(function(e){ b.disabled=false; msg.textContent=e&&e.error==="throttled"? L("Можно раз в 30 с, ещё ")+e.retry+L(" с") : errText(e); });
+  }},["⟳ "+L("Пересчитать")]);
+  return el("div",{class:"row",style:"justify-content:flex-end;margin-bottom:8px;gap:8px"},[el("span",{id:"rfmsg",class:"muted small"}),msg,b]);
+}
 function render(){
   var ab=$("#admbtn"); if(ab){ ab.style.display=(S.nick&&S.staff)?"":"none"; ab.textContent=L("Админка"); ab.onclick=openAdminEnter; }
   var pt=$("#playtxt"); if(pt) pt.textContent=L("Играть");
@@ -2759,6 +2923,7 @@ function render(){
   who.appendChild(el("button",{onclick:function(){ api("/api/logout",{}).finally(function(){ S.nick=""; render(); }); }},[L("Выйти")]));
   TABS.forEach(function(t){ nav.appendChild(el("button",{class:S.tab===t[0]?"on":"",onclick:function(){
     S.tab=t[0]; try{ localStorage.setItem("swp_tab",S.tab); }catch(e){} render(); }},[t[1]])); });
+  if(REFRESH_TABS[S.tab]) m.appendChild(refreshBar());
   ({me:function(m){ var r=el("div"); m.appendChild(r); tabMe(m); ratingCard(r); },
     journal:tabJournal,hist:tabHist,where:tabWhere,tech:tabTech,craft:tabCraft,book:tabBook,
     market:function(m){ tabMarket(m); m.appendChild(priceCard()); },
