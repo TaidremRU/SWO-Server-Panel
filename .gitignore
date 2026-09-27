@@ -24,6 +24,7 @@ webui_auth.json
 playerweb_remember.json
 playerweb_explored.json
 space_index.json
+cache/
 item_icons.png
 item_icons.json
 webui_audit.log
