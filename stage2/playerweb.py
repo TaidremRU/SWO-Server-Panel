@@ -1135,6 +1135,16 @@ class PlayerWeb:
     def _api_craft_catalog(self, uid, q):
         return self._cached("craft_catalog", 600, lambda: players.craft_catalog(self.cfg))
 
+    def _api_craft_calc(self, uid, q):
+        items = []
+        for part in ((q.get("items") or [""])[0])[:4000].split(","):
+            it, _, n = part.rpartition("*")
+            if not it:
+                it, n = n, 1
+            if it.strip():
+                items.append((it.strip()[:80], n))
+        return players.craft_calc(self.cfg, items, uid)
+
     def _api_craft_plan(self, uid, q):
         g = lambda k: (q.get(k) or [""])[0]
         return players.craft_plan(self.cfg, g("item")[:80], g("qty") or 1, uid, None)
@@ -2448,6 +2458,27 @@ var EN_DICT={
   " шаг(ов), ~":" more step(s), ~",
   "Раскладка до сырья":"Raw material breakdown",
   "Посчитать":"Calculate",
+  "Калькулятор крафта":"Craft calculator",
+  "+ Добавить":"+ Add",
+  "Убрать":"Remove",
+  "Нет рецепта: ":"No recipe: ",
+  "1. Ресурсы по рецепту":"1. Recipe resources",
+  "Что уходит прямо в рецепты этого списка.":"What goes directly into the recipes of this list.",
+  "2. Базовые ресурсы":"2. Base resources",
+  "Всё разложено до сырья, которое добывается или находится в мире.":"Everything broken down to raw materials that are mined or found in the world.",
+  "3. Время":"3. Time",
+  "Ручной крафт: ":"Hand crafting: ",
+  " (при скорости действия 1; клановый бонус — вдвое быстрее)":" (at action speed 1; clan bonus makes it twice as fast)",
+  "Верстак":"Workbench",
+  "Что делаем":"What we make",
+  "Порций":"Batches",
+  "Топливо":"Fuel",
+  "что перерабатываем":"what we process",
+  "Загрузить":"Load",
+  "Получим":"Get",
+  "Станок перерабатывает 1 порцию в ":"A machine processes 1 batch per ",
+  " с. Станков каждого типа:":" s. Machines of each type:",
+  " д ":" d ",
   " за 1":" per 1",
   " шт":" pcs",
   "Предмет, например: Железный слиток":"Item, e.g. Iron ingot",
@@ -2845,32 +2876,75 @@ function tabTech(m){
 }
 
 // ---------------------------------------------------------------- крафт
+function fmtSec(t){ t=Math.round(t||0); if(t<60) return t+L(" с");
+  var d=Math.floor(t/86400), h=Math.floor(t%86400/3600), mm=Math.round(t%3600/60);
+  return (d? d+L(" д ") : "")+(d||h? h+L(" ч ") : "")+mm+L(" мин"); }
+// калькулятор: список «что крафтим» -> ресурсы по рецепту -> базовые ресурсы -> время на верстаках и станках
 function tabCraft(m){
-  var plan=el("div");
-  var inp=el("input",{list:"cr-dl",placeholder:L("Что скрафтить?"),style:"min-width:240px"}), dl=el("datalist",{id:"cr-dl"});
-  var qty=el("input",{type:"number",min:"1",value:"1",style:"width:80px"}), byName={};
+  var byName={}, rows=[], out=el("div",{style:"margin-top:10px"}), list=el("div");
+  var dl=el("datalist",{id:"cr-dl"});
   api("/api/craft-catalog").then(function(d){ (d.items||[]).forEach(function(it){ byName[it.name.toLowerCase()]=it.id; dl.appendChild(el("option",{value:it.name})); }); }).catch(function(){});
-  function doPlan(item){
-    var id=byName[(item||"").toLowerCase()]||item; if(!id) return;
-    load(plan,"/api/craft-plan?item="+encodeURIComponent(id)+"&qty="+(parseInt(qty.value)||1),function(d){
-      if(!d.ok){ plan.appendChild(errBox(d)); return; }
-      var out=[el("div",{class:"muted small"},[L("Время крафта: ")+Math.round(d.time_s)+L(" с")+(d.benches.length?L(" · нужно: ")+d.benches.join(", "):"")])];
-      out.push(el("h3",{style:"margin-top:10px"},[L("Сырьё")]));
-      out.push(table([L("Ресурс"),L("Нужно")],d.raw,function(r){ return [itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")),r.count]; }));
-      if(d.intermediate.length){ out.push(el("h3",{style:"margin-top:10px"},[L("Промежуточное")]));
-        out.push(table([L("Предмет"),L("Нужно"),L("Крафтов")],d.intermediate,function(r){ return [itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")),r.need,r.crafts||""]; })); }
-      if(d.techs.length){ out.push(el("h3",{style:"margin-top:10px"},[L("Технологии")]));
-        out.push(table([L("Технология"),L("У меня")],d.techs,function(x){ return [x.label, x.known? el("span",{class:"pill ok"},[L("изучено")])
+  function save(){ try{ localStorage.setItem("swp_craft_list",JSON.stringify(rows.map(function(r){ return [r.inp.value,r.qty.value]; }))); }catch(e){} }
+  function addRow(name,n){
+    var r={inp:el("input",{list:"cr-dl",placeholder:L("Что скрафтить?"),style:"min-width:240px",value:name||""}),
+           qty:el("input",{type:"number",min:"1",value:String(n||1),style:"width:80px"})};
+    r.box=el("div",{class:"row",style:"margin-bottom:6px"},[r.inp,r.qty,el("button",{type:"button",title:L("Убрать"),onclick:function(){
+      rows.splice(rows.indexOf(r),1); r.box.remove(); if(!rows.length) addRow(); save(); }},["✕"])]);
+    r.inp.addEventListener("keydown",function(e){ if(e.key==="Enter") calc(); });
+    r.inp.addEventListener("change",save); r.qty.addEventListener("change",save);
+    rows.push(r); list.appendChild(r.box); return r;
+  }
+  function itemCell(r){ return itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")); }
+  function calc(){
+    var q=rows.map(function(r){ var v=r.inp.value.trim(); if(!v) return null;
+      return encodeURIComponent(byName[v.toLowerCase()]||v)+"*"+(parseInt(r.qty.value)||1); }).filter(Boolean);
+    if(!q.length) return; save();
+    load(out,"/api/craft-calc?items="+q.join(","),function(d){
+      if(!d.ok){ out.appendChild(errBox(d)); return; }
+      var k=[];
+      if(d.bad&&d.bad.length) k.push(el("div",{class:"msg err"},[L("Нет рецепта: ")+d.bad.join(", ")]));
+      k.push(el("div",{style:"display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"},d.items.map(function(x){ return itemBtn(x.id,x.name,x.qty,goBook,L("Открыть в справочнике")); })));
+      k.push(el("h3",{style:"margin-top:10px"},[L("1. Ресурсы по рецепту")]));
+      k.push(el("p",{class:"muted small"},[L("Что уходит прямо в рецепты этого списка.")]));
+      k.push(table([L("Ресурс"),L("Нужно")],d.direct,function(r){ return [itemCell(r),r.count]; }));
+      k.push(el("h3",{style:"margin-top:14px"},[L("2. Базовые ресурсы")]));
+      k.push(el("p",{class:"muted small"},[L("Всё разложено до сырья, которое добывается или находится в мире.")]));
+      k.push(table([L("Ресурс"),L("Нужно")],d.raw,function(r){ return [itemCell(r),r.count]; }));
+      k.push(el("h3",{style:"margin-top:14px"},[L("3. Время")]));
+      if(d.hand.length){
+        k.push(el("div",{class:"muted small"},[L("Ручной крафт: ")+fmtSec(d.hand_time_s)+L(" (при скорости действия 1; клановый бонус — вдвое быстрее)")]));
+        k.push(table([L("Верстак"),L("Крафтов"),L("Время"),L("Что делаем")],d.hand,function(h){
+          return [h.name||L("в руках"),h.crafts,fmtSec(h.time_s),itemsEl(h.items)]; }));
+      }
+      if(d.machines.length){
+        var par=el("input",{type:"number",min:"1",value:"1",style:"width:70px"}), mt=el("div");
+        var drawM=function(){ var n=Math.max(1,parseInt(par.value)||1); mt.innerHTML="";
+          mt.appendChild(table([L("Станок"),L("Порций"),L("Время"),L("Топливо")],d.machines,function(x){
+            return [x.name,x.portions,fmtSec(x.time_s/n),x.fuel!=null? withIco(d.fuel.id,"~"+x.fuel+" × "+d.fuel.name,18) : x.energy]; }));
+          d.machines.forEach(function(x){
+            mt.appendChild(el("details",{style:"margin-top:6px"},[el("summary",{},[x.name+" — "+L("что перерабатываем")]),
+              table([L("Загрузить"),L("Получим"),L("Порций")],x.lines,function(l){
+                return [itemBtn(l.material_id,l.material,l.material_n,goBook),itemBtn(l.product_id,l.product,l.product_n,goBook),l.portions]; })])); }); };
+        par.addEventListener("input",drawM);
+        k.push(el("div",{class:"row muted small",style:"margin-top:10px"},[L("Станок перерабатывает 1 порцию в ")+d.tick_s+L(" с. Станков каждого типа:"),par]));
+        k.push(mt); drawM();
+      }
+      if(d.intermediate.length) k.push(el("details",{style:"margin-top:10px"},[el("summary",{},[L("Промежуточное")]),
+        table([L("Предмет"),L("Нужно"),L("Крафтов"),L("Где")],d.intermediate,function(r){ return [itemCell(r),r.need,r.crafts||"",r.via]; })]));
+      if(d.techs.length){ k.push(el("h3",{style:"margin-top:14px"},[L("Технологии")]));
+        k.push(table([L("Технология"),L("У меня")],d.techs,function(x){ return [x.label, x.known? el("span",{class:"pill ok"},[L("изучено")])
           : el("span",{class:"pill warn"},[L("нет · ещё ")+x.missing_chain+L(" шаг(ов), ~")+x.missing_h+L(" ч")])]; })); }
-      out.unshift(el("div",{style:"margin-bottom:8px"},[itemBtn(d.item,d.name,d.qty,goBook,L("Открыть в справочнике"))]));
-      plan.appendChild(card("",out));
+      out.appendChild(card("",k));
     });
   }
-  m.appendChild(card(L("Раскладка до сырья"),[el("div",{class:"row"},[inp,dl,qty,el("button",{class:"pri",onclick:function(){ doPlan(inp.value); }},[L("Посчитать")])]),
-    el("div",{style:"margin-top:10px"},[plan])]));
-  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") doPlan(inp.value); });
+  m.appendChild(card(L("Калькулятор крафта"),[dl,list,el("div",{class:"row"},[
+    el("button",{type:"button",onclick:function(){ addRow().inp.focus(); }},[L("+ Добавить")]),
+    el("button",{class:"pri",type:"button",onclick:calc},[L("Посчитать")])]),out]));
+  var saved=[]; try{ saved=JSON.parse(localStorage.getItem("swp_craft_list")||"[]")||[]; }catch(e){}
   var go=""; try{ go=localStorage.getItem("swp_craft_go")||""; localStorage.removeItem("swp_craft_go"); }catch(e){}
-  if(go) doPlan(go);
+  if(go){ addRow(go,1); save(); calc(); }
+  else if(saved.length) saved.forEach(function(x){ addRow(x[0],x[1]); });
+  else addRow();
 }
 
 // ---------------------------------------------------------------- рынок

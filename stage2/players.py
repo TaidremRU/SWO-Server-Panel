@@ -2005,7 +2005,8 @@ _CRAFT_CACHE = {}  # world_dir -> (mtimes, data)
 
 def _craft_data(world_dir):
     """-> {recipes: {slug: {time,count,tech,group,workbench,res:[(slug,n)]}},
-    machine: {product: [(machine, material, energy)]}, uses: {slug: [slug]}}."""
+    machine: {product: [(machine, material, energy)]}, uses: {slug: [slug]},
+    mcount: {(machine, material, product): (сколько материала, сколько продукта)}}."""
     pc = os.path.join(world_dir, "Data", "craft.json")
     pm = os.path.join(world_dir, "Data", "machines.json")
     try:
@@ -2015,7 +2016,7 @@ def _craft_data(world_dir):
     hit = _CRAFT_CACHE.get(world_dir)
     if hit and hit[0] == mts:
         return hit[1]
-    recipes, machine, uses = {}, {}, {}
+    recipes, machine, uses, mcount = {}, {}, {}, {}
     for it in (_read_json(pc) or {}).get("items", []):
         sid = it.get("id")
         if not sid:
@@ -2030,8 +2031,10 @@ def _craft_data(world_dir):
         for x in mc.get("items") or []:
             if x.get("product") and x.get("material"):
                 machine.setdefault(x["product"], []).append((mc.get("id"), x["material"], x.get("energy")))
+                mcount[(mc.get("id"), x["material"], x["product"])] = (
+                    int(x.get("countMaterial") or 1), int(x.get("count") or 1))
                 uses.setdefault(x["material"], []).append(x["product"])
-    data = {"recipes": recipes, "machine": machine, "uses": uses}
+    data = {"recipes": recipes, "machine": machine, "uses": uses, "mcount": mcount}
     _CRAFT_CACHE[world_dir] = (mts, data)
     return data
 
@@ -2160,6 +2163,152 @@ def craft_plan(cfg, item, qty=1, uid=None, clan_id=None):
         "benches": sorted(item_label(b) for b in benches),
         "techs": tech_list, "who": who,
         "used_in": sorted({item_label(u) for u in cd["uses"].get(slug, [])}),
+    }
+
+
+# Станки (ZMachineManager): таймер раз в MACHINE_TICK_S обходит все станки, за такт
+# станок докладывает не больше 1 топлива (если энергия + топливо <= 240) и перерабатывает
+# не больше одной порции: countMaterial материала -> count продукта, энергия -= energy.
+MACHINE_TICK_S = 60.0
+MACHINE_FUEL_REF = "coal"
+
+
+def _craft_techs(world_dir, techs, known):
+    meta = tech_meta(world_dir)
+    out = []
+    for tid in techs:
+        chain, cur, seen = [], tid, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            chain.append(cur)
+            cur = _tech_parent(world_dir, cur)
+        missing = [t for t in chain if known is not None and t not in known]
+        out.append({"id": tid, "label": tech_label(world_dir, tid),
+                    "known": (tid in known) if known is not None else None,
+                    "missing_chain": len(missing),
+                    "missing_h": round(sum((meta.get(t) or {}).get("cost_min") or 0 for t in missing) / 60.0, 1)})
+    out.sort(key=lambda x: (x["known"] is True, x["label"]))
+    return out
+
+
+def craft_calc(cfg, items, uid=None):
+    """Калькулятор по списку ``items`` = [(предмет, кол-во)]:
+    1) direct — что уходит прямо в рецепты заказанных предметов;
+    2) raw — всё, разложенное до базового сырья;
+    3) hand — ручные крафты по верстакам (время по craft.json, скорость действия 1);
+       machines — сколько порций через печь/дробилку/экстрактор/…, тактов и энергии."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return {"ok": False, "error": "каталог мира не найден"}
+    cd = _craft_data(world_dir)
+    if not cd:
+        return {"ok": False, "error": "нет Data\\craft.json"}
+    rec, mach, mcount = cd["recipes"], cd["machine"], cd.get("mcount") or {}
+    known_slugs = list(rec) + list(mach)
+
+    def resolve(x):
+        x = str(x or "").strip()
+        if x in rec or x in mach:
+            return x
+        low = x.lower()
+        return next((s for s in known_slugs if s.lower() == low or item_label(s).lower() == low), None)
+
+    order, bad = [], []
+    for it, n in items[:50]:
+        sid = resolve(it)
+        try:
+            n = max(1, min(100000, int(n or 1)))
+        except (TypeError, ValueError):
+            n = 1
+        if not sid:
+            bad.append(str(it)[:80])
+            continue
+        order.append((sid, n))
+    if not order:
+        return {"ok": False, "error": "нет рецепта: %s" % ", ".join(bad) if bad else "список пуст"}
+
+    direct, raw_tot, inter, techs = {}, {}, {}, {}
+    hand, machines = {}, {}
+
+    def add(d, k, n):
+        d[k] = d.get(k, 0) + n
+
+    def expand(sid, need, path, top):
+        if sid in rec and sid not in path and len(path) < 14:
+            r = rec[sid]
+            crafts = -(-need // r["count"])
+            wb = r["workbench"] or ""
+            h = hand.setdefault(wb, {"crafts": 0, "time_s": 0.0, "items": {}})
+            h["crafts"] += crafts
+            h["time_s"] += crafts * r["time"]
+            add(h["items"], sid, crafts * r["count"])
+            if r["tech"]:
+                techs[r["tech"]] = True
+            if not top:
+                x = inter.setdefault(sid, {"need": 0, "crafts": 0, "via": wb})
+                x["need"] += need
+                x["crafts"] += crafts
+            for rid, n in r["res"]:
+                if top:
+                    add(direct, rid, n * crafts)
+                expand(rid, n * crafts, path | {sid}, False)
+        elif sid in mach and len(path) < 14 and any(m[1] not in path for m in mach[sid]):
+            mid, mat, energy = next(m for m in mach[sid] if m[1] not in path)
+            cm, cp = mcount.get((mid, mat, sid), (1, 1))
+            portions = -(-need // cp)
+            m = machines.setdefault(mid, {"portions": 0, "energy": 0.0, "lines": {}})
+            m["portions"] += portions
+            m["energy"] += portions * float(energy or 0)
+            ln = m["lines"].setdefault((mat, sid), {"material": mat, "product": sid, "portions": 0,
+                                                   "cm": cm, "cp": cp, "energy": energy})
+            ln["portions"] += portions
+            if not top:
+                x = inter.setdefault(sid, {"need": 0, "crafts": 0, "via": mid})
+                x["need"] += need
+                x["crafts"] += portions
+            if top:
+                add(direct, mat, portions * cm)
+            expand(mat, portions * cm, path | {sid}, False)
+        else:
+            add(raw_tot, sid, need)
+            if top:
+                add(direct, sid, need)
+
+    for sid, n in order:
+        expand(sid, n, frozenset(), True)
+
+    by_id, by_name = _items_full(world_dir)
+    fuel_e = float((by_name.get(MACHINE_FUEL_REF) or {}).get("energy") or 0)
+    known, _who = _who_techs(world_dir, uid, None)
+    lst = lambda d: sorted(({"id": k, "name": item_label(k), "count": v} for k, v in d.items()),
+                           key=lambda x: -x["count"])
+    hand_out = [{"bench": b, "name": item_label(b) if b else "", "crafts": h["crafts"],
+                 "time_s": round(h["time_s"], 1), "items": lst(h["items"])}
+                for b, h in sorted(hand.items(), key=lambda kv: -kv[1]["time_s"])]
+    mach_out = []
+    for mid, m in sorted(machines.items(), key=lambda kv: -kv[1]["portions"]):
+        mach_out.append({
+            "id": mid, "name": item_label(mid), "portions": m["portions"],
+            "time_s": round(m["portions"] * MACHINE_TICK_S),
+            "energy": round(m["energy"], 1),
+            "fuel": -(-int(round(m["energy"] * 10)) // int(fuel_e * 10)) if fuel_e else None,
+            "lines": [{"material": item_label(l["material"]), "material_id": l["material"],
+                       "material_n": l["portions"] * l["cm"], "product": item_label(l["product"]),
+                       "product_id": l["product"], "product_n": l["portions"] * l["cp"],
+                       "portions": l["portions"]}
+                      for l in sorted(m["lines"].values(), key=lambda l: -l["portions"])],
+        })
+    return {
+        "ok": True, "bad": bad,
+        "items": [{"id": s, "name": item_label(s), "qty": n} for s, n in order],
+        "direct": lst(direct), "raw": lst(raw_tot),
+        "intermediate": sorted(({"id": k, "name": item_label(k), "need": v["need"], "crafts": v["crafts"],
+                                 "via": item_label(v["via"]) if v["via"] else ""} for k, v in inter.items()),
+                               key=lambda x: x["name"].lower()),
+        "hand": hand_out, "hand_time_s": round(sum(h["time_s"] for h in hand.values()), 1),
+        "machines": mach_out, "tick_s": MACHINE_TICK_S,
+        "fuel": {"id": MACHINE_FUEL_REF, "name": item_label(MACHINE_FUEL_REF), "energy": fuel_e},
+        "techs": _craft_techs(world_dir, techs, known),
     }
 
 
