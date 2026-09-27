@@ -2476,8 +2476,11 @@ var EN_DICT={
   "что перерабатываем":"what we process",
   "Загрузить":"Load",
   "Получим":"Get",
-  "Станок перерабатывает 1 порцию в ":"A machine processes 1 batch per ",
-  " с. Станков каждого типа:":" s. Machines of each type:",
+  "Станок делает 1 порцию за ":"A machine makes 1 batch per ",
+  " с и берёт не больше 1 топлива за это время. В скобках — энергия топлива.":" s and takes at most 1 fuel item in that time. Fuel energy is in brackets.",
+  "Сколько станков":"Machines",
+  "Расход топлива":"Fuel used",
+  "Все станки параллельно: ":"All machines in parallel: ",
   " д ":" d ",
   " за 1":" per 1",
   " шт":" pcs",
@@ -2917,17 +2920,35 @@ function tabCraft(m){
           return [h.name||L("в руках"),h.crafts,fmtSec(h.time_s),itemsEl(h.items)]; }));
       }
       if(d.machines.length){
-        var par=el("input",{type:"number",min:"1",value:"1",style:"width:70px"}), mt=el("div");
-        var drawM=function(){ var n=Math.max(1,parseInt(par.value)||1); mt.innerHTML="";
-          mt.appendChild(table([L("Станок"),L("Порций"),L("Время"),L("Топливо")],d.machines,function(x){
-            return [x.name,x.portions,fmtSec(x.time_s/n),x.fuel!=null? withIco(d.fuel.id,"~"+x.fuel+" × "+d.fuel.name,18) : x.energy]; }));
-          d.machines.forEach(function(x){
-            mt.appendChild(el("details",{style:"margin-top:6px"},[el("summary",{},[x.name+" — "+L("что перерабатываем")]),
-              table([L("Загрузить"),L("Получим"),L("Порций")],x.lines,function(l){
-                return [itemBtn(l.material_id,l.material,l.material_n,goBook),itemBtn(l.product_id,l.product,l.product_n,goBook),l.portions]; })])); }); };
-        par.addEventListener("input",drawM);
-        k.push(el("div",{class:"row muted small",style:"margin-top:10px"},[L("Станок перерабатывает 1 порцию в ")+d.tick_s+L(" с. Станков каждого типа:"),par]));
-        k.push(mt); drawM();
+        // настройки станков (топливо и число по типу) — в localStorage, это удобство одного игрока
+        var mcfg={}; try{ mcfg=JSON.parse(localStorage.getItem("swp_craft_mach")||"{}")||{}; }catch(e){}
+        var fuelBy={}; (d.fuels||[]).forEach(function(f){ fuelBy[f.id]=f; });
+        var mt=el("div"), tot=el("div",{class:"muted small",style:"margin-top:6px"});
+        var calcM=function(x){ var c=mcfg[x.id]||{}, n=Math.max(1,parseInt(c.n)||1), f=fuelBy[c.fuel]||fuelBy[d.fuel_default]||(d.fuels||[])[0];
+          // за такт станок берёт не больше 1 топлива и делает не больше 1 порции
+          var ticks=f? Math.max(x.portions, Math.ceil(x.energy/f.energy)) : x.portions;
+          return {n:n,f:f,time:Math.ceil(ticks/n)*d.tick_s,fuel:f? Math.ceil(x.energy/f.energy) : null}; };
+        var saveM=function(){ try{ localStorage.setItem("swp_craft_mach",JSON.stringify(mcfg)); }catch(e){} };
+        var drawTot=function(){ var mx=0; d.machines.forEach(function(x){ mx=Math.max(mx,calcM(x).time); });
+          tot.textContent=L("Все станки параллельно: ")+fmtSec(mx); };
+        mt.appendChild(table([L("Станок"),L("Порций"),L("Сколько станков"),L("Топливо"),L("Время"),L("Расход топлива")],d.machines,function(x){
+          var c=mcfg[x.id]=mcfg[x.id]||{}, r=calcM(x);
+          var tm=el("span",{},[fmtSec(r.time)]), fu=el("span");
+          var drawFu=function(){ var r=calcM(x); tm.textContent=fmtSec(r.time); fu.innerHTML="";
+            fu.appendChild(r.f? withIco(r.f.id,"~"+r.fuel+" × "+r.f.name,18) : document.createTextNode(String(x.energy))); drawTot(); };
+          var n=el("input",{type:"number",min:"1",value:String(r.n),style:"width:70px"});
+          n.addEventListener("input",function(){ c.n=Math.max(1,parseInt(n.value)||1); saveM(); drawFu(); });
+          var sel=el("select",{},(d.fuels||[]).map(function(f){ return el("option",{value:f.id},[f.name+" ("+f.energy+")"]); }));
+          if(r.f) sel.value=r.f.id;
+          sel.addEventListener("change",function(){ c.fuel=sel.value; saveM(); drawFu(); });
+          drawFu();
+          return [x.name,x.portions,n,sel,tm,fu]; }));
+        d.machines.forEach(function(x){
+          mt.appendChild(el("details",{style:"margin-top:6px"},[el("summary",{},[x.name+" — "+L("что перерабатываем")]),
+            table([L("Загрузить"),L("Получим"),L("Порций")],x.lines,function(l){
+              return [itemBtn(l.material_id,l.material,l.material_n,goBook),itemBtn(l.product_id,l.product,l.product_n,goBook),l.portions]; })])); });
+        k.push(el("div",{class:"muted small",style:"margin-top:10px"},[L("Станок делает 1 порцию за ")+d.tick_s+L(" с и берёт не больше 1 топлива за это время. В скобках — энергия топлива.")]));
+        k.push(mt); k.push(tot); drawTot();
       }
       if(d.intermediate.length) k.push(el("details",{style:"margin-top:10px"},[el("summary",{},[L("Промежуточное")]),
         table([L("Предмет"),L("Нужно"),L("Крафтов"),L("Где")],d.intermediate,function(r){ return [itemCell(r),r.need,r.crafts||"",r.via]; })]));

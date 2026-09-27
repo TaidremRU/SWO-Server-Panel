@@ -2170,7 +2170,17 @@ def craft_plan(cfg, item, qty=1, uid=None, clan_id=None):
 # станок докладывает не больше 1 топлива (если энергия + топливо <= 240) и перерабатывает
 # не больше одной порции: countMaterial материала -> count продукта, энергия -= energy.
 MACHINE_TICK_S = 60.0
+MACHINE_ENERGY_MAX = 240.0  # топливо с energy больше этого станок не примет никогда
 MACHINE_FUEL_REF = "coal"
+
+
+def machine_fuels(world_dir):
+    """[{id, name, energy}] — чем можно топить станки (items.json energy в (0, 240])."""
+    by_id, _ = _items_full(world_dir)
+    out = [{"id": it["name"], "name": item_label(it["name"]), "energy": float(it["energy"])}
+           for it in by_id.values()
+           if it.get("name") and 0 < float(it.get("energy") or 0) <= MACHINE_ENERGY_MAX]
+    return sorted(out, key=lambda x: x["energy"])
 
 
 def _craft_techs(world_dir, techs, known):
@@ -2196,7 +2206,8 @@ def craft_calc(cfg, items, uid=None):
     1) direct — что уходит прямо в рецепты заказанных предметов;
     2) raw — всё, разложенное до базового сырья;
     3) hand — ручные крафты по верстакам (время по craft.json, скорость действия 1);
-       machines — сколько порций через печь/дробилку/экстрактор/…, тактов и энергии."""
+       machines — сколько порций через печь/дробилку/экстрактор/…, тактов и энергии;
+       время и расход топлива по выбранному топливу и числу станков считает клиент."""
     world_dir = find_world_dir(cfg)
     if not world_dir:
         return {"ok": False, "error": "каталог мира не найден"}
@@ -2277,8 +2288,6 @@ def craft_calc(cfg, items, uid=None):
     for sid, n in order:
         expand(sid, n, frozenset(), True)
 
-    by_id, by_name = _items_full(world_dir)
-    fuel_e = float((by_name.get(MACHINE_FUEL_REF) or {}).get("energy") or 0)
     known, _who = _who_techs(world_dir, uid, None)
     lst = lambda d: sorted(({"id": k, "name": item_label(k), "count": v} for k, v in d.items()),
                            key=lambda x: -x["count"])
@@ -2291,7 +2300,6 @@ def craft_calc(cfg, items, uid=None):
             "id": mid, "name": item_label(mid), "portions": m["portions"],
             "time_s": round(m["portions"] * MACHINE_TICK_S),
             "energy": round(m["energy"], 1),
-            "fuel": -(-int(round(m["energy"] * 10)) // int(fuel_e * 10)) if fuel_e else None,
             "lines": [{"material": item_label(l["material"]), "material_id": l["material"],
                        "material_n": l["portions"] * l["cm"], "product": item_label(l["product"]),
                        "product_id": l["product"], "product_n": l["portions"] * l["cp"],
@@ -2307,7 +2315,7 @@ def craft_calc(cfg, items, uid=None):
                                key=lambda x: x["name"].lower()),
         "hand": hand_out, "hand_time_s": round(sum(h["time_s"] for h in hand.values()), 1),
         "machines": mach_out, "tick_s": MACHINE_TICK_S,
-        "fuel": {"id": MACHINE_FUEL_REF, "name": item_label(MACHINE_FUEL_REF), "energy": fuel_e},
+        "fuels": machine_fuels(world_dir), "fuel_default": MACHINE_FUEL_REF,
         "techs": _craft_techs(world_dir, techs, known),
     }
 
