@@ -2018,7 +2018,7 @@ class PlayerWeb:
 
     # ------------------------------------------------------------ мой журнал
     def _api_journal(self, uid, q):
-        return self._cached(("journal", uid), 60, lambda: self._journal(uid))
+        return self._cached(("journal", uid), 60, lambda: self._journal(uid), label=("Мой журнал: собираю события", "My journal: collecting events"))
 
     def _journal(self, uid):
         """Лента своих событий из журналов сервера и панели: изученные техи, ускорители,

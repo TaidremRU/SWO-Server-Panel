@@ -137,9 +137,14 @@ def _read_json(path, default=None):
 
 
 def _to_epoch(ts):
+    """«dd.mm.YYYY HH:MM:SS» (местное время) -> секунды. Без strptime: он в разы медленнее,
+    а в журналах десятки тысяч строк."""
     try:
+        if len(ts) == 19 and ts[2] == "." and ts[5] == "." and ts[10] == " ":
+            return datetime(int(ts[6:10]), int(ts[3:5]), int(ts[0:2]),
+                            int(ts[11:13]), int(ts[14:16]), int(ts[17:19])).timestamp()
         return datetime.strptime(ts, "%d.%m.%Y %H:%M:%S").timestamp()
-    except ValueError:
+    except (ValueError, TypeError):
         return 0.0
 
 
@@ -4983,31 +4988,10 @@ def parse_analytics(path):
     процессом сессия — считаем офлайн (и ставим ``stale_online=True``, чтобы
     было видно, что поправка сработала), а не «висим онлайн» до следующего
     захода игрока."""
-    per = {}
-    events = []
-    for ln in _read_text(path).splitlines():
-        m = _LINE_RX.match(ln)
-        if not m:
-            continue
-        ts, kind, uid, extra = m.group(1), m.group(2), int(m.group(3)), m.group(4)
-        ep = _to_epoch(ts)
-        events.append({"ts": ts, "epoch": ep, "kind": kind, "id": uid,
-                       "secs": int(extra) if extra else None})
-        u = per.setdefault(uid, {"id": uid, "online": False, "first_seen": ts,
-                                 "last_enter": None, "last_exit": None,
-                                 "session_secs": None, "sessions": 0, "last_epoch": 0.0})
-        if ep and ep < _to_epoch(u["first_seen"]):
-            u["first_seen"] = ts
-        if kind == "enter":
-            u["online"] = True
-            u["last_enter"] = ts
-            u["sessions"] += 1
-        elif kind == "exit":
-            u["online"] = False
-            u["last_exit"] = ts
-            u["session_secs"] = int(extra) if extra else 0
-        u["last_epoch"] = ep
-
+    # сам разбор — один на всех, пока файл не изменился (десятки тысяч строк); поправки
+    # на рестарт/остановку игры — на копии записей, каждый раз заново
+    base, events = _log_parsed(path, "analytics", _analytics_build)
+    per = {uid: dict(u) for uid, u in base.items()}
     cutoff = _last_restart_epoch(os.path.dirname(path))
     if cutoff:
         for u in per.values():
@@ -5019,6 +5003,37 @@ def parse_analytics(path):
             if u.get("online"):
                 u["online"] = False
                 u["server_off"] = True
+    return per, events
+
+
+def _analytics_build(text):
+    per, events, first_ep = {}, [], {}
+    for ln in text.splitlines():
+        m = _LINE_RX.match(ln)
+        if not m:
+            continue
+        ts, kind, uid, extra = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        ep = _to_epoch(ts)
+        events.append({"ts": ts, "epoch": ep, "kind": kind, "id": uid,
+                       "secs": int(extra) if extra else None})
+        u = per.get(uid)
+        if u is None:
+            u = per[uid] = {"id": uid, "online": False, "first_seen": ts,
+                            "last_enter": None, "last_exit": None,
+                            "session_secs": None, "sessions": 0, "last_epoch": 0.0}
+            first_ep[uid] = ep
+        if ep and ep < first_ep[uid]:
+            u["first_seen"] = ts
+            first_ep[uid] = ep
+        if kind == "enter":
+            u["online"] = True
+            u["last_enter"] = ts
+            u["sessions"] += 1
+        elif kind == "exit":
+            u["online"] = False
+            u["last_exit"] = ts
+            u["session_secs"] = int(extra) if extra else 0
+        u["last_epoch"] = ep
     return per, events
 
 
