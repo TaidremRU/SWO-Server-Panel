@@ -2681,6 +2681,7 @@ button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--mut);font-weight:500;font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:5px} .chip{border:1px solid var(--line);border-radius:12px;padding:1px 9px;font-size:12px}
+tr.got td{opacity:.45} tr.got td,tr.got td *{text-decoration:line-through}
 .pill{border-radius:10px;padding:1px 8px;font-size:12px;border:1px solid var(--line)}
 .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.warn{color:var(--warn);border-color:var(--warn)} .pill.err{color:var(--err);border-color:var(--err)}
 .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden} .bar>i{display:block;height:100%;background:var(--acc)}
@@ -3056,6 +3057,9 @@ var EN_DICT={
   "+ Добавить":"+ Add",
   "Убрать":"Remove",
   "Нет рецепта: ":"No recipe: ",
+  "Есть":"Got",
+  "Отметить: уже есть":"Mark as collected",
+  "Снять отметки":"Clear marks",
   "1. Ресурсы по рецепту":"1. Recipe resources",
   "Что уходит прямо в рецепты этого списка.":"What goes directly into the recipes of this list.",
   "2. Базовые ресурсы":"2. Base resources",
@@ -3566,6 +3570,19 @@ function tabCraft(m){
     rows.push(r); list.appendChild(r.box); return r;
   }
   function itemCell(r){ return itemBtn(r.id,r.name,null,goBook,L("Открыть в справочнике")); }
+  // список-«чеклист»: галочка справа зачёркивает ресурс; отметки — в localStorage (удобство одного игрока)
+  var got={}; try{ got=JSON.parse(localStorage.getItem("swp_craft_got")||"{}")||{}; }catch(e){}
+  function saveGot(){ try{ localStorage.setItem("swp_craft_got",JSON.stringify(got)); }catch(e){} }
+  function checkTable(sec,rs){
+    var t=table([L("Ресурс"),L("Нужно"),L("Есть")],rs,function(r){
+      var k=sec+":"+r.id, cb=el("input",{type:"checkbox",title:L("Отметить: уже есть")});
+      cb.checked=!!got[k];
+      cb.addEventListener("change",function(){ if(cb.checked) got[k]=1; else delete got[k]; saveGot();
+        cb.closest("tr").classList.toggle("got",cb.checked); });
+      return [itemCell(r),r.count,cb]; });
+    Array.prototype.forEach.call(t.querySelectorAll("input[type=checkbox]"),function(cb){ if(cb.checked) cb.closest("tr").classList.add("got"); });
+    return t;
+  }
   function calc(){
     var q=rows.map(function(r){ var v=r.inp.value.trim(); if(!v) return null;
       return encodeURIComponent(byName[v.toLowerCase()]||v)+"*"+(parseInt(r.qty.value)||1); }).filter(Boolean);
@@ -3577,10 +3594,13 @@ function tabCraft(m){
       k.push(el("div",{style:"display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"},d.items.map(function(x){ return itemBtn(x.id,x.name,x.qty,goBook,L("Открыть в справочнике")); })));
       k.push(el("h3",{style:"margin-top:10px"},[L("1. Ресурсы по рецепту")]));
       k.push(el("p",{class:"muted small"},[L("Что уходит прямо в рецепты этого списка.")]));
-      k.push(table([L("Ресурс"),L("Нужно")],d.direct,function(r){ return [itemCell(r),r.count]; }));
+      var dt=checkTable("d",d.direct), rt=checkTable("r",d.raw);
+      k.push(dt);
       k.push(el("h3",{style:"margin-top:14px"},[L("2. Базовые ресурсы")]));
       k.push(el("p",{class:"muted small"},[L("Всё разложено до сырья, которое добывается или находится в мире.")]));
-      k.push(table([L("Ресурс"),L("Нужно")],d.raw,function(r){ return [itemCell(r),r.count]; }));
+      k.push(rt);
+      k.push(el("button",{type:"button",class:"small",style:"margin-top:6px",onclick:function(){ got={}; saveGot();
+        [dt,rt].forEach(function(t){ Array.prototype.forEach.call(t.querySelectorAll("input[type=checkbox]"),function(cb){ cb.checked=false; cb.closest("tr").classList.remove("got"); }); }); }},[L("Снять отметки")]));
       k.push(el("h3",{style:"margin-top:14px"},[L("3. Время")]));
       if(d.hand.length){
         k.push(el("div",{class:"muted small"},[L("Ручной крафт: ")+fmtSec(d.hand_time_s)+L(" (при скорости действия 1; клановый бонус — вдвое быстрее)")]));
