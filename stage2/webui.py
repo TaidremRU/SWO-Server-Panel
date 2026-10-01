@@ -603,6 +603,8 @@ class WebUI:
         self._audit_lock = threading.Lock()
         self._tt_state = os.path.join(base, "tech_track_state.json")
         self._tt_log = os.path.join(base, "logs", "tech_track.jsonl")
+        self._vt_state = os.path.join(base, "visit_track_state.json")
+        self._vt_log = os.path.join(base, "logs", "map_visits.jsonl")
         self._ct_state = os.path.join(base, "clan_track_state.json")
         self._ct_events = os.path.join(base, "logs", "clan_events.jsonl")
         self._ct_points = os.path.join(base, "logs", "clan_points.jsonl")
@@ -639,6 +641,7 @@ class WebUI:
         tt = (self.cfg.get("players", {}) or {}).get("tech_track", {}) or {}
         if tt.get("enabled", True):
             threading.Thread(target=self._tech_track_loop, name="techtrack", daemon=True).start()
+        threading.Thread(target=self._visit_track_loop, name="visittrack", daemon=True).start()
         if (self.cfg.get("metrics") or {}).get("enabled", True):
             self.metrics.start()
         logging.info("webui: слушаю http://%s:%d/ — вход %s%s", host, port, self.auth.username,
@@ -704,6 +707,22 @@ class WebUI:
             except Exception:  # noqa: BLE001
                 logging.exception("clantrack: ошибка прохода")
             if self._stop.wait(iv):
+                return
+
+    def _visit_track_loop(self):
+        """Раз в минуту: посадки/взлёты/перелёты игроков (смена mapId) -> logs\\map_visits.jsonl.
+        Игра сама не пишет, кто куда сел."""
+        if self._stop.wait(60):
+            return
+        explored = os.path.join(os.path.dirname(self._vt_state), "playerweb_explored.json")
+        while not self._stop.is_set():
+            try:
+                ev = players.visit_track_scan(self.cfg, self._vt_state, self._vt_log, self._tt_log, explored)
+                if ev:
+                    logging.info("visittrack: %d перемещений", len(ev))
+            except Exception:  # noqa: BLE001
+                logging.exception("visittrack: ошибка прохода")
+            if self._stop.wait(60):
                 return
 
     def _backup_rotation(self):
@@ -1749,6 +1768,19 @@ class WebUI:
                                         limit=(q.get("limit") or ["400"])[0])
         except Exception as e:  # noqa: BLE001
             logging.exception("webui: tech_track_read")
+            d = {"ok": False, "error": str(e)}
+        return self._json(h, d, 200 if d.get("ok") else 500)
+
+    def _api_visits(self, h, method, q, sess):
+        """Посадки/перелёты: ?uid= — игрока (+ посещённые карты), без uid — по серверу."""
+        uid = (q.get("uid") or [None])[0]
+        try:
+            d = players.visit_track_read(self._vt_log, uid=uid, limit=(q.get("limit") or ["400"])[0],
+                                         tech_log=self._tt_log)
+            if uid is not None:
+                d["visited"] = sorted(players.visited_maps(self._vt_state, uid))
+        except Exception as e:  # noqa: BLE001
+            logging.exception("webui: visit_track_read")
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
@@ -3229,6 +3261,8 @@ var T = {
   pd_friends:"Друзья", pd_clan_rating:"рейтинг клана", pd_clan_slots:"мест",
   tt_title:"Трекинг техов / бустеров", tt_none:"пока пусто (панель ведёт лог с момента включения)",
   tt_gained:"изучил", tt_spent:"потратил бустер", tt_bgain:"получил бустер", tt_reschg:"новое исследование", tt_map:"сменил карту",
+  vt_title:"Посадки и перелёты", vt_none:"пока нет (панель ведёт журнал раз в минуту)", vt_landing:"посадка", vt_takeoff:"взлёт",
+  vt_transition:"перелёт", vt_first:"впервые", vt_visited:"Где бывал", vt_claimed_hint:"⚑ — есть участки, клик — карта", vt_server:"Посадки и перелёты (сервер)",
   tt_chart_title:"Учёба и бустеры по дням", tt_chart_tech:"техов изучено", tt_chart_boost:"бустеров потрачено",
   pd_inv_edit:"Правка инвентаря (только оффлайн)", pd_inv_online:"игрок сейчас онлайн — правка недоступна",
   pd_inv_give:"Выдать на склад", pd_inv_take:"Изъять", pd_inv_item:"предмет: имя или id",
@@ -3501,6 +3535,8 @@ var T = {
   pd_friends:"Friends", pd_clan_rating:"clan rating", pd_clan_slots:"slots",
   tt_title:"Tech / booster tracking", tt_none:"empty so far (the panel logs from when it was enabled)",
   tt_gained:"researched", tt_spent:"spent booster", tt_bgain:"gained booster", tt_reschg:"new research", tt_map:"changed map",
+  vt_title:"Landings and transfers", vt_none:"none yet (the panel logs once a minute)", vt_landing:"landing", vt_takeoff:"takeoff",
+  vt_transition:"transfer", vt_first:"first time", vt_visited:"Visited", vt_claimed_hint:"⚑ — has plots, click — map", vt_server:"Landings and transfers (server)",
   tt_chart_title:"Research & boosters by day", tt_chart_tech:"techs learned", tt_chart_boost:"boosters spent",
   pd_inv_edit:"Edit inventory (offline only)", pd_inv_online:"player is online — editing disabled",
   pd_inv_give:"Give to stash", pd_inv_take:"Take", pd_inv_item:"item: name or id",
@@ -5259,6 +5295,14 @@ function ttLine(e, noname){
   return el("span",{},pre.concat(body));
 }
 
+function vtLine(e, noname){
+  var ico={landing:"🛬",takeoff:"🚀",transition:"🔀"}[e.kind]||"";
+  var pre=[el("span",{class:"lg-t"},[(e.ts||"").slice(5,16)+" "])];
+  if(!noname) pre.push(plLink(e.uid, e.name), " ");
+  var body=[el("span",{class:e.kind==="takeoff"?"chip":"chip warn"},[ico+" "+t("vt_"+e.kind)]), " "+mapName(e.from)+" → "+mapName(e.to)];
+  if(e.first) body.push(" ", el("b",{},[t("vt_first")]));
+  return el("span",{},pre.concat(body));
+}
 // ---- player detail modal ----
 var pdCurId=null;
 function openPlayer(id){
@@ -5333,6 +5377,23 @@ function renderPlayerModal(d){
         return [el("a",{class:"pl-link",onclick:function(){ openMapdt(+m); }},[mapFull(m)]), String(byMap[m].length),
           el("span",{class:"small mono"},[byMap[m].slice(0,60).map(function(tt){ return tt.x+","+tt.y; }).join("  ")+(byMap[m].length>60? " …" : "")])]; })])]));
   }
+  // посадки/перелёты (панель сама ведёт: игра не пишет, кто куда сел) + где бывал
+  var vCard=el("div",{class:"card"},[el("h3",{},[t("vt_title")]), el("div",{class:"muted small"},["…"])]);
+  g.appendChild(vCard);
+  api("/api/visits?limit=300&uid="+d.id).then(function(vj){
+    vCard.innerHTML=""; vCard.appendChild(el("h3",{},[t("vt_title")+(vj.total!=null?" · "+vj.total:"")]));
+    if(!vj.ok){ vCard.appendChild(el("div",{class:"muted small"},[vj.error||t("err_net")])); return; }
+    var claimed={}; terr.forEach(function(tt){ claimed[tt.map]=(claimed[tt.map]||0)+1; });
+    var vis=(vj.visited||[]).slice().sort(function(a,b){ return (claimed[b]||0)-(claimed[a]||0) || a-b; });
+    if(vis.length) vCard.appendChild(el("div",{style:"margin-bottom:8px"},[el("div",{class:"muted small",style:"margin-bottom:4px"},[t("vt_visited")+" · "+vis.length+" ("+t("vt_claimed_hint")+")"]),
+      el("div",{class:"row",style:"gap:4px;flex-wrap:wrap"},vis.map(function(m){
+        return el("span",{class:claimed[m]?"chip":"chip warn",style:"cursor:pointer",title:mapFull(m),onclick:function(){ openMapdt(+m); }},
+          [(claimed[m]?"⚑ ":"")+mapName(m)+(claimed[m]?" · "+claimed[m]:"")]); }))]));
+    if(!vj.events.length){ vCard.appendChild(el("div",{class:"muted small"},[t("vt_none")])); return; }
+    var box=el("div",{class:"mono small",style:"max-height:240px;overflow:auto"},[]);
+    vj.events.forEach(function(e){ box.appendChild(el("div",{},[vtLine(e,true)])); });
+    vCard.appendChild(box);
+  }).catch(function(){ vCard.querySelector(".muted").textContent=t("err_net"); });
 
   // paramList/skillLevels.type и long_params.type — enum UnitParamType /
   // UnitParamTypeLong, вытащены 2026-09-17 из живого дампа игры (Il2CppDumper
@@ -5525,7 +5586,7 @@ function renderPlayerModal(d){
       [{name:t("tt_chart_tech"), unit:"", data:days.map(function(k){ return techByDay[k]; }), color:CHART_COL[1]},
        {name:t("tt_chart_boost"), unit:"", data:days.map(function(k){ return boostByDay[k]; }), color:CHART_COL[2]}]));
     var box=el("div",{class:"mono small",style:"max-height:200px;overflow:auto;margin-top:8px"},[]);
-    tj.events.slice(0,80).forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,true)])); });
+    tj.events.filter(function(e){ return e.kind!=="map_changed"; }).slice(0,80).forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,true)])); });
     ttCard.appendChild(box);
   }).catch(function(){ ttCard.querySelector(".muted").textContent=t("err_net"); });
 
@@ -6275,9 +6336,18 @@ function drawStats(j){
     ttc.innerHTML=""; ttc.appendChild(el("h3",{},[t("tt_title")+(tj.total!=null?" · "+tj.total:"")]));
     if(!tj.ok || !tj.events || !tj.events.length){ ttc.appendChild(el("div",{class:"muted small"},[t("tt_none")])); return; }
     var box=el("div",{class:"mono small",style:"max-height:280px;overflow:auto"},[]);
-    tj.events.forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,false)])); });
+    tj.events.filter(function(e){ return e.kind!=="map_changed"; }).forEach(function(e){ box.appendChild(el("div",{},[ttLine(e,false)])); });
     ttc.appendChild(box);
   }).catch(function(){ ttc.querySelector(".muted").textContent=t("err_net"); });
+  var vtc=el("div",{class:"card"},[el("h3",{},[t("vt_server")]), el("div",{class:"muted small"},["…"])]);
+  g.appendChild(vtc);
+  api("/api/visits?limit=150").then(function(vj){
+    vtc.innerHTML=""; vtc.appendChild(el("h3",{},[t("vt_server")+(vj.total!=null?" · "+vj.total:"")]));
+    if(!vj.ok || !vj.events || !vj.events.length){ vtc.appendChild(el("div",{class:"muted small"},[t("vt_none")])); return; }
+    var box=el("div",{class:"mono small",style:"max-height:280px;overflow:auto"},[]);
+    vj.events.forEach(function(e){ box.appendChild(el("div",{},[vtLine(e,false)])); });
+    vtc.appendChild(box);
+  }).catch(function(){ vtc.querySelector(".muted").textContent=t("err_net"); });
 
   b.appendChild(g);
   b.appendChild(el("p",{class:"muted small",style:"margin-top:8px"},[

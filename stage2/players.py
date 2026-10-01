@@ -4130,10 +4130,7 @@ def tech_track_scan(cfg, state_path, log_path):
         if cur["research"] and cur["research"] != p.get("research"):
             events.append({"ts": ts, "uid": uid, "name": who, "kind": "research_changed",
                            "to": cur["research"], "from": p.get("research") or ""})
-        if cur["map"] is not None and p.get("map") is not None and cur["map"] != p["map"]:
-            events.append({"ts": ts, "uid": uid, "name": who, "kind": "map_changed",
-                           "to": cur["map"], "from": p["map"],
-                           "space": cur["map"] == 0 or p["map"] == 0})
+        # смена карты (посадки/взлёты) — раз в минуту в visit_track_scan, logs\map_visits.jsonl
 
     try:
         tmp = state_path + ".swtmp"
@@ -4168,6 +4165,139 @@ def tech_track_read(cfg, log_path, uid=None, kind=None, limit=400):
         rows.append(e)
     try:
         limit = max(1, min(3000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 400
+    return {"ok": True, "total": len(rows), "events": rows[-limit:][::-1]}
+
+
+# ---------------------------------------------------------------- посадки/перелёты
+# Игра не пишет, кто на какую карту сел (rocket_transfer_journal.txt — без игрока),
+# поэтому панель сама сравнивает mapId в user*.json: 0 — космос, иначе планета/спутник/
+# астероид (id карты == id объекта звёздной системы). Файл перечитывается только при
+# смене mtime — проход раз в минуту дешёвый.
+def _visit_seed(tech_log, explored_path):
+    """Посещённые карты до появления трекера: старые map_changed из tech_track.jsonl(.1)
+    и блоки «тумана войны» панели игроков. -> {"uid": {map, ...}}."""
+    seen = {}
+    for p in (tech_log + ".1", tech_log):
+        for ln in _read_text(p).splitlines():
+            if '"map_changed"' not in ln:
+                continue
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            s = seen.setdefault(str(e.get("uid")), set())
+            s.update(m for m in (e.get("from"), e.get("to")) if m)
+    for u, maps in ((_read_json(explored_path) or {}) if explored_path else {}).items():
+        seen.setdefault(str(u), set()).update(int(k) for k, v in (maps or {}).items() if v and k != "0")
+    return seen
+
+
+def visit_track_scan(cfg, state_path, log_path, tech_log=None, explored_path=None):
+    """Один проход: у кого сменился mapId — событие в ``log_path`` (jsonl):
+    ``{ts, uid, name, kind: "landing"|"takeoff"|"transition", from, to, first}``,
+    first — на эту карту игрок попал впервые (на 2026-10 — с учётом истории tech_track).
+    Состояние: ``{users: {uid: [mtime, map]}, visited: {uid: [map, ...]}}``. -> новые события."""
+    world_dir = find_world_dir(cfg)
+    if not world_dir:
+        return []
+    st = _read_json(state_path) or {}
+    prev = st.get("users") or {}
+    if "visited" in st:
+        visited = {u: set(v) for u, v in st["visited"].items()}
+    else:
+        visited = _visit_seed(tech_log, explored_path) if tech_log else {}
+    d = os.path.join(world_dir, "Data", "users")
+    try:
+        listing = os.listdir(d)
+    except OSError:
+        return []
+    names = None
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur_u, events, changed = {}, [], "visited" not in st
+    for nm in listing:
+        m = _USER_FILE_RX.match(nm)
+        if not m:
+            continue
+        key = m.group(1)
+        try:
+            mt = os.path.getmtime(os.path.join(d, nm))
+        except OSError:
+            continue
+        p = prev.get(key)
+        if p and p[0] == mt:
+            cur_u[key] = p
+            continue
+        raw = _read_json(os.path.join(d, nm))
+        mp = raw.get("mapId") if raw else None
+        if mp is None:
+            if p:
+                cur_u[key] = p
+            continue
+        cur_u[key] = [mt, mp]
+        changed = True
+        vs = visited.setdefault(key, set())
+        if p and p[1] != mp:
+            if names is None:
+                names = load_user_list(world_dir)
+            kind = "landing" if p[1] == 0 else "takeoff" if mp == 0 else "transition"
+            events.append({"ts": ts, "uid": int(key), "name": names.get(int(key)) or ("id " + key), "kind": kind,
+                           "from": p[1], "to": mp, "first": bool(mp) and mp not in vs})
+        if mp:
+            vs.add(mp)
+    if not changed and len(cur_u) == len(prev):
+        return []
+    try:
+        tmp = state_path + ".swtmp"
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"updated": ts, "users": cur_u, "visited": {u: sorted(v) for u, v in visited.items() if v}},
+                      f, separators=(",", ":"))
+        os.replace(tmp, state_path)
+    except OSError:
+        logging.exception("visit_track: не удалось записать %s", state_path)
+    if events:
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with io.open(log_path, "a", encoding="utf-8") as f:
+                for e in events:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        except OSError:
+            logging.exception("visit_track: не удалось дописать %s", log_path)
+    return events
+
+
+def visited_maps(state_path, uid):
+    """Карты (не космос), где игрок бывал. -> set."""
+    return set(((_read_json(state_path) or {}).get("visited") or {}).get(str(uid)) or ())
+
+
+def visit_track_read(log_path, uid=None, limit=400, tech_log=None):
+    """События посадок (новые сверху). Старые map_changed из tech_track.jsonl — тоже,
+    в том же виде (kind по from/to, first=None — неизвестно)."""
+    rows = []
+    if tech_log:
+        for p in (tech_log + ".1", tech_log):
+            for ln in _read_text(p, tail_bytes=5_000_000).splitlines():
+                if '"map_changed"' not in ln:
+                    continue
+                try:
+                    e = json.loads(ln)
+                except ValueError:
+                    continue
+                f, t = e.get("from"), e.get("to")
+                rows.append({"ts": e.get("ts"), "uid": e.get("uid"), "name": e.get("name"), "from": f, "to": t,
+                             "kind": "landing" if f == 0 else "takeoff" if t == 0 else "transition", "first": None})
+    for ln in _read_text(log_path, tail_bytes=20_000_000).splitlines():
+        try:
+            rows.append(json.loads(ln))
+        except ValueError:
+            continue
+    if uid is not None:
+        rows = [e for e in rows if e.get("uid") == int(uid)]
+    rows.sort(key=lambda e: e.get("ts") or "")
+    try:
+        limit = max(1, min(5000, int(limit)))
     except (TypeError, ValueError):
         limit = 400
     return {"ok": True, "total": len(rows), "events": rows[-limit:][::-1]}

@@ -218,6 +218,8 @@ class PlayerWeb:
         self._ct_events = ct_events or os.path.join(base, "logs", "clan_events.jsonl")
         self._ct_points = ct_points or os.path.join(base, "logs", "clan_points.jsonl")
         self._tt_log = tt_log or os.path.join(base, "logs", "tech_track.jsonl")
+        self._vt_log = os.path.join(base, "logs", "map_visits.jsonl")       # пишет webui._visit_track_loop
+        self._vt_state = os.path.join(base, "visit_track_state.json")
         self._sessions = {}          # tok -> {uid, nick, exp, fp?, chk?}
         self._slock = threading.Lock()
         self._remember_path = os.path.join(base, "playerweb_remember.json")
@@ -1510,6 +1512,27 @@ class PlayerWeb:
             return {"ok": bool(so.get("ok")), "names": names}
         return self._cached("map_names", 600, build, swr=3600).get("names") or {}
 
+    def _obj_name(self, mp):
+        """Название карты по id: система 1 — из общего словаря, остальные — через индекс космоса."""
+        if mp == 0:
+            return "Космос"
+        nm = self._map_names().get(mp)
+        if nm:
+            return nm
+        st = self._star_of(mp) if mp else None
+        o = next((x for x in self._star_objects(st).get("objects") or [] if x["id"] == mp), None) if st is not None else None
+        if o and o.get("name"):
+            return "%s (%s)" % (o["name"], self._KIND_RU[o["kind"]]) if o.get("kind") in self._KIND_RU else o["name"]
+        return "карта %s" % mp
+
+    def _visited(self, uid, raw=None):
+        """Карты, где игрок бывал (журнал посадок панели) + где он сейчас."""
+        v = players.visited_maps(self._vt_state, uid)
+        if raw and raw.get("mapId"):
+            v.add(raw["mapId"])
+        v.discard(0)
+        return v
+
     def _star_objects(self, st):
         """players.space_objects с замером (разбор большой системы — до десятков секунд)."""
         return self._timed("space:%s" % st, "Разбор звёздной системы %s" % st, "Parsing star system %s" % st,
@@ -1575,8 +1598,8 @@ class PlayerWeb:
         return self._cached("space_index", 600, build).get("ids") or {}
 
     def _api_galaxy(self, uid, q):
-        """Карта галактики «открывается» по мере клаймов: отдаются ТОЛЬКО системы, где у игрока есть
-        участки (остальные на сервере отсекаются — исследование часть игры). Позиции — из заголовков
+        """Карта галактики «открывается» по мере клаймов и посадок: отдаются ТОЛЬКО системы, где у игрока
+        есть участки или где он бывал (остальные на сервере отсекаются — исследование часть игры). Позиции — из заголовков
         star*.json; корабли — числом у открытых систем."""
         ss = self._space_stars()
         if not ss:
@@ -1588,34 +1611,43 @@ class PlayerWeb:
         for t in (raw or {}).get("userTerritories") or []:
             st = self._star_of(t.get("mapId") or 0) if t.get("mapId") else None
             if st is not None:
-                mine.setdefault(st, {"claims": 0, "ships": 0})["claims"] += 1
+                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0})["claims"] += 1
+        for mp in self._visited(uid, raw):          # где садился — система тоже «открыта»
+            st = self._star_of(mp)
+            if st is not None:
+                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0})["visited"] += 1
         for sh in self._my_ships(uid):
             if (sh.get("star") or 1) in mine:
                 mine[sh.get("star") or 1]["ships"] += 1
         return {"ok": True,
                 "mine": [{"star": k, "name": (stars.get(k) or {}).get("name"), "x": (stars.get(k) or {}).get("x"),
-                          "y": (stars.get(k) or {}).get("y"), "claims": v["claims"], "ships": v["ships"]}
+                          "y": (stars.get(k) or {}).get("y"), "claims": v["claims"], "ships": v["ships"],
+                          "visited": v["visited"]}
                          for k, v in sorted(mine.items()) if (stars.get(k) or {}).get("x") is not None]}
 
     def _api_my_space(self, uid, q):
-        """Мои планеты в космосе: объекты, на которых у меня участки, по звёздным системам +
-        мои корабли рядом. Чужие и прочие объекты не отдаются (исследование — часть игры)."""
+        """Мои планеты в космосе: объекты, на которых у меня участки или где я бывал (журнал посадок),
+        по звёздным системам + мои корабли рядом. Чужие и прочие объекты не отдаются (исследование — часть игры)."""
         wd = players.find_world_dir(self.cfg)
         if not wd:
             return {"ok": False, "error": "каталог мира не найден"}
         raw = players._read_json(players._user_file(wd, uid)) or {}
         claims = collections.Counter(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId"))
+        visited = self._visited(uid, raw)
         systems, unknown = {}, []
-        for mp, n in sorted(claims.items()):
+        for mp in sorted(set(claims) | visited):
+            n = claims.get(mp, 0)
             st = self._star_of(mp)
             objs = self._star_objects(st).get("objects") or [] if st is not None else []
             o = next((x for x in objs if x["id"] == mp), None)
             if not o:
-                unknown.append({"map": mp, "claims": n})
+                if n:
+                    unknown.append({"map": mp, "claims": n})
                 continue
             loc = (st,)
             row = {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
-                   "x": o["x"], "y": o["y"], "claims": n, "dist": round(math.hypot(o["x"], o["y"]))}
+                   "x": o["x"], "y": o["y"], "claims": n, "visited": mp in visited,
+                   "dist": round(math.hypot(o["x"], o["y"]))}
             if o["kind"] == "satellite":
                 # спутник висит у своей планеты (21–195 ед., планеты не движутся) — ближайшая планета
                 par = min((p for p in objs if p["kind"] == "planet"),
@@ -2090,6 +2122,15 @@ class PlayerWeb:
         for r in act.get("role_grants") or []:
             if r.get("as_target"):
                 add(None, "role", "Выдана роль в игре", r.get("role"), epoch=0)
+        for e in players.visit_track_read(self._vt_log, uid=uid, limit=5000, tech_log=self._tt_log)["events"]:
+            k, f, t = e.get("kind"), e.get("from"), e.get("to")
+            if k == "landing":
+                add(None, "travel", "Первая посадка" if e.get("first") else "Посадка", self._obj_name(t), epoch=_epoch(e.get("ts")))
+            elif k == "takeoff":
+                add(None, "travel", "Взлёт в космос", self._obj_name(f), epoch=_epoch(e.get("ts")))
+            else:
+                add(None, "travel", "Перелёт (впервые)" if e.get("first") else "Перелёт",
+                    "%s → %s" % (self._obj_name(f), self._obj_name(t)), epoch=_epoch(e.get("ts")))
         for l in act.get("land_deletions") or []:
             add(l["ts"], "land", "Снесён участок", "%s · %s, %s" % (self._map_names().get(l["map"]) or l["map"], l["x"], l["y"]))
         try:
@@ -2745,7 +2786,6 @@ var EN_DICT={
   "звёздные системы":"star systems",
   "мои системы (клик — к схеме)":"my systems (click — to the chart)",
   "Галактика":"Galaxy",
-  "Карта открывается по мере того, как вы ставите участки: здесь только системы, где они у вас есть.":"The map opens up as you claim plots: only systems where you have plots are shown.",
   "На планетах":"On planets","В космосе":"In space","На планетах у вас нет ракет, машин и другого транспорта.":"You have no rockets, cars or other vehicles on planets.",
   "на земле: ":"landed: ",
   "Координаты":"Coordinates",
@@ -2774,7 +2814,6 @@ var EN_DICT={
   "Энергия":"Energy",
   "Звёздная система ":"Star system ","система ":"system ",
   "в пути":"travelling",
-  "Планеты, спутники и астероиды, на которых у вас есть участки, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.":"Planets, moons and asteroids where you have plots, and your ships. The star is in the centre. Ships far from the star are shown as an arrow at the edge.",
   "в движении":"moving","в пути, далеко от звезды":"travelling, far from the star","В этой системе у вас нет участков — только корабли.":"You have no plots in this system — only ships.",
   "У вас пока нет участков на планетах и кораблей в космосе.":"You have no plots on planets and no ships in space yet.","Космос: мои планеты и корабли":"Space: my planets and ships",
   "планеты":"of planet",
@@ -2866,6 +2905,14 @@ var EN_DICT={
   "Награда сезонного рейтинга":"Season rating reward",
   "Выдана роль в игре":"In-game role granted",
   "Снесён участок":"Plot removed",
+  "Посадка":"Landing", "Первая посадка":"First landing", "Взлёт в космос":"Takeoff to space",
+  "Перелёт":"Transfer", "Перелёт (впервые)":"Transfer (first time)", "Посадки":"Landings",
+  "бывали":"visited", "вы здесь бывали, участков нет":"you have been here, no plots",
+  "где бывали (без участков)":"visited (no plots)", "посещено объектов: ":"objects visited: ",
+  "Вы пока не садились на планеты, у вас нет участков и кораблей в космосе.":"You have not landed on any planets yet and have no plots or ships in space.",
+  "Планеты, спутники и астероиды, где у вас есть участки или куда вы садились, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.":"Planets, satellites and asteroids where you have plots or have landed, and your ships. The star is in the centre. Ships far from the star are shown as an arrow at the edge.",
+  "В этой системе вы не садились и участков нет — только корабли.":"You have not landed in this system and have no plots here — only ships.",
+  "Карта открывается по мере того, как вы садитесь на планеты и ставите участки: здесь только системы, где вы бывали или где у вас есть участки.":"The map opens up as you land on planets and claim plots: only systems you have visited or have plots in are shown.",
   "Регистрация на сервере":"Registered on the server",
   "Игровая сессия":"Play session",
   "Сейчас в игре":"In game now",
@@ -4030,16 +4077,16 @@ function spaceCard(box){
   api("/api/my-space",undefined,boxProg(box)).then(function(d){
     box.innerHTML="";
     if(!d.ok){ box.appendChild(errBox(d)); return; }
-    if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Космос"),[el("div",{class:"muted"},[L("У вас пока нет участков на планетах и кораблей в космосе.")])])); return; }
-    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты, спутники и астероиды, на которых у вас есть участки, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.")])];
+    if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Космос"),[el("div",{class:"muted"},[L("Вы пока не садились на планеты, у вас нет участков и кораблей в космосе.")])])); return; }
+    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты, спутники и астероиды, где у вас есть участки или куда вы садились, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.")])];
     d.systems.forEach(function(sy){
       var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("Координаты"),L("От звезды")],sy.objects,function(o){
-        return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""), String(o.claims),
+        return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""), o.claims? String(o.claims) : el("span",{class:"muted"},[L("бывали")]),
           Math.round(o.x)+", "+Math.round(o.y), num(o.dist)+L(" ед.")]; });
       kids.push(el("div",{id:"sys-"+sy.star,style:"margin-bottom:12px;scroll-margin-top:70px"},[
         el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система ")+(sy.star_name? sy.star_name+" (#"+sy.star+")" : "#"+sy.star)])]),
         el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[el("div",{style:"flex:1;min-width:260px;max-width:620px"},spaceMap(sy)),
-          el("div",{style:"flex:1;min-width:240px"},[sy.objects.length? tbl : el("div",{class:"muted small"},[L("В этой системе у вас нет участков — только корабли.")])])])]));
+          el("div",{style:"flex:1;min-width:240px"},[sy.objects.length? tbl : el("div",{class:"muted small"},[L("В этой системе вы не садились и участков нет — только корабли.")])])])]));
     });
     if(d.unknown.length) kids.push(el("div",{class:"muted small"},[L("Участки в других системах (без схемы): ")+d.unknown.map(function(u){ return L("карта ")+u.map+" · "+u.claims; }).join(", ")]));
     box.appendChild(card(L("Космос: мои планеты и корабли"),kids));
@@ -4096,15 +4143,18 @@ function spaceMap(sy){
   mk(0,0,[svgEl("circle",{r:14,fill:"#f2c14e",opacity:"0.25"}), svgEl("circle",{r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")+(sy.star_name? " "+sy.star_name : "")])]),
     sy.star_name? label(sy.star_name,0,26,"middle","var(--mut)") : null]);
   var own={}; sy.objects.forEach(function(o){ if(o.kind==="planet") own[o.name]=1; });
+  var hasClaim=sy.objects.some(function(o){ return o.claims; }), hasVisit=sy.objects.some(function(o){ return !o.claims; });
   var parents={}; sy.objects.forEach(function(o){ if(o.parent && !own[o.parent.name]) parents[o.parent.name]=o.parent; });
   Object.keys(parents).forEach(function(nm){ var p=parents[nm];
     mk(p.x,p.y,[svgEl("circle",{r:7,fill:"var(--mut)",opacity:"0.55"},[svgEl("title",{},[p.name+" ("+L("планета")+") · "+Math.round(p.x)+", "+Math.round(p.y)])]),
       label(p.name,11,-9,"start","var(--mut)")]); });
   sy.objects.forEach(function(o){
     var r=o.kind==="planet"?8:o.kind==="satellite"?6:5;
-    var tip=svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+L("участков: ")+o.claims+" · "+Math.round(o.x)+", "+Math.round(o.y)]);
-    var dot=svgEl("circle",{r:r,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},[tip]);
-    var txt=label(o.name+" · "+o.claims,r+5,4);
+    // с участками — закрашенный кружок и число участков; где только бывали — кольцо без числа
+    var tip=svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+(o.claims? L("участков: ")+o.claims : L("вы здесь бывали, участков нет"))+" · "+Math.round(o.x)+", "+Math.round(o.y)]);
+    var dot=o.claims? svgEl("circle",{r:r,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},[tip])
+      : svgEl("circle",{r:r-1,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip]);
+    var txt=o.claims? label(o.name+" · "+o.claims,r+5,4) : label(o.name,r+5,4,"start","var(--mut)");
     if(!o.parent){ mk(o.x,o.y,[dot,txt]); return; }
     var dx=o.x-o.parent.x, dy=-(o.y-o.parent.y), dl=Math.hypot(dx,dy)||1, ux=dx/dl, uy=dy/dl;
     var line=svgEl("line",{x1:0,y1:0,stroke:"var(--mut)","stroke-width":"1",opacity:"0.6"}), inner=svgEl("g",{},[dot,txt]);
@@ -4122,7 +4172,8 @@ function spaceMap(sy){
   });
   var legend=el("div",{class:"row small",style:"gap:14px;margin:4px 0 8px"},[
     el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:#f2c14e"),L("звезда")]),
-    el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои планеты (число — участков)")]),
+    hasClaim? el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои планеты (число — участков)")]) : null,
+    hasVisit? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px solid var(--ok)"),L("где бывали (без участков)")]) : null,
     sy.ships.length? el("span",{},[legendDot("width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid var(--s2)"),L("мои корабли")]) : null]);
   return [pz.svg,pz.bar,legend];
 }
@@ -4136,15 +4187,18 @@ function galaxyCard(box){
     var GA=window.innerWidth<700? 1.3 : 2.2;       // на телефоне — почти квадрат
     var pz=panZoom(R,cx,cy,GA), mk=pz.mk, label=pz.label;
     d.mine.forEach(function(m){
-      var nm=(m.name||("#"+m.star)), what=(m.claims? L("участков: ")+m.claims : "")+(m.claims&&m.ships? " · " : "")+(m.ships? L("кораблей: ")+m.ships : "");
-      var g=mk(m.x,m.y,[svgEl("circle",{r:10,fill:"var(--s1)",opacity:"0.25"}), svgEl("circle",{r:5,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},
-        [svgEl("title",{},[nm+" · "+what])]), label(nm,9,4)]);
+      var nm=(m.name||("#"+m.star)), what=[m.claims? L("участков: ")+m.claims : "", m.visited? L("посещено объектов: ")+m.visited : "",
+        m.ships? L("кораблей: ")+m.ships : ""].filter(Boolean).join(" · ");
+      var tip=svgEl("title",{},[nm+" · "+what]);
+      var g=mk(m.x,m.y, m.claims? [svgEl("circle",{r:10,fill:"var(--s1)",opacity:"0.25"}), svgEl("circle",{r:5,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},[tip]), label(nm,9,4)]
+        : [svgEl("circle",{r:5,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip]), label(nm,9,4,"start","var(--mut)")]);
       g.style.cursor="pointer";
       g.addEventListener("click",function(){ if(pz.wasDrag()) return; var t=document.getElementById("sys-"+m.star); if(t) t.scrollIntoView({behavior:"smooth",block:"start"}); });
     });
     var legend=el("div",{class:"row small",style:"gap:14px;margin:4px 0 8px"},[
-      el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои системы (клик — к схеме)")])]);
-    var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Карта открывается по мере того, как вы ставите участки: здесь только системы, где они у вас есть.")]),
+      el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои системы (клик — к схеме)")]),
+      d.mine.some(function(m){ return !m.claims; })? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px solid var(--ok)"),L("где бывали (без участков)")]) : null]);
+    var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Карта открывается по мере того, как вы садитесь на планеты и ставите участки: здесь только системы, где вы бывали или где у вас есть участки.")]),
       pz.svg,pz.bar,legend]);
     box.insertBefore(c, box.firstChild);
   }).catch(function(){});
@@ -4184,8 +4238,8 @@ function tabTransport(m){
 
 // ---------------------------------------------------------------- мой журнал
 var JK={tech:L("Техи"),research:L("Исследование"),booster:L("Ускорители"),level:L("Уровни"),clan:L("Клан"),death:L("Смерти"),
-  reward:L("Награды"),role:L("Роли"),land:L("Участки"),session:L("Сессии")};
-var JK_ICO={tech:"🔬",research:"🧪",booster:"⚡",level:"⭐",clan:"🛡",death:"💀",reward:"🏆",role:"🎖",land:"🏚",session:"🎮"};
+  reward:L("Награды"),role:L("Роли"),land:L("Участки"),travel:L("Посадки"),session:L("Сессии")};
+var JK_ICO={tech:"🔬",research:"🧪",booster:"⚡",level:"⭐",clan:"🛡",death:"💀",reward:"🏆",role:"🎖",land:"🏚",travel:"🛬",session:"🎮"};
 function tabJournal(m){
   var box=el("div"); m.appendChild(box);
   load(box,"/api/journal",function(d){
