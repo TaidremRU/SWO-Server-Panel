@@ -18,6 +18,8 @@ buff_notepad.json
 tech_track_state.json
 clan_track_state.json
 inv_track_state.json
+visit_track_state.json
+planet_shares.json
 
 # --- веб-панель: локальные креды и аудит ---
 webui_auth.json

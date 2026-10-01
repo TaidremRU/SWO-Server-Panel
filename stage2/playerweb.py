@@ -82,7 +82,9 @@ PERSONAL_SWR = 86400       # своё старше TTL, но моложе сут
 DISK_SAVE_SEC = 120        # кэш панели на диск (cache/playerweb) — не чаще, чем раз в N с
 DISK_VER = 2
 DISK_CHUNK = 500           # большой список (хранилища карты) пишем/читаем кусками — не держим GIL секундами
-NO_JOB = {"item-icons", "item-icons-png", "my-map-image", "chat", "track"}   # быстрые или не JSON
+NO_JOB = {"item-icons", "item-icons-png", "my-map-image", "chat", "track", "planet-chat"}   # быстрые или не JSON
+PCHAT_EVERY = 2            # комментарии к планете: не чаще раза в N с на игрока
+PCHAT_MAX = 500            # длина сообщения
 REFRESH_EVERY = 30         # кнопка «Пересчитать»: не чаще раза в N с на игрока
 HISTORY_SEC = 3600         # почасовой снимок уровня/рейтинга/техов всех игроков для «Моей истории»
 MARKET_CACHE_SEC = 300
@@ -220,6 +222,12 @@ class PlayerWeb:
         self._tt_log = tt_log or os.path.join(base, "logs", "tech_track.jsonl")
         self._vt_log = os.path.join(base, "logs", "map_visits.jsonl")       # пишет webui._visit_track_loop
         self._vt_state = os.path.join(base, "visit_track_state.json")
+        self._share_path = os.path.join(base, "planet_shares.json")     # кто какой планетой с кем поделился
+        self._pchat_path = os.path.join(base, "logs", "planet_chat.jsonl")
+        self._share_lock = threading.Lock()
+        self._pchat_lock = threading.Lock()
+        self._pchat = (None, {}, 0)  # (mtime/size, {map: [сообщение, ...]}, последний id)
+        self._pchat_last = {}        # uid -> когда писал (не чаще PCHAT_EVERY с)
         self._sessions = {}          # tok -> {uid, nick, exp, fp?, chk?}
         self._slock = threading.Lock()
         self._remember_path = os.path.join(base, "playerweb_remember.json")
@@ -1319,6 +1327,11 @@ class PlayerWeb:
                 return self._json(h, {"ok": True}, set_cookie="psid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
             if route == "refresh" and method == "POST":
                 return self._api_refresh(h, s)
+            if route in ("planet-share", "planet-chat") and method == "POST":
+                if s.get("imp"):        # «глазами игрока» — только чтение
+                    return self._json(h, {"ok": False, "error": "только просмотр"}, 403)
+                d = (self._api_planet_share_set if route == "planet-share" else self._api_planet_chat_post)(h, s)
+                return self._json(h, d, 200 if d.get("ok") else 400)
             if method != "GET":
                 return self._json(h, {"error": "unknown"}, 404)
             if route == "server":
@@ -1610,31 +1623,40 @@ class PlayerWeb:
         for t in (raw or {}).get("userTerritories") or []:
             st = self._star_of(t.get("mapId") or 0) if t.get("mapId") else None
             if st is not None:
-                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0})["claims"] += 1
+                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0, "shared": 0})["claims"] += 1
         for mp in self._visited(uid, raw):          # где садился — система тоже «открыта»
             st = self._star_of(mp)
             if st is not None:
-                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0})["visited"] += 1
+                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0, "shared": 0})["visited"] += 1
+        for mp in self._shared_to(uid):             # и где поделились планетой
+            st = self._star_of(mp)
+            if st is not None:
+                mine.setdefault(st, {"claims": 0, "ships": 0, "visited": 0, "shared": 0})["shared"] += 1
         for sh in self._my_ships(uid):
             if (sh.get("star") or 1) in mine:
                 mine[sh.get("star") or 1]["ships"] += 1
         return {"ok": True,
                 "mine": [{"star": k, "name": (stars.get(k) or {}).get("name"), "x": (stars.get(k) or {}).get("x"),
                           "y": (stars.get(k) or {}).get("y"), "claims": v["claims"], "ships": v["ships"],
-                          "visited": v["visited"]}
+                          "visited": v["visited"], "shared": v["shared"]}
                          for k, v in sorted(mine.items()) if (stars.get(k) or {}).get("x") is not None]}
 
     def _api_my_space(self, uid, q):
-        """Мои планеты в космосе: объекты, на которых у меня участки или где я бывал (журнал посадок),
-        по звёздным системам + мои корабли рядом. Чужие и прочие объекты не отдаются (исследование — часть игры)."""
+        """Мои планеты в космосе: где у меня участки, где я бывал (журнал посадок) и какими со мной
+        поделились, по звёздным системам + мои корабли рядом. Прочие объекты не отдаются
+        (исследование — часть игры)."""
         wd = players.find_world_dir(self.cfg)
         if not wd:
             return {"ok": False, "error": "каталог мира не найден"}
         raw = players._read_json(players._user_file(wd, uid)) or {}
         claims = collections.Counter(t.get("mapId") for t in raw.get("userTerritories") or [] if t.get("mapId"))
         visited = self._visited(uid, raw)
+        shared = self._shared_to(uid)                  # map -> [ник, ...] кто поделился
+        mine = self._shares_load().get(str(uid)) or {}
+        names = players.load_user_list(wd)
+        chat = self._pchat_index()
         systems, unknown = {}, []
-        for mp in sorted(set(claims) | visited):
+        for mp in sorted(set(claims) | visited | set(shared)):
             n = claims.get(mp, 0)
             st = self._star_of(mp)
             objs = self._star_objects(st).get("objects") or [] if st is not None else []
@@ -1644,9 +1666,15 @@ class PlayerWeb:
                     unknown.append({"map": mp, "claims": n})
                 continue
             loc = (st,)
+            own = bool(n) or mp in visited
             row = {"map": mp, "name": o["name"], "kind": o["kind"], "kind_ru": self._KIND_RU.get(o["kind"], ""),
-                   "x": o["x"], "y": o["y"], "claims": n, "visited": mp in visited,
-                   "dist": round(math.hypot(o["x"], o["y"]))}
+                   "x": o["x"], "y": o["y"], "claims": n, "visited": mp in visited, "own": own,
+                   "dist": round(math.hypot(o["x"], o["y"])), "chat": chat.get(mp) or {"n": 0, "last": 0}}
+            if mp in shared:
+                row["shared_by"] = shared[mp]
+            sh = mine.get(str(mp))
+            if own and sh:
+                row["my_share"] = {"mode": sh["mode"], "to": [names.get(u) or "id %s" % u for u in sh.get("to") or []]}
             if o["kind"] == "satellite":
                 # спутник висит у своей планеты (21–195 ед., планеты не движутся) — ближайшая планета
                 par = min((p for p in objs if p["kind"] == "planet"),
@@ -1665,6 +1693,162 @@ class PlayerWeb:
             sy["ships"].append({"id": sh["id"], "model": sh["model"], "x": sh["x"], "y": sh["y"], "near": sh.get("near"),
                                 "moving": sh.get("moving"), "far": far})
         return {"ok": True, "systems": list(systems.values()), "unknown": unknown}
+
+    # ------------------------------------------------------------ планеты: «поделиться» и комментарии
+    # planet_shares.json: {"<uid владельца>": {"<карта>": {"mode": "friends"|"all"|"list", "to": [uid], "ts"}}}.
+    # Делиться можно только своим (участки или бывал); видят: все / друзья владельца (friends.json игры) /
+    # перечисленные. Комментарии к планете — всем, кому она видна (своя или поделились).
+    SHARE_MODES = ("friends", "all", "list")
+
+    def _shares_load(self):
+        return players._read_json(self._share_path) or {}
+
+    def _shared_to(self, uid):
+        """{карта: [ник, ...]} — чем поделились с игроком (свои шары не в счёт)."""
+        sh = self._shares_load()
+        if not sh:
+            return {}
+        wd = players.find_world_dir(self.cfg)
+        names = players.load_user_list(wd) if wd else {}
+        friends = players.load_friends(wd) if wd else {}
+        out = {}
+        for owner, maps in sh.items():
+            try:
+                o = int(owner)
+            except ValueError:
+                continue
+            if o == uid:
+                continue
+            fr = None
+            for mp, r in (maps or {}).items():
+                mode = r.get("mode")
+                if mode == "friends":
+                    if fr is None:
+                        fr = {f.get("id") for f in friends.get(o) or []}
+                    ok = uid in fr
+                else:
+                    ok = mode == "all" or (mode == "list" and uid in (r.get("to") or []))
+                if ok:
+                    out.setdefault(int(mp), []).append(names.get(o) or "id %s" % o)
+        return out
+
+    def _planet_access(self, uid, mp):
+        """Видна ли игроку планета: своя (участки/бывал) или ею поделились. -> (своя, видна)."""
+        wd = players.find_world_dir(self.cfg)
+        raw = players._read_json(players._user_file(wd, uid)) if wd else {}
+        own = mp in self._visited(uid, raw) or any(t.get("mapId") == mp for t in (raw or {}).get("userTerritories") or [])
+        return own, own or mp in self._shared_to(uid)
+
+    def _api_planet_share_set(self, h, s):
+        b = self._body(h)
+        try:
+            mp = int(b.get("map"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad map"}
+        mode = str(b.get("mode") or "")
+        own, _ = self._planet_access(s["uid"], mp)
+        if not own:
+            return {"ok": False, "error": "делиться можно только своими планетами"}
+        st = self._star_of(mp)
+        if st is None or not any(o["id"] == mp for o in self._star_objects(st).get("objects") or []):
+            return {"ok": False, "error": "это не планета"}
+        to, bad = [], []
+        if mode == "list":
+            wd = players.find_world_dir(self.cfg)
+            by_nick = {n.strip().lower(): i for i, n in players.load_user_list(wd).items()} if wd else {}
+            for nk in (b.get("to") or [])[:100]:
+                i = by_nick.get(str(nk).strip().lower())
+                if i is None:
+                    bad.append(str(nk)[:64])
+                elif i != s["uid"] and i not in to:
+                    to.append(i)
+            if bad:
+                return {"ok": False, "error": "нет таких игроков", "unknown": bad}
+            if not to:
+                return {"ok": False, "error": "укажите игроков"}
+        elif mode not in self.SHARE_MODES and mode != "none":
+            return {"ok": False, "error": "bad mode"}
+        with self._share_lock:
+            d = self._shares_load()
+            mine = d.setdefault(str(s["uid"]), {})
+            if mode == "none":
+                mine.pop(str(mp), None)
+            else:
+                mine[str(mp)] = {"mode": mode, "to": to, "ts": int(time.time())}
+            if not mine:
+                d.pop(str(s["uid"]), None)
+            tmp = self._share_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, separators=(",", ":"))
+            os.replace(tmp, self._share_path)
+        self._event(h, "planet_share", s["nick"], uid=s["uid"], sid=h._sid,
+                    d="%s → %s%s" % (self._obj_name(mp), mode, (" (%d)" % len(to)) if to else ""))
+        return {"ok": True}
+
+    def _pchat_all(self):
+        """{карта: [сообщение]} из planet_chat.jsonl — перечитывается при изменении файла."""
+        try:
+            stt = os.stat(self._pchat_path)
+            sig = (stt.st_mtime, stt.st_size)
+        except OSError:
+            return {}, 0
+        with self._pchat_lock:
+            if self._pchat[0] != sig:
+                by, last = {}, 0
+                for ln in players._read_text(self._pchat_path).splitlines():
+                    try:
+                        m = json.loads(ln)
+                    except ValueError:
+                        continue
+                    by.setdefault(m.get("map"), []).append(m)
+                    last = max(last, m.get("id") or 0)
+                self._pchat = (sig, by, last)
+            return self._pchat[1], self._pchat[2]
+
+    def _pchat_index(self):
+        by, _ = self._pchat_all()
+        return {mp: {"n": len(v), "last": v[-1]["id"]} for mp, v in by.items() if v}
+
+    def _api_planet_chat(self, uid, q):
+        try:
+            mp = int((q.get("map") or [""])[0])
+            after = int((q.get("after") or ["0"])[0])
+        except ValueError:
+            return {"ok": False, "error": "bad map"}
+        own, see = self._planet_access(uid, mp)
+        if not see:
+            return {"ok": False, "error": "нет доступа к этой планете"}
+        by, _ = self._pchat_all()
+        rows = [m for m in by.get(mp) or [] if m["id"] > after][-300:]
+        return {"ok": True, "map": mp, "name": self._obj_name(mp),
+                "messages": [{"id": m["id"], "ts": m["ts"], "nick": m["nick"], "me": m["uid"] == uid, "text": m["text"]}
+                             for m in rows]}
+
+    def _api_planet_chat_post(self, h, s):
+        b = self._body(h)
+        try:
+            mp = int(b.get("map"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad map"}
+        text = str(b.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "пустое сообщение"}
+        text = text[:PCHAT_MAX]
+        _, see = self._planet_access(s["uid"], mp)
+        if not see:
+            return {"ok": False, "error": "нет доступа к этой планете"}
+        now = time.time()
+        if now - self._pchat_last.get(s["uid"], 0) < PCHAT_EVERY:
+            return {"ok": False, "error": "слишком часто"}
+        self._pchat_last[s["uid"]] = now
+        _, last = self._pchat_all()
+        with self._pchat_lock:
+            m = {"id": max(last + 1, int(now * 1000)), "ts": int(now), "map": mp, "uid": s["uid"], "nick": s["nick"], "text": text}
+            os.makedirs(os.path.dirname(self._pchat_path), exist_ok=True)
+            with open(self._pchat_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(m, ensure_ascii=False) + "\n")
+        self._event(h, "planet_chat", s["nick"], uid=s["uid"], sid=h._sid, d=self._obj_name(mp))
+        return {"ok": True, "id": m["id"]}
 
     def _with_map_names(self, pos):
         names = self._map_names()
@@ -2904,6 +3088,19 @@ var EN_DICT={
   "Награда сезонного рейтинга":"Season rating reward",
   "Выдана роль в игре":"In-game role granted",
   "Снесён участок":"Plot removed",
+  "Доступ":"Access", "поделились: ":"shared by: ", "от ":"from ", "поделились другие игроки":"shared by other players",
+  "поделились объектами: ":"objects shared: ", "только я":"only me", "всем":"everyone", "друзьям":"friends", "игрокам: ":"players: ",
+  "Ники через запятую или с новой строки":"Nicknames separated by commas or new lines", "Только я":"Only me",
+  "Друзьям (список друзей в игре)":"Friends (in-game friends list)", "Всем игрокам":"All players", "Выбранным игрокам":"Selected players",
+  "Поделиться: ":"Share: ", "Кому показать эту планету на карте космоса (название и координаты). Они смогут писать в её комментарии.":"Who should see this planet on the space map (name and coordinates). They will be able to post in its comments.",
+  "Сохранить":"Save", "Комментарии к планете":"Planet comments", "Отправить":"Send",
+  "Сообщение… (Enter — отправить, Shift+Enter — новая строка)":"Message… (Enter — send, Shift+Enter — new line)",
+  "Комментариев пока нет — напишите первым.":"No comments yet — be the first.",
+  "Видят все, кому видна эта планета: у кого там участки, кто там бывал и с кем ею поделились.":"Visible to everyone who can see this planet: players with plots there, who have been there, or with whom it was shared.",
+  "делиться можно только своими планетами":"you can only share your own planets", "это не планета":"this is not a planet",
+  "нет таких игроков":"no such players", "укажите игроков":"specify players", "пустое сообщение":"empty message",
+  "нет доступа к этой планете":"no access to this planet", "слишком часто":"too often", "только просмотр":"view only",
+  "Планеты, спутники и астероиды, где у вас есть участки или куда вы садились, которыми с вами поделились, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы. «Доступ» — поделиться планетой с друзьями, всеми или выбранными игроками; 💬 — комментарии к планете.":"Planets, satellites and asteroids where you have plots, have landed or that were shared with you, and your ships. The star is in the centre; ships far from it are an arrow at the edge. “Access” — share a planet with friends, everyone or selected players; 💬 — planet comments.",
   "Посадка":"Landing", "Первая посадка":"First landing", "Взлёт в космос":"Takeoff to space",
   "Перелёт":"Transfer", "Перелёт (впервые)":"Transfer (first time)", "Посадки":"Landings",
   "бывали":"visited", "вы здесь бывали, участков нет":"you have been here, no plots",
@@ -4077,11 +4274,14 @@ function spaceCard(box){
     box.innerHTML="";
     if(!d.ok){ box.appendChild(errBox(d)); return; }
     if(!d.systems.length && !d.unknown.length){ box.appendChild(card(L("Космос"),[el("div",{class:"muted"},[L("Вы пока не садились на планеты, у вас нет участков и кораблей в космосе.")])])); return; }
-    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты, спутники и астероиды, где у вас есть участки или куда вы садились, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы.")])];
+    var kids=[el("div",{class:"muted small",style:"margin-bottom:8px"},[L("Планеты, спутники и астероиды, где у вас есть участки или куда вы садились, которыми с вами поделились, и ваши корабли. Звезда — в центре. Корабли далеко от звезды — стрелкой на краю схемы. «Доступ» — поделиться планетой с друзьями, всеми или выбранными игроками; 💬 — комментарии к планете.")])];
     d.systems.forEach(function(sy){
-      var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("Координаты"),L("От звезды")],sy.objects,function(o){
-        return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""), o.claims? String(o.claims) : el("span",{class:"muted"},[L("бывали")]),
-          Math.round(o.x)+", "+Math.round(o.y), num(o.dist)+L(" ед.")]; });
+      var tbl=table([L("Объект"),L("Тип"),L("Участков"),L("Координаты"),L("От звезды"),L("Доступ"),""],sy.objects,function(o){
+        return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""),
+          o.claims? String(o.claims) : o.own? el("span",{class:"muted"},[L("бывали")]) : el("span",{class:"muted"},[L("поделились: ")+(o.shared_by||[]).join(", ")]),
+          Math.round(o.x)+", "+Math.round(o.y), num(o.dist)+L(" ед."),
+          o.own? el("button",{style:"padding:2px 8px;white-space:nowrap",onclick:function(){ shareDlg(o); }},[shareLabel(o.my_share)]) : el("span",{class:"muted small"},["—"]),
+          pchatBtn(o)]; });
       kids.push(el("div",{id:"sys-"+sy.star,style:"margin-bottom:12px;scroll-margin-top:70px"},[
         el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система ")+(sy.star_name? sy.star_name+" (#"+sy.star+")" : "#"+sy.star)])]),
         el("div",{class:"row",style:"align-items:flex-start;gap:16px"},[el("div",{style:"flex:1;min-width:260px;max-width:620px"},spaceMap(sy)),
@@ -4134,6 +4334,64 @@ function panZoom(R, cx, cy, aspect){
   return {svg:svg, mk:mk, label:label, bar:bar, redraw:redraw, center:center, wasDrag:function(){ return moved; }};
 }
 function legendDot(css){ return el("span",{style:"display:inline-block;margin-right:6px;"+css}); }
+// ---- планеты: «поделиться» и комментарии (мессенджер)
+function overlay(){ var bg=el("div",{style:"position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;display:flex;align-items:center;justify-content:center;padding:16px"});
+  bg.addEventListener("click",function(e){ if(e.target===bg) bg.close(); }); bg.close=function(){ bg.remove(); if(bg.onclose) bg.onclose(); };
+  document.body.appendChild(bg); return bg; }
+function shareLabel(sh){ if(!sh) return "🔒 "+L("только я");
+  return sh.mode==="all"? "🌐 "+L("всем") : sh.mode==="friends"? "👥 "+L("друзьям") : "👤 "+L("игрокам: ")+(sh.to||[]).length; }
+function shareDlg(o){
+  var bg=overlay(), cur=(o.my_share&&o.my_share.mode)||"none";
+  var nicks=el("textarea",{rows:3,placeholder:L("Ники через запятую или с новой строки"),style:"width:100%;margin-top:6px"});
+  nicks.value=((o.my_share&&o.my_share.to)||[]).join(", ");
+  var msg=el("div",{class:"msg err",style:"display:none;margin-top:8px"});
+  var opts=[["none","🔒 "+L("Только я")],["friends","👥 "+L("Друзьям (список друзей в игре)")],["all","🌐 "+L("Всем игрокам")],["list","👤 "+L("Выбранным игрокам")]];
+  var radios=el("div",{},opts.map(function(x){
+    var r=el("input",{type:"radio",name:"shm",value:x[0]}); r.checked=x[0]===cur;
+    r.addEventListener("change",function(){ cur=x[0]; nicks.style.display=cur==="list"?"":"none"; });
+    return el("label",{style:"display:block;margin:4px 0;cursor:pointer"},[r," "+x[1]]); }));
+  nicks.style.display=cur==="list"?"":"none";
+  function save(){ msg.style.display="none";
+    var to=nicks.value.split(/[,\n]/).map(function(x){ return x.trim(); }).filter(Boolean);
+    api("/api/planet-share",{map:o.map,mode:cur,to:to}).then(function(){ bg.close(); render(); })
+      .catch(function(e){ msg.textContent=(e.error? L(e.error) : errText(e))+(e.unknown? ": "+e.unknown.join(", ") : ""); msg.style.display=""; }); }
+  bg.appendChild(el("div",{class:"card",style:"max-width:420px;width:100%"},[
+    el("h3",{},[L("Поделиться: ")+o.name]),
+    el("p",{class:"muted small"},[L("Кому показать эту планету на карте космоса (название и координаты). Они смогут писать в её комментарии.")]),
+    radios, nicks,
+    el("div",{class:"row",style:"margin-top:10px"},[el("button",{class:"pri",onclick:save},[L("Сохранить")]), el("button",{onclick:function(){ bg.close(); }},[L("Отмена")])]), msg]));
+}
+function pcSeen(mp,v){ var d={}; try{ d=JSON.parse(localStorage.getItem("swp_pcseen")||"{}")||{}; }catch(e){}
+  if(v===undefined) return d[mp]||0; d[mp]=v; try{ localStorage.setItem("swp_pcseen",JSON.stringify(d)); }catch(e){} }
+function pchatBtn(o){
+  var c=o.chat||{n:0,last:0}, nw=c.last>pcSeen(o.map);
+  return el("button",{style:"padding:2px 8px;white-space:nowrap"+(nw?";border-color:var(--acc)":""),title:L("Комментарии к планете"),
+    onclick:function(){ planetChat(o.map,o.name); }},["💬 "+(c.n||"")+(nw? " •" : "")]);
+}
+function planetChat(mp,name){
+  var bg=overlay(), box=el("div",{class:"chatlog",style:"height:min(55vh,460px)"}), last=0, tmr=null;
+  var inp=el("textarea",{rows:2,maxlength:500,placeholder:L("Сообщение… (Enter — отправить, Shift+Enter — новая строка)"),style:"flex:1;resize:vertical"});
+  var msg=el("div",{class:"msg err",style:"display:none;margin-top:6px"});
+  function add(ms){ var atB=box.scrollHeight-box.scrollTop-box.clientHeight<40;
+    ms.forEach(function(r){ box.appendChild(el("div",{class:"cmsg"+(r.me?" out":"")},[
+      el("div",{class:"cmeta"},[el("b",{},[r.nick]), el("span",{class:"muted"},["  "+new Date(r.ts*1000).toLocaleString()])]),
+      el("div",{class:"ctext",style:"white-space:pre-wrap"},[r.text])])); last=Math.max(last,r.id); });
+    if(ms.length){ pcSeen(mp,last); if(atB||ms.some(function(r){ return r.me; })) box.scrollTop=box.scrollHeight; } }
+  function poll(first){ api("/api/planet-chat?map="+mp+"&after="+last).then(function(d){
+      if(first && !d.messages.length) box.appendChild(el("div",{class:"muted small",style:"text-align:center;padding:10px"},[L("Комментариев пока нет — напишите первым.")]));
+      add(d.messages); }).catch(function(e){ msg.textContent=errText(e); msg.style.display=""; }); }
+  function send(){ var t=inp.value.trim(); if(!t) return; msg.style.display="none";
+    api("/api/planet-chat",{map:mp,text:t}).then(function(){ inp.value=""; poll(); })
+      .catch(function(e){ msg.textContent=e.error? L(e.error) : errText(e); msg.style.display=""; }); }
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
+  bg.appendChild(el("div",{class:"card",style:"max-width:560px;width:100%"},[
+    el("div",{class:"row",style:"justify-content:space-between;margin-bottom:6px"},[el("h3",{style:"margin:0"},["💬 "+name]), el("button",{onclick:function(){ bg.close(); }},["✕"])]),
+    box, el("div",{class:"row",style:"margin-top:8px;align-items:stretch"},[inp, el("button",{class:"pri",onclick:send},[L("Отправить")])]), msg,
+    el("div",{class:"muted small",style:"margin-top:6px"},[L("Видят все, кому видна эта планета: у кого там участки, кто там бывал и с кем ею поделились.")])]));
+  poll(true); tmr=setInterval(poll,8000);
+  bg.onclose=function(){ clearInterval(tmr); render(); };
+  inp.focus();
+}
 // Схема звёздной системы: мои планеты/спутники/астероиды и корабли.
 function spaceMap(sy){
   var R=1; sy.objects.forEach(function(o){ R=Math.max(R,o.dist); }); sy.ships.forEach(function(s){ if(!s.far) R=Math.max(R,Math.hypot(s.x,s.y)); });
@@ -4142,7 +4400,8 @@ function spaceMap(sy){
   mk(0,0,[svgEl("circle",{r:14,fill:"#f2c14e",opacity:"0.25"}), svgEl("circle",{r:7,fill:"#f2c14e"},[svgEl("title",{},[L("Звезда")+(sy.star_name? " "+sy.star_name : "")])]),
     sy.star_name? label(sy.star_name,0,26,"middle","var(--mut)") : null]);
   var own={}; sy.objects.forEach(function(o){ if(o.kind==="planet") own[o.name]=1; });
-  var hasClaim=sy.objects.some(function(o){ return o.claims; }), hasVisit=sy.objects.some(function(o){ return !o.claims; });
+  var hasClaim=sy.objects.some(function(o){ return o.claims; }), hasVisit=sy.objects.some(function(o){ return !o.claims && o.own; }),
+      hasShared=sy.objects.some(function(o){ return !o.own; });
   var parents={}; sy.objects.forEach(function(o){ if(o.parent && !own[o.parent.name]) parents[o.parent.name]=o.parent; });
   Object.keys(parents).forEach(function(nm){ var p=parents[nm];
     mk(p.x,p.y,[svgEl("circle",{r:7,fill:"var(--mut)",opacity:"0.55"},[svgEl("title",{},[p.name+" ("+L("планета")+") · "+Math.round(p.x)+", "+Math.round(p.y)])]),
@@ -4150,10 +4409,13 @@ function spaceMap(sy){
   sy.objects.forEach(function(o){
     var r=o.kind==="planet"?8:o.kind==="satellite"?6:5;
     // с участками — закрашенный кружок и число участков; где только бывали — кольцо без числа
-    var tip=svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+(o.claims? L("участков: ")+o.claims : L("вы здесь бывали, участков нет"))+" · "+Math.round(o.x)+", "+Math.round(o.y)]);
+    // поделились (сам не был) — оранжевое пунктирное кольцо с ником
+    var tip=svgEl("title",{},[o.name+" ("+L(o.kind_ru)+") · "+(o.claims? L("участков: ")+o.claims : o.own? L("вы здесь бывали, участков нет") : L("поделились: ")+(o.shared_by||[]).join(", "))+" · "+Math.round(o.x)+", "+Math.round(o.y)]);
     var dot=o.claims? svgEl("circle",{r:r,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},[tip])
-      : svgEl("circle",{r:r-1,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip]);
-    var txt=o.claims? label(o.name+" · "+o.claims,r+5,4) : label(o.name,r+5,4,"start","var(--mut)");
+      : o.own? svgEl("circle",{r:r-1,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip])
+      : svgEl("circle",{r:r-1,fill:"var(--panel2)",stroke:"var(--warn)","stroke-width":"2.5","stroke-dasharray":"3 2"},[tip]);
+    var txt=o.claims? label(o.name+" · "+o.claims,r+5,4) : o.own? label(o.name,r+5,4,"start","var(--mut)")
+      : label(o.name+" · "+L("от ")+(o.shared_by||[]).join(", "),r+5,4,"start","var(--warn)");
     if(!o.parent){ mk(o.x,o.y,[dot,txt]); return; }
     var dx=o.x-o.parent.x, dy=-(o.y-o.parent.y), dl=Math.hypot(dx,dy)||1, ux=dx/dl, uy=dy/dl;
     var line=svgEl("line",{x1:0,y1:0,stroke:"var(--mut)","stroke-width":"1",opacity:"0.6"}), inner=svgEl("g",{},[dot,txt]);
@@ -4173,6 +4435,7 @@ function spaceMap(sy){
     el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:#f2c14e"),L("звезда")]),
     hasClaim? el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои планеты (число — участков)")]) : null,
     hasVisit? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px solid var(--ok)"),L("где бывали (без участков)")]) : null,
+    hasShared? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px dashed var(--warn)"),L("поделились другие игроки")]) : null,
     sy.ships.length? el("span",{},[legendDot("width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid var(--s2)"),L("мои корабли")]) : null]);
   return [pz.svg,pz.bar,legend];
 }
@@ -4187,16 +4450,18 @@ function galaxyCard(box){
     var pz=panZoom(R,cx,cy,GA), mk=pz.mk, label=pz.label;
     d.mine.forEach(function(m){
       var nm=(m.name||("#"+m.star)), what=[m.claims? L("участков: ")+m.claims : "", m.visited? L("посещено объектов: ")+m.visited : "",
-        m.ships? L("кораблей: ")+m.ships : ""].filter(Boolean).join(" · ");
+        m.shared? L("поделились объектами: ")+m.shared : "", m.ships? L("кораблей: ")+m.ships : ""].filter(Boolean).join(" · ");
       var tip=svgEl("title",{},[nm+" · "+what]);
       var g=mk(m.x,m.y, m.claims? [svgEl("circle",{r:10,fill:"var(--s1)",opacity:"0.25"}), svgEl("circle",{r:5,fill:"var(--s1)",stroke:"var(--panel2)","stroke-width":"2"},[tip]), label(nm,9,4)]
-        : [svgEl("circle",{r:5,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip]), label(nm,9,4,"start","var(--mut)")]);
+        : m.visited? [svgEl("circle",{r:5,fill:"var(--panel2)",stroke:"var(--ok)","stroke-width":"2.5"},[tip]), label(nm,9,4,"start","var(--mut)")]
+        : [svgEl("circle",{r:5,fill:"var(--panel2)",stroke:"var(--warn)","stroke-width":"2.5","stroke-dasharray":"3 2"},[tip]), label(nm,9,4,"start","var(--warn)")]);
       g.style.cursor="pointer";
       g.addEventListener("click",function(){ if(pz.wasDrag()) return; var t=document.getElementById("sys-"+m.star); if(t) t.scrollIntoView({behavior:"smooth",block:"start"}); });
     });
     var legend=el("div",{class:"row small",style:"gap:14px;margin:4px 0 8px"},[
       el("span",{},[legendDot("width:10px;height:10px;border-radius:50%;background:var(--s1)"),L("мои системы (клик — к схеме)")]),
-      d.mine.some(function(m){ return !m.claims; })? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px solid var(--ok)"),L("где бывали (без участков)")]) : null]);
+      d.mine.some(function(m){ return !m.claims && m.visited; })? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px solid var(--ok)"),L("где бывали (без участков)")]) : null,
+      d.mine.some(function(m){ return !m.claims && !m.visited; })? el("span",{},[legendDot("width:7px;height:7px;border-radius:50%;border:2.5px dashed var(--warn)"),L("поделились другие игроки")]) : null]);
     var c=card(L("Галактика"),[el("div",{class:"muted small",style:"margin-bottom:6px"},[L("Карта открывается по мере того, как вы садитесь на планеты и ставите участки: здесь только системы, где вы бывали или где у вас есть участки.")]),
       pz.svg,pz.bar,legend]);
     box.insertBefore(c, box.firstChild);
