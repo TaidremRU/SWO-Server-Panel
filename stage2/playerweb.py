@@ -1805,6 +1805,41 @@ class PlayerWeb:
                 self._pchat = (sig, by, last)
             return self._pchat[1], self._pchat[2]
 
+    def pchat_admin(self, mp=None, q="", limit=500):
+        """Для админки: комментарии к планетам (новые сверху), фильтр по карте и нику/тексту."""
+        by, _ = self._pchat_all()
+        rows = [m for k, v in by.items() if mp is None or k == mp for m in v]
+        if q:
+            ql = q.lower()
+            rows = [m for m in rows if ql in (m.get("nick") or "").lower() or ql in (m.get("text") or "").lower()]
+        rows.sort(key=lambda m: -m["id"])
+        planets = sorted(({"map": k, "name": self._obj_name(k), "n": len(v)} for k, v in by.items() if v),
+                         key=lambda x: -x["n"])
+        return {"ok": True, "total": len(rows), "messages": rows[:limit], "planets": planets}
+
+    def pchat_delete(self, ids=(), uid=None, mp=None):
+        """Удалить сообщения по id или все сообщения автора (на одной планете или везде). -> удалённые."""
+        ids = {int(i) for i in ids or ()}
+        gone = []
+        with self._pchat_lock:
+            keep = []
+            for ln in players._read_text(self._pchat_path).splitlines():
+                try:
+                    m = json.loads(ln)
+                except ValueError:
+                    continue
+                if m.get("id") in ids or (uid is not None and m.get("uid") == uid and (mp is None or m.get("map") == mp)):
+                    gone.append(m)
+                else:
+                    keep.append(ln)
+            if gone:
+                tmp = self._pchat_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write("".join(x + "\n" for x in keep))
+                os.replace(tmp, self._pchat_path)
+                self._pchat = (None, {}, 0)
+        return gone
+
     def _pchat_index(self):
         by, _ = self._pchat_all()
         return {mp: {"n": len(v), "last": v[-1]["id"]} for mp, v in by.items() if v}
@@ -1820,7 +1855,7 @@ class PlayerWeb:
             return {"ok": False, "error": "нет доступа к этой планете"}
         by, _ = self._pchat_all()
         rows = [m for m in by.get(mp) or [] if m["id"] > after][-300:]
-        return {"ok": True, "map": mp, "name": self._obj_name(mp),
+        return {"ok": True, "map": mp, "name": self._obj_name(mp), "total": len(by.get(mp) or []),
                 "messages": [{"id": m["id"], "ts": m["ts"], "nick": m["nick"], "me": m["uid"] == uid, "text": m["text"]}
                              for m in rows]}
 
@@ -4280,7 +4315,8 @@ function spaceCard(box){
         return [o.name, L(o.kind_ru)+(o.parent? " "+L("планеты")+" "+o.parent.name : ""),
           o.claims? String(o.claims) : o.own? el("span",{class:"muted"},[L("бывали")]) : el("span",{class:"muted"},[L("поделились: ")+(o.shared_by||[]).join(", ")]),
           Math.round(o.x)+", "+Math.round(o.y), num(o.dist)+L(" ед."),
-          o.own? el("button",{style:"padding:2px 8px;white-space:nowrap",onclick:function(){ shareDlg(o); }},[shareLabel(o.my_share)]) : el("span",{class:"muted small"},["—"]),
+          o.own? (function(){ var b=el("button",{style:"padding:2px 8px;white-space:nowrap",onclick:function(){ shareDlg(o,function(){ b.textContent=shareLabel(o.my_share); }); }},[shareLabel(o.my_share)]); return b; })()
+            : el("span",{class:"muted small"},["—"]),
           pchatBtn(o)]; });
       kids.push(el("div",{id:"sys-"+sy.star,style:"margin-bottom:12px;scroll-margin-top:70px"},[
         el("div",{class:"small",style:"margin-bottom:6px"},[el("b",{},[L("Звёздная система ")+(sy.star_name? sy.star_name+" (#"+sy.star+")" : "#"+sy.star)])]),
@@ -4340,7 +4376,7 @@ function overlay(){ var bg=el("div",{style:"position:fixed;inset:0;background:rg
   document.body.appendChild(bg); return bg; }
 function shareLabel(sh){ if(!sh) return "🔒 "+L("только я");
   return sh.mode==="all"? "🌐 "+L("всем") : sh.mode==="friends"? "👥 "+L("друзьям") : "👤 "+L("игрокам: ")+(sh.to||[]).length; }
-function shareDlg(o){
+function shareDlg(o,done){
   var bg=overlay(), cur=(o.my_share&&o.my_share.mode)||"none";
   var nicks=el("textarea",{rows:3,placeholder:L("Ники через запятую или с новой строки"),style:"width:100%;margin-top:6px"});
   nicks.value=((o.my_share&&o.my_share.to)||[]).join(", ");
@@ -4353,7 +4389,8 @@ function shareDlg(o){
   nicks.style.display=cur==="list"?"":"none";
   function save(){ msg.style.display="none";
     var to=nicks.value.split(/[,\n]/).map(function(x){ return x.trim(); }).filter(Boolean);
-    api("/api/planet-share",{map:o.map,mode:cur,to:to}).then(function(){ bg.close(); render(); })
+    api("/api/planet-share",{map:o.map,mode:cur,to:to}).then(function(){   // космос не перечитываем — только кнопку
+        o.my_share= cur==="none"? null : {mode:cur,to:cur==="list"? to : []}; bg.close(); if(done) done(); })
       .catch(function(e){ msg.textContent=(e.error? L(e.error) : errText(e))+(e.unknown? ": "+e.unknown.join(", ") : ""); msg.style.display=""; }); }
   bg.appendChild(el("div",{class:"card",style:"max-width:420px;width:100%"},[
     el("h3",{},[L("Поделиться: ")+o.name]),
@@ -4364,12 +4401,14 @@ function shareDlg(o){
 function pcSeen(mp,v){ var d={}; try{ d=JSON.parse(localStorage.getItem("swp_pcseen")||"{}")||{}; }catch(e){}
   if(v===undefined) return d[mp]||0; d[mp]=v; try{ localStorage.setItem("swp_pcseen",JSON.stringify(d)); }catch(e){} }
 function pchatBtn(o){
-  var c=o.chat||{n:0,last:0}, nw=c.last>pcSeen(o.map);
-  return el("button",{style:"padding:2px 8px;white-space:nowrap"+(nw?";border-color:var(--acc)":""),title:L("Комментарии к планете"),
-    onclick:function(){ planetChat(o.map,o.name); }},["💬 "+(c.n||"")+(nw? " •" : "")]);
+  var b=el("button",{style:"padding:2px 8px;white-space:nowrap",title:L("Комментарии к планете")});
+  function draw(){ var c=o.chat||{n:0,last:0}, nw=c.last>pcSeen(o.map);
+    b.textContent="💬 "+(c.n||"")+(nw? " •" : ""); b.style.borderColor=nw? "var(--acc)" : ""; }
+  b.onclick=function(){ planetChat(o.map,o.name,function(n,last){ o.chat={n:n,last:last}; draw(); }); };   // без перечитывания космоса
+  draw(); return b;
 }
-function planetChat(mp,name){
-  var bg=overlay(), box=el("div",{class:"chatlog",style:"height:min(55vh,460px)"}), last=0, tmr=null;
+function planetChat(mp,name,onDone){
+  var bg=overlay(), box=el("div",{class:"chatlog",style:"height:min(55vh,460px)"}), last=0, tmr=null, cnt=0;
   var inp=el("textarea",{rows:2,maxlength:500,placeholder:L("Сообщение… (Enter — отправить, Shift+Enter — новая строка)"),style:"flex:1;resize:vertical"});
   var msg=el("div",{class:"msg err",style:"display:none;margin-top:6px"});
   function add(ms){ var atB=box.scrollHeight-box.scrollTop-box.clientHeight<40;
@@ -4379,7 +4418,7 @@ function planetChat(mp,name){
     if(ms.length){ pcSeen(mp,last); if(atB||ms.some(function(r){ return r.me; })) box.scrollTop=box.scrollHeight; } }
   function poll(first){ api("/api/planet-chat?map="+mp+"&after="+last).then(function(d){
       if(first && !d.messages.length) box.appendChild(el("div",{class:"muted small",style:"text-align:center;padding:10px"},[L("Комментариев пока нет — напишите первым.")]));
-      add(d.messages); }).catch(function(e){ msg.textContent=errText(e); msg.style.display=""; }); }
+      cnt=d.total||cnt; add(d.messages); }).catch(function(e){ msg.textContent=errText(e); msg.style.display=""; }); }
   function send(){ var t=inp.value.trim(); if(!t) return; msg.style.display="none";
     api("/api/planet-chat",{map:mp,text:t}).then(function(){ inp.value=""; poll(); })
       .catch(function(e){ msg.textContent=e.error? L(e.error) : errText(e); msg.style.display=""; }); }
@@ -4389,7 +4428,7 @@ function planetChat(mp,name){
     box, el("div",{class:"row",style:"margin-top:8px;align-items:stretch"},[inp, el("button",{class:"pri",onclick:send},[L("Отправить")])]), msg,
     el("div",{class:"muted small",style:"margin-top:6px"},[L("Видят все, кому видна эта планета: у кого там участки, кто там бывал и с кем ею поделились.")])]));
   poll(true); tmr=setInterval(poll,8000);
-  bg.onclose=function(){ clearInterval(tmr); render(); };
+  bg.onclose=function(){ clearInterval(tmr); if(onDone) onDone(cnt,last); };
   inp.focus();
 }
 // Схема звёздной системы: мои планеты/спутники/астероиды и корабли.

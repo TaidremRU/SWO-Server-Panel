@@ -1771,6 +1771,35 @@ class WebUI:
             d = {"ok": False, "error": str(e)}
         return self._json(h, d, 200 if d.get("ok") else 500)
 
+    def _api_planet_comments(self, h, method, q, sess):
+        """Модерация комментариев к планетам (панель игроков). GET ?map=&q= — лента;
+        POST {ids:[...]} или {uid, map?} — удалить (модератор и выше), в аудит — текст удалённого."""
+        pw = getattr(self, "pweb", None)
+        if pw is None:
+            return self._json(h, {"ok": False, "error": "панель игроков выключена"}, 503)
+        if method == "POST":
+            if ROLE_LEVEL.get(sess.get("role"), 0) < 2:
+                return self._json(h, {"error": "forbidden", "role": sess.get("role")}, 403)
+            b = self._body(h)
+            try:
+                ids = [int(i) for i in b.get("ids") or []][:1000]
+                uid = int(b["uid"]) if b.get("uid") is not None else None
+                mp = int(b["map"]) if b.get("map") is not None else None
+            except (TypeError, ValueError):
+                return self._json(h, {"error": "bad"}, 400)
+            if not ids and uid is None:
+                return self._json(h, {"error": "bad"}, 400)
+            gone = pw.pchat_delete(ids, uid, mp)
+            for m in gone:
+                self.audit(_cip(h), sess["user"], "УДАЛЁН комментарий к планете %s от %s (#%s): %s"
+                           % (pw._obj_name(m.get("map")), m.get("nick"), m.get("uid"), (m.get("text") or "")[:200]))
+            return self._json(h, {"ok": True, "deleted": len(gone)})
+        try:
+            mp = int((q.get("map") or [""])[0])
+        except ValueError:
+            mp = None
+        return self._json(h, pw.pchat_admin(mp, (q.get("q") or [""])[0].strip()))
+
     def _api_visits(self, h, method, q, sess):
         """Посадки/перелёты: ?uid= — игрока (+ посещённые карты), без uid — по серверу."""
         uid = (q.get("uid") or [None])[0]
@@ -3016,7 +3045,10 @@ var T = {
   pf_title:"Поиск предмета у игроков", pf_ph:"id или имя предмета", pf_go:"искать",
   pf_wait:"сканирую инвентари игроков…", pf_none:"ни у кого нет", pf_players:"игроков",
   pf_stash:"склад", pf_carry:"при себе", pf_total:"всего", pf_matched:"совпадения по имени",
-  sc_server:"Чат сервера", sc_events:"События", sc_private:"Приваты", sc_all:"все каналы",
+  sc_server:"Чат сервера", sc_events:"События", sc_private:"Приваты", sc_all:"все каналы", sc_planets:"Комментарии к планетам",
+  pc_all:"все планеты", pc_total:"сообщений", pc_none:"комментариев нет", pc_deleted:"удалено", pc_del:"удалить сообщение",
+  pc_del_q:"Удалить это сообщение?", pc_del_all:"все от автора", pc_del_all_t:"удалить все комментарии этого игрока на всех планетах",
+  pc_del_all_q:"Удалить ВСЕ комментарии игрока", pc_note:"Комментарии игроков к планетам (панель игроков, вкладка «Космос»). Удаление — модератор и выше, пишется в аудит вместе с текстом.",
   sc_search:"поиск", ev_join:"вошёл", ev_leave:"вышел", ev_register:"регистрация",
   ev_death:"смерть", ev_land:"снос земли", ev_kind:"тип", sc_priv_note:"Все приватные сообщения сервера — под паролем панели.",
   refresh:"Обновить", live:"Живой опрос", auto:"Авто",
@@ -3290,7 +3322,10 @@ var T = {
   pf_title:"Find an item on players", pf_ph:"item id or name", pf_go:"search",
   pf_wait:"scanning player inventories…", pf_none:"nobody has it", pf_players:"players",
   pf_stash:"stash", pf_carry:"carried", pf_total:"total", pf_matched:"name matches",
-  sc_server:"Server chat", sc_events:"Events", sc_private:"DMs", sc_all:"all channels",
+  sc_server:"Server chat", sc_events:"Events", sc_private:"DMs", sc_all:"all channels", sc_planets:"Planet comments",
+  pc_all:"all planets", pc_total:"messages", pc_none:"no comments", pc_deleted:"deleted", pc_del:"delete message",
+  pc_del_q:"Delete this message?", pc_del_all:"all by author", pc_del_all_t:"delete all comments by this player on all planets",
+  pc_del_all_q:"Delete ALL comments by player", pc_note:"Player comments on planets (player panel, Space tab). Deleting — moderator and above, logged to audit with the text.",
   sc_search:"search", ev_join:"joined", ev_leave:"left", ev_register:"registered",
   ev_death:"death", ev_land:"land removed", ev_kind:"type", sc_priv_note:"All server private messages — behind the panel password.",
   refresh:"Refresh", live:"Live poll", auto:"Auto",
@@ -6698,7 +6733,7 @@ var chTimer=null;
 function tabChat(v){
   var sub=localStorage.getItem("sw_chatsub")||"server";
   var bar=el("nav",{style:"padding:0;border:0;background:transparent;margin-bottom:10px"},
-    [["server","sc_server"],["events","sc_events"],["private","sc_private"]].map(function(x){
+    [["server","sc_server"],["events","sc_events"],["private","sc_private"],["planets","sc_planets"]].map(function(x){
       return el("button",{class:sub===x[0]?"active":"",onclick:function(){ localStorage.setItem("sw_chatsub",x[0]); render(); }},[t(x[1])]);
     }));
   var body=el("div",{id:"chbody"},[]);
@@ -6706,7 +6741,44 @@ function tabChat(v){
   clearInterval(chTimer);
   if(sub==="server") chServer(body);
   else if(sub==="events") chEvents(body);
+  else if(sub==="planets") chPlanets(body);
   else chPrivate(body);
+}
+// комментарии к планетам из панели игроков: лента + удаление (модератор и выше)
+function chPlanets(body){
+  body.innerHTML="";
+  var psel=el("select",{},[el("option",{value:""},["— "+t("pc_all")+" —"])]), qq=el("input",{placeholder:t("sc_search"),style:"padding:5px 8px"});
+  var info=el("span",{class:"muted small"}), out=el("div",{},["…"]), canDel=S.role!=="viewer", first=true, note=el("div",{class:"small",style:"margin-bottom:6px"});
+  body.appendChild(el("div",{class:"row",style:"margin-bottom:8px"},[psel, qq, el("button",{class:"small",onclick:pull},[t("refresh")]), info]));
+  body.appendChild(el("div",{class:"muted small",style:"margin-bottom:6px"},[t("pc_note")]));
+  body.appendChild(note); body.appendChild(out);
+  function del(payload, what){
+    if(!window.confirm(what)) return;
+    api("/api/planet-comments",{body:payload}).then(function(d){ note.className="msg ok"; note.textContent=t("pc_deleted")+": "+(d.deleted||0); pull(); })
+      .catch(function(e){ note.className="msg err"; note.textContent=(e&&(e.detail||e.error))||t("err_net"); }); }
+  function pull(){
+    api("/api/planet-comments?map="+psel.value+"&q="+encodeURIComponent(qq.value.trim())).then(function(j){
+      out.innerHTML="";
+      if(!j.ok){ out.appendChild(el("div",{class:"msg err"},[j.error||"error"])); return; }
+      if(first){ first=false; j.planets.forEach(function(p){ psel.appendChild(el("option",{value:p.map},[p.name+" #"+p.map+" · "+p.n])); }); }
+      info.textContent=t("pc_total")+": "+j.total;
+      if(!j.messages.length){ out.appendChild(el("div",{class:"muted"},[t("pc_none")])); return; }
+      var box=el("div",{style:"max-height:65vh;overflow:auto"},[]);
+      j.messages.forEach(function(m){
+        box.appendChild(el("div",{class:"row",style:"align-items:flex-start;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)"},[
+          el("div",{style:"flex:1;min-width:0"},[
+            el("div",{class:"small"},[el("span",{class:"lg-t"},[new Date(m.ts*1000).toLocaleString()+"  "]),
+              el("a",{class:"pl-link",onclick:function(){ openMapdt(+m.map); }},[mapName(m.map)]), " · ", plLink(m.uid, m.nick)]),
+            el("div",{style:"white-space:pre-wrap;word-break:break-word"},[m.text])]),
+          canDel? el("button",{class:"small danger",title:t("pc_del"),onclick:function(){ del({ids:[m.id]}, t("pc_del_q")+"\n\n"+m.nick+": "+m.text.slice(0,200)); }},["🗑"]) : null,
+          canDel? el("button",{class:"small",title:t("pc_del_all_t"),onclick:function(){ del({uid:m.uid}, t("pc_del_all_q")+" "+m.nick+"?"); }},[t("pc_del_all")]) : null]));
+      });
+      out.appendChild(box);
+    }).catch(function(){ out.innerHTML=""; out.appendChild(el("div",{class:"msg err"},[t("err_net")])); });
+  }
+  psel.onchange=pull; qq.oninput=function(){ clearTimeout(qq._t); qq._t=setTimeout(pull,400); };
+  pull();
+  chTimer=setInterval(function(){ if(!document.hidden && S.tab==="chat") pull(); },15000);
 }
 function chMsgLine(m){
   return el("div",{class:"mono small"},[
