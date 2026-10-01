@@ -4013,8 +4013,9 @@ function tabMap(m){
     // «сцены» размером с диагональ, чтобы повёрнутые углы не обрезались
     var img=el("img",{alt:"",style:"display:block;image-rendering:pixelated;max-width:none;width:100%;height:100%"});
     var layer=el("div",{style:"position:absolute;left:50%;top:50%;transform-origin:50% 50%"},[img]);
-    var stage=el("div",{style:"position:relative"},[layer]);
-    var view=el("div",{style:"overflow:auto;height:70vh;border:1px solid var(--line);border-radius:8px;background:rgb(22,25,31)"},[stage]);
+    var stage=el("div",{style:"position:relative;margin:auto;flex:none"},[layer]);
+    // flex + margin:auto: сцена меньше окна — по центру, больше — обычная прокрутка без обрезки краёв
+    var view=el("div",{style:"position:relative;display:flex;overflow:auto;height:70vh;border:1px solid var(--line);border-radius:8px;background:rgb(22,25,31)"},[stage]);
     var tlist=el("div"), zl=el("span",{class:"muted small"}), rl=el("span",{class:"muted small"}), st=el("span",{class:"muted small"});
     function dims(){ return {W:img.naturalWidth*zoom, H:img.naturalHeight*zoom}; }
     function place(){
@@ -4039,10 +4040,12 @@ function tabMap(m){
     function fromStage(sx,sy){ var k=sc*zoom, z=dims(), diag=stage.offsetWidth, a=-rot*Math.PI/180, c=Math.cos(a), s=Math.sin(a),
         dx=sx-diag/2, dy=sy-diag/2, px=dx*c-dy*s, py=dx*s+dy*c;
       return {x:(px+z.W/2)/k, y:cur.h-(py+z.H/2)/k}; }
-    function focus(x,y){ var p=toStage(x,y); view.scrollLeft=p.x-view.clientWidth/2; view.scrollTop=p.y-view.clientHeight/2; }
-    function center(){ return fromStage(view.scrollLeft+view.clientWidth/2, view.scrollTop+view.clientHeight/2); }
+    // координаты прокрутки окна -> сцены: сцена может стоять с отступом (центрирование)
+    function focus(x,y){ var p=toStage(x,y); view.scrollLeft=stage.offsetLeft+p.x-view.clientWidth/2; view.scrollTop=stage.offsetTop+p.y-view.clientHeight/2; }
+    function center(){ return fromStage(view.scrollLeft+view.clientWidth/2-stage.offsetLeft, view.scrollTop+view.clientHeight/2-stage.offsetTop); }
     function focusMine(){ if(d.me.map===cur.map && d.me.x!=null) return focus(d.me.x,d.me.y);
-      var t=cur.territories; if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); focus(cx/t.length,cy/t.length); } }
+      var t=cur.territories; if(t.length){ var cx=0,cy=0; t.forEach(function(p){ cx+=p.x*8+4; cy+=p.y*8+4; }); return focus(cx/t.length,cy/t.length); }
+      focus(cur.w/2,cur.h/2); }      // ни меня, ни участков (только бывал) — центр карты
     function keep(fn){ var c=center(); fn(); place(); focus(c.x,c.y); }
     function show(){
       cur=d.maps[+sel.value]; st.textContent=L("загрузка карты…"); img.removeAttribute("src");
@@ -4072,8 +4075,8 @@ function tabMap(m){
       if(!img.naturalWidth) return; e.preventDefault();
       var nz=Math.max(1,Math.min(16,zoom+(e.deltaY<0?1:-1))); if(nz===zoom) return;
       var r=view.getBoundingClientRect(), ox=e.clientX-r.left, oy=e.clientY-r.top;
-      var c=fromStage(view.scrollLeft+ox, view.scrollTop+oy);   // клетка под курсором остаётся под курсором
-      zoom=nz; place(); var p=toStage(c.x,c.y); view.scrollLeft=p.x-ox; view.scrollTop=p.y-oy;
+      var c=fromStage(view.scrollLeft+ox-stage.offsetLeft, view.scrollTop+oy-stage.offsetTop);   // клетка под курсором остаётся под курсором
+      zoom=nz; place(); var p=toStage(c.x,c.y); view.scrollLeft=stage.offsetLeft+p.x-ox; view.scrollTop=stage.offsetTop+p.y-oy;
     },{passive:false});
     sel.addEventListener("change",show);
     box.appendChild(card(L("Мои участки на карте"),[el("div",{class:"row",style:"margin-bottom:8px"},[sel,
