@@ -132,7 +132,7 @@ _WORDS_EN = {
     "нет доступа к этой карте": "no access to this map", "нет такого канала": "no such channel",
     "карта не нарисовалась": "map failed to render", "нет атласа иконок": "no icon atlas",
 }
-_KIND_EN = {"планета": "planet", "спутник": "satellite", "астероид": "asteroid"}
+_KIND_EN = {"планета": "planet", "спутник": "satellite", "астероид": "asteroid", "станция": "station"}
 _TR_SKIP = {"text", "nick", "to", "who", "owner", "clan", "clan_name", "ts", "first_seen", "where_raw"}
 _TR_EXACT = None
 
@@ -155,7 +155,7 @@ def _tr_exact():
     return _TR_EXACT
 
 
-_RX_KIND = re.compile(r"^(.*) \((планета|спутник|астероид)\)$")
+_RX_KIND = re.compile(r"^(.*) \((планета|спутник|астероид|станция)\)$")
 _RX_MAP = re.compile(r"^карта (\d+)$")
 _RX_SHOP = re.compile(r"^магазин · (.+) · (-?\d+), (-?\d+)$")
 _RX_TECH = re.compile(r"^([A-Za-z]+\d*) — (.+)$")
@@ -1503,27 +1503,26 @@ class PlayerWeb:
     _KIND_RU = {"planet": "планета", "satellite": "спутник", "asteroid": "астероид"}
 
     def _map_names(self):
-        """{id карты: название} — id карты мира == id объекта звёздной системы
-        (Data\\world\\star1.json), 0 — космос."""
+        """{id карты: «Название (планета|спутник|астероид|станция)»} по всем звёздным системам
+        (индекс космоса) и станциям; 0 — космос."""
         def build():
-            so = self._star_objects(1)
-            names = {o["id"]: "%s (%s)" % (o["name"], self._KIND_RU[o["kind"]]) if o.get("kind") in self._KIND_RU
-                     else o["name"] for o in so.get("objects") or [] if o.get("name")}
-            return {"ok": bool(so.get("ok")), "names": names}
+            labels = players.map_labels(self.cfg, self._sidx_path)
+            names = {mp: "%s (%s)" % (v["name"], v["kind"]) if v.get("kind") in self._KIND_LABELS else v["name"]
+                     for mp, v in labels.items() if mp and v.get("name")}
+            # объекты системы 1 — и без файла карты (map_labels называет только существующие map*.dt)
+            for o in self._star_objects(1).get("objects") or []:
+                if o.get("name"):
+                    names.setdefault(o["id"], "%s (%s)" % (o["name"], self._KIND_RU[o["kind"]])
+                                     if o.get("kind") in self._KIND_RU else o["name"])
+            return {"ok": bool(names), "names": names}
         return self._cached("map_names", 600, build, swr=3600).get("names") or {}
 
+    _KIND_LABELS = ("планета", "спутник", "астероид", "станция")
+
     def _obj_name(self, mp):
-        """Название карты по id: система 1 — из общего словаря, остальные — через индекс космоса."""
         if mp == 0:
             return "Космос"
-        nm = self._map_names().get(mp)
-        if nm:
-            return nm
-        st = self._star_of(mp) if mp else None
-        o = next((x for x in self._star_objects(st).get("objects") or [] if x["id"] == mp), None) if st is not None else None
-        if o and o.get("name"):
-            return "%s (%s)" % (o["name"], self._KIND_RU[o["kind"]]) if o.get("kind") in self._KIND_RU else o["name"]
-        return "карта %s" % mp
+        return self._map_names().get(mp) or "карта %s" % mp
 
     def _visited(self, uid, raw=None):
         """Карты, где игрок бывал (журнал посадок панели) + где он сейчас."""

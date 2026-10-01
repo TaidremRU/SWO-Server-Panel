@@ -5673,6 +5673,22 @@ def map_labels(cfg, index_path=None):
         if o:
             out[mid] = {"name": o["name"], "kind": _SPACE_KIND_RU.get(o["kind"], o["kind"]), "star": st,
                         "star_name": rng[i][3] or ("#%s" % st)}
+    # станции игроков: у каждой своя карта map<id>.dt, в звёздных системах (star*.json) их нет
+    sd = os.path.join(wd, "Data", "stations")
+    try:
+        files = os.listdir(sd)
+    except OSError:
+        files = []
+    have = set(ids)
+    for f in files:
+        m = re.match(r"station(\d+)\.json$", f)
+        if not m or int(m.group(1)) not in have or int(m.group(1)) in out:
+            continue
+        stn = _read_json(os.path.join(sd, f)) or {}
+        st = stn.get("starId") or 1
+        sname = next((r[3] for r in rng if r[2] == st), None)
+        out[int(m.group(1))] = {"name": stn.get("name") or "#%s" % m.group(1), "kind": "станция", "star": st,
+                                "star_name": sname or ("#%s" % st)}
     return out
 
 
